@@ -1,0 +1,1 @@
+Solution proposal for Resend templates for contributor nudges with unsubscribe
