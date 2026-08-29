@@ -348,6 +348,26 @@ End-to-end/browser coverage (e.g. Playwright) for the event timeline panel and a
 
 ---
 
+### Transactional outbox for Soroban write-through (#199)
+
+To ensure reliable write-through to Soroban without losing registrations during chain or RPC outages:
+
+1. **Transactional Outbox (`SorobanOutbox`):** During registration (`POST /api/register`), a `SorobanOutbox` record (`status: PENDING`, `action: "register"`) is inserted into PostgreSQL inside the same transaction (`enqueueSorobanOutbox()`) as `prisma.registration.upsert()`.
+2. **Outbox Worker (`processSorobanOutbox()`):** A background worker (`src/lib/soroban-outbox-worker.ts`) periodically fetches pending outbox items and invokes `mirrorRegistrationToSoroban()`.
+3. **At-Least-Once Delivery & Audit Trail:** On success, outbox records transition to `COMPLETED`. On failures, outbox records retry with exponential backoff up to `maxAttempts` (default 5). If `maxAttempts` is exhausted, the status is set to `FAILED` and an audit log (`soroban_outbox_exhausted`) is recorded.
+
+---
+
+### Soroban Event Cursor & Backfill (#198)
+
+To support historical event timeline syncing without missing past ledger events:
+
+1. **Persistent Event Cursor (`SorobanEventCursor`):** Stores event paging tokens and cursors per `maintainerOrgId` + `eventType` in `prisma.sorobanEventCursor`.
+2. **Background Backfill (`backfillSorobanEvents()`):** `src/lib/soroban-events-backfill.ts` processes historical events idempotently and persists the latest paging token.
+3. **Non-Blocking:** Backfills run asynchronously in background workers without blocking HTTP requests.
+
+---
+
 ## Related docs
 
 - [Project structure](./PROJECT_STRUCTURE.md)

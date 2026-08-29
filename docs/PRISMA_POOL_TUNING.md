@@ -177,9 +177,26 @@ DEBUG=* npm run dev
 1. Prisma automatically closes idle connections; no manual action needed
 2. For persistent issues, reduce `connection_limit` or use `idle_in_transaction_session_timeout`
 
+## Slow Query Logging & Parameter Redaction (#205)
+
+TrustBridge includes a Prisma middleware for automatic slow-query detection and logging.
+
+### Configuration
+Set `SLOW_QUERY_THRESHOLD_MS` in your environment variables to specify the threshold (in milliseconds) above which queries are logged as warnings:
+
+```bash
+SLOW_QUERY_THRESHOLD_MS=200
+```
+
+### Features
+- **Automatic Logging**: Intercepts all database queries via Prisma `$use` middleware and logs queries exceeding `SLOW_QUERY_THRESHOLD_MS`.
+- **Parameter Redaction**: Automatically redacts sensitive fields before logging (Stellar `G...` addresses, `accessToken`, `token`, `password`, `codeHash`) to prevent PII/secret leaks in application logs.
+
+---
+
 ## Related Files
 
 - `prisma/schema.prisma` — Prisma schema (models, indexes)
 - `src/lib/registrations.ts` — Batch export/recheck queries
 - `src/lib/csv.ts` — CSV generation helpers
-- `src/lib/prisma.ts` — Prisma client instantiation
+- `src/lib/prisma.ts` — Prisma client instantiation with slow query middleware

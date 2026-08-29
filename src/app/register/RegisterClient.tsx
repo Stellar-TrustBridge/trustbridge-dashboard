@@ -23,6 +23,7 @@ import {
 } from "@/components/ui/card";
 import { isValidGAddress } from "@/lib/stellar-address";
 import { buildWalletProofInfo } from "@/lib/registration-insights";
+import { mapRegisterError, type RegisterFailure } from "@/lib/register-error";
 import type { HorizonDebugInfo, WalletProofInfo } from "@/types";
 
 interface RegistrationRecord {
