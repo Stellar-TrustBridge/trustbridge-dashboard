@@ -297,6 +297,23 @@ For preview deployments, set `NEXTAUTH_URL` to the preview URL or use Vercel's a
 
 ---
 
+## Rate-Limit Headers
+
+Public API endpoints (`/api/check`, `/api/actions/lookup`, `/api/stats`) emit standard rate-limit response headers on every response:
+
+| Header | Description |
+|--------|-------------|
+| `RateLimit-Limit` | Max requests allowed per window (default: 10 for `/api/check`, 60 for lookup, 120 for stats) |
+| `RateLimit-Remaining` | Requests remaining in the current window |
+| `RateLimit-Reset` | Seconds until the window resets |
+| `Retry-After` | Seconds to wait before retrying (only on 429 responses) |
+
+These follow the [IETF RateLimit Headers draft](https://datatracker.ietf.org/doc/draft-ietf-httpapi-ratelimit-headers-07/) standard.
+
+**Multi-instance note:** The rate limiter uses an in-memory sliding window. When running behind a load balancer with N instances, the effective limit is approximately `N × maxRequests`. For strict per-client limits, consider a shared store (Redis, etc.) — but the current approach is sufficient for abuse prevention.
+
+---
+
 ## Security checklist
 
 - [ ] Never commit `.env.local` or secrets

@@ -82,6 +82,35 @@ export function extractClientIp(request: NextRequest): string {
 }
 
 /**
+ * Build standard RateLimit-* response headers (draft-ietf-httpapi-ratelimit-headers-07).
+ *
+ * - `RateLimit-Limit` — max requests per window
+ * - `RateLimit-Remaining` — requests left in current window
+ * - `RateLimit-Reset` — seconds until the window resets
+ * - `Retry-After` — seconds to wait (only set when `retryAfter > 0`)
+ *
+ * Multi-instance note: in-memory counters are per-process. When running
+ * behind a load balancer with N instances, the effective limit is roughly
+ * N × maxRequests. This is documented in ENVIRONMENT.md.
+ */
+export function buildRateLimitHeaders(
+  result: { allowed: boolean; retryAfter: number; remaining: number },
+  maxRequests: number
+): Record<string, string> {
+  const headers: Record<string, string> = {
+    "RateLimit-Limit": String(maxRequests),
+    "RateLimit-Remaining": String(Math.max(0, result.remaining)),
+    "RateLimit-Reset": String(Math.max(0, result.retryAfter)),
+  };
+
+  if (!result.allowed && result.retryAfter > 0) {
+    headers["Retry-After"] = String(result.retryAfter);
+  }
+
+  return headers;
+}
+
+/**
  * Reset rate limit state for a given identifier or all identifiers.
  * Primarily for testing.
  */

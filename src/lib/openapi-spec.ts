@@ -225,6 +225,52 @@ export function generateOpenAPISpec(
           },
         },
       },
+      "/api/actions/lookup": {
+        get: {
+          operationId: "lookupAction",
+          summary: "Public action lookup for a Stellar address",
+          tags: ["Actions"],
+          parameters: [
+            {
+              name: "address",
+              in: "query",
+              required: true,
+              schema: { type: "string" },
+              description: "Stellar public key (G-address)",
+            },
+            {
+              name: "asset_code",
+              in: "query",
+              schema: { type: "string", default: "USDC" },
+              description: "Asset code for trustline check",
+            },
+            {
+              name: "asset_issuer",
+              in: "query",
+              schema: { type: "string" },
+              description: "Asset issuer public key",
+            },
+          ],
+          responses: {
+            "200": {
+              description: "Action lookup result with next-action hint",
+              content: {
+                "application/json": {
+                  schema: {
+                    $ref: "#/components/schemas/ActionLookupResult",
+                  },
+                },
+              },
+            },
+            "400": {
+              description: "Invalid or missing address parameter",
+            },
+            "429": {
+              description: "Rate limit exceeded",
+            },
+          },
+        },
+      },
       "/api/webhooks/trustbridge-action": {
         post: {
           operationId: "trustbridgeActionWebhook",
@@ -321,6 +367,26 @@ export function generateOpenAPISpec(
             total: { type: "integer" },
             ready: { type: "integer" },
             lowReserve: { type: "integer" },
+          },
+        },
+        ActionLookupResult: {
+          type: "object",
+          properties: {
+            address: { type: "string" },
+            funded: { type: "boolean" },
+            trustline: { type: "boolean" },
+            trustline_authorized: { type: "boolean" },
+            xlm_balance: { type: "string" },
+            spendable_xlm_balance: { type: "string" },
+            readiness: {
+              type: "string",
+              enum: ["ready", "low_reserve", "not_ready"],
+            },
+            nextAction: {
+              type: "string",
+              enum: ["fund_account", "add_trustline", "increase_reserve", "none"],
+              description: "Recommended next action for the contributor",
+            },
           },
         },
         WebhookPayload: {
