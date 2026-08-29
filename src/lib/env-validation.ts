@@ -3,14 +3,75 @@ import "server-only";
 import { z } from "zod";
 
 /**
+ * Database connection pool configuration parsed from DATABASE_URL.
+ */
+export interface DatabasePoolConfig {
+  connectionLimit?: number;
+  poolTimeout?: number;
+  idleInTransactionSessionTimeout?: number;
+  pgbouncer?: boolean;
+  schema?: string;
+}
+
+/**
+ * Parses and validates PostgreSQL connection pool and PgBouncer parameters from DATABASE_URL.
+ */
+export function parseDatabasePoolConfig(urlStr: string): DatabasePoolConfig {
+  try {
+    const parsedUrl = new URL(urlStr);
+    const params = parsedUrl.searchParams;
+
+    const config: DatabasePoolConfig = {};
+
+    const connectionLimitStr = params.get("connection_limit");
+    if (connectionLimitStr !== null) {
+      const parsed = parseInt(connectionLimitStr, 10);
+      if (isNaN(parsed) || parsed < 1) {
+        throw new Error("connection_limit must be a positive integer");
+      }
+      config.connectionLimit = parsed;
+    }
+
+    const poolTimeoutStr = params.get("pool_timeout");
+    if (poolTimeoutStr !== null) {
+      const parsed = parseInt(poolTimeoutStr, 10);
+      if (isNaN(parsed) || parsed < 0) {
+        throw new Error("pool_timeout must be a non-negative integer");
+      }
+      config.poolTimeout = parsed;
+    }
+
+    const idleTimeoutStr = params.get("idle_in_transaction_session_timeout");
+    if (idleTimeoutStr !== null) {
+      const parsed = parseInt(idleTimeoutStr, 10);
+      if (isNaN(parsed) || parsed < 0) {
+        throw new Error("idle_in_transaction_session_timeout must be a non-negative integer");
+      }
+      config.idleInTransactionSessionTimeout = parsed;
+    }
+
+    const pgbouncerStr = params.get("pgbouncer");
+    if (pgbouncerStr !== null) {
+      config.pgbouncer = pgbouncerStr.toLowerCase() === "true" || pgbouncerStr === "1";
+    }
+
+    const schemaStr = params.get("schema");
+    if (schemaStr !== null) {
+      config.schema = schemaStr;
+    }
+
+    return config;
+  } catch (err) {
+    if (err instanceof Error && err.message.includes("must be")) {
+      throw err;
+    }
+    throw new Error(`Invalid DATABASE_URL for pool configuration: ${urlStr}`);
+  }
+}
+
+/**
  * Environment variable schema for the TrustBridge Dashboard.
  * Validates all required and optional configuration at application boot.
- *
- * This schema is used to:
- * - Ensure required variables are present and valid
- * - Cast/parse numeric and boolean values
- * - Detect configuration mismatches (e.g., mainnet Horizon + testnet Soroban)
- * - Fail fast at startup rather than at runtime
  */
 const envSchema = z.object({
   // Required: authentication
@@ -25,7 +86,20 @@ const envSchema = z.object({
   GITHUB_MAINTAINER_TEAM: z.string().optional(),
 
   // Required: database
-  DATABASE_URL: z.string().url("DATABASE_URL must be a valid URL"),
+  DATABASE_URL: z
+    .string()
+    .url("DATABASE_URL must be a valid URL")
+    .refine((url) => {
+      try {
+        parseDatabasePoolConfig(url);
+        return true;
+      } catch {
+        return false;
+      }
+    }, "DATABASE_URL contains invalid connection pool parameters"),
+
+  // Optional: direct database URL for migrations bypassing PgBouncer
+  DIRECT_URL: z.string().url("DIRECT_URL must be a valid URL").optional(),
 
   // Horizon/Stellar configuration
   NEXT_PUBLIC_HORIZON_URL: z
@@ -33,8 +107,6 @@ const envSchema = z.object({
     .url("NEXT_PUBLIC_HORIZON_URL must be a valid URL")
     .default("https://horizon.stellar.org"),
   NEXT_PUBLIC_DEFAULT_ASSET_CODE: z.string().default("USDC"),
-  // Circle USDC on Stellar mainnet — must match trustbridge-action's
-  // `asset_issuer` default. See ACTION_DEFAULTS in src/lib/constants.ts.
   NEXT_PUBLIC_DEFAULT_ASSET_ISSUER: z.string().default(
     "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"
   ),
@@ -42,7 +114,6 @@ const envSchema = z.object({
     .string()
     .transform((v) => parseFloat(v))
     .pipe(z.number().nonnegative())
-    // Matches trustbridge-action's `min_xlm_reserve` default.
     .default("1.5"),
   NEXT_PUBLIC_BASE_RESERVE_XLM: z
     .string()
@@ -111,12 +182,6 @@ export type Environment = z.infer<typeof envSchema>;
 
 /**
  * Validates environment variables at application boot.
- * Throws if validation fails, preventing server startup.
- *
- * Usage:
- *   import { validateEnv } from "@/lib/env-validation";
- *   const env = validateEnv();
- *   // Now env is fully typed and validated
  */
 export function validateEnv(): Environment {
   const result = envSchema.safeParse(process.env);
@@ -136,11 +201,6 @@ export function validateEnv(): Environment {
   return result.data;
 }
 
-/**
- * Returns the validated environment object.
- * This function should be called once at application startup.
- * Later calls return the cached result.
- */
 let cachedEnv: Environment | null = null;
 
 export function getValidatedEnv(): Environment {

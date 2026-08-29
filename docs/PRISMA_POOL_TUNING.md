@@ -1,24 +1,45 @@
-# Prisma Connection Pool Tuning
+# Prisma Connection Pool Tuning & PgBouncer Guide
 
-This guide covers configuring PostgreSQL connection pool settings for optimal performance in the TrustBridge Dashboard, especially during batch operations like CSV/JSON exports and contributor rechecks.
+This guide covers configuring PostgreSQL connection pool settings for optimal performance in the TrustBridge Dashboard, especially during batch operations like CSV/JSON exports, background worker execution, and contributor rechecks.
 
-## Tenant isolation and database roles
+## PgBouncer & Connection Pooling
 
-The `20260828000000_add_maintainer_org_rls` migration enables PostgreSQL row-level
-security on each application table. Every row has a `maintainerOrgId` value, and
-queries are visible only when it matches the connection setting
-`app.maintainer_org_id`. A missing setting matches no rows.
+When deploying to serverless environments (like Vercel) or when running concurrent batch operations, PostgreSQL connection limits can be quickly exhausted. Using PgBouncer in **transaction pooling mode** (e.g., Supabase pooler on port 6543, Neon connection pooling, or AWS RDS Proxy) prevents connection starvation.
+
+### Prisma with PgBouncer Configuration
+
+When connecting through PgBouncer in transaction mode:
+1. Append `&pgbouncer=true` to your `DATABASE_URL`. This instructs Prisma Client to avoid using PostgreSQL prepared statements, which are incompatible with transaction-level pooling.
+2. Set `connection_limit` appropriately for the workload (see below).
+3. Set `pool_timeout` to define how long Prisma waits for a connection before timing out.
+
+Example PgBouncer connection string:
+```bash
+DATABASE_URL="postgresql://trustbridge_app:password@host:6543/trustbridge?schema=public&pgbouncer=true&connection_limit=5&pool_timeout=10&idle_in_transaction_session_timeout=30000"
+```
+
+### Direct vs Pooled Connection URLs
+
+- **`DATABASE_URL`**: Used by the runtime Next.js app and background workers. Connects through PgBouncer with `pgbouncer=true` and pool limits.
+- **`DIRECT_URL` (Migrations)**: `prisma migrate` and `prisma db push` require session-level features (advisory locks, prepared statements) and must connect directly to PostgreSQL (port 5432) bypassing PgBouncer using the `trustbridge_migrator` role:
+
+```bash
+# Migrations use the direct port
+DATABASE_URL="postgresql://trustbridge_migrator:password@host:5432/trustbridge?schema=public" npm run db:deploy
+```
+
+## Tenant Isolation and Database Roles
+
+The `20260828000000_add_maintainer_org_rls` migration enables PostgreSQL row-level security on each application table. Every row has a `maintainerOrgId` value, and queries are visible only when it matches the connection setting `app.maintainer_org_id`. A missing setting matches no rows.
 
 Use two PostgreSQL roles:
 
-| Role | Use | RLS behavior |
-|------|-----|--------------|
-| `trustbridge_app` | Runtime Prisma `DATABASE_URL` | Must set `app.maintainer_org_id`; cannot bypass RLS |
-| `trustbridge_migrator` | `prisma migrate deploy` only | Owns schema changes and has `BYPASSRLS` |
+| Role | Use | RLS behavior | PgBouncer Port |
+|------|-----|--------------|----------------|
+| `trustbridge_app` | Runtime Prisma `DATABASE_URL` | Must set `app.maintainer_org_id`; cannot bypass RLS | 6543 (Pooled) |
+| `trustbridge_migrator` | `prisma migrate deploy` only | Owns schema changes and has `BYPASSRLS` | 5432 (Direct) |
 
-Create the roles as an existing database administrator, then grant the app role
-only the required schema/table privileges. Do not use a superuser or the
-migrator URL at runtime:
+Create the roles as an existing database administrator, then grant the app role only the required schema/table privileges. Do not use a superuser or the migrator URL at runtime:
 
 ```sql
 CREATE ROLE trustbridge_app LOGIN PASSWORD 'replace-me' NOSUPERUSER NOBYPASSRLS;
@@ -28,125 +49,48 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO trustbrid
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO trustbridge_app;
 ```
 
-Set the runtime tenant in the connection string. The value must be URL encoded,
-and should normally equal `GITHUB_MAINTAINER_ORG`:
+Set the runtime tenant in the connection string. The value must be URL encoded, and should normally equal `GITHUB_MAINTAINER_ORG`:
 
 ```bash
-DATABASE_URL="postgresql://trustbridge_app:password@host:5432/trustbridge?schema=public&options=-c%20app.maintainer_org_id%3Dmy-org"
+DATABASE_URL="postgresql://trustbridge_app:password@host:6543/trustbridge?schema=public&pgbouncer=true&connection_limit=5&options=-c%20app.maintainer_org_id%3Dmy-org"
 ```
 
-Run migrations with the separate migrator URL:
+## Parameters Reference
+
+Connection pool settings are specified in `DATABASE_URL` query parameters:
+
+| Parameter | Default | Serverless | Worker Process | Purpose |
+|-----------|---------|------------|----------------|---------|
+| `connection_limit` | 10 | `1` - `5` | `5` - `10` | Max concurrent connections per instance |
+| `pool_timeout` | 10 | `10` | `30` | Seconds to wait for an available connection |
+| `pgbouncer` | false | `true` | `true` | Disables prepared statements for transaction pooling |
+| `idle_in_transaction_session_timeout` | — | `30000` | `30000` | Milliseconds before idle transactions are killed |
+
+## Recommended Settings by Environment
+
+### Local Development (Docker Compose)
+
+For local development using `docker-compose.yml`, PgBouncer is not required. Connect directly to Postgres:
 
 ```bash
-DATABASE_URL="postgresql://trustbridge_migrator:password@host:5432/trustbridge" npm run db:deploy
+DATABASE_URL="postgresql://trustbridge_app:trustbridge-app-dev-password@localhost:5432/trustbridge_dashboard?schema=public&connection_limit=5&options=-c%20app.maintainer_org_id%3Ddefault"
 ```
 
-Existing rows are assigned to `default` by the migration. Before enabling a real
-tenant value, backfill `maintainerOrgId` for existing data using the migrator
-role. CI currently runs unit tests without PostgreSQL; SQL/RLS behavior must be
-verified against a PostgreSQL instance using the two roles above, not a
-superuser-only test.
+### Serverless Production (Vercel)
 
-## Overview
-
-Prisma manages database connections through a connection pool. The pool size, connection timeout, and idle timeout affect performance under load:
-
-- **Too small** — requests queue, increasing latency for concurrent operations (batch recheck, exports)
-- **Too large** — wastes memory and database resources
-- **Optimized** — fast response times, efficient resource use
-
-## Configuration
-
-Connection pool settings are specified in the `DATABASE_URL` as query parameters:
+Each serverless function instance maintains its own small Prisma connection pool. Keep `connection_limit` small so concurrent lambdas don't overwhelm Postgres/PgBouncer:
 
 ```bash
-postgresql://user:password@host:5432/dbname?schema=public&pool_timeout=10&connection_limit=5&idle_in_transaction_session_timeout=30000
+DATABASE_URL="postgresql://trustbridge_app:password@host:6543/trustbridge?schema=public&pgbouncer=true&connection_limit=1&pool_timeout=10"
 ```
 
-### Parameters
+### Long-Running Background Worker Process (`npm run worker`)
 
-| Parameter | Default | Example | Purpose |
-|-----------|---------|---------|---------|
-| `connection_limit` | 10 | `5` or `20` | Max concurrent connections to database |
-| `pool_timeout` | 10 | `10` or `30` | Seconds to wait for a free connection before timeout |
-| `idle_in_transaction_session_timeout` | — | `30000` | Milliseconds for idle transaction timeout (optional) |
-
-## Recommended Settings
-
-### Development (SQLite/Local PostgreSQL)
+Long-running workers handle sequential or bounded concurrent jobs. A slightly larger pool with longer timeout prevents queue stalling:
 
 ```bash
-DATABASE_URL="postgresql://user:password@localhost:5432/trustbridge?schema=public&connection_limit=5"
+DATABASE_URL="postgresql://trustbridge_app:password@host:6543/trustbridge?schema=public&pgbouncer=true&connection_limit=5&pool_timeout=30"
 ```
-
-### Staging (Moderate Load)
-
-```bash
-DATABASE_URL="postgresql://user:password@host:5432/trustbridge?schema=public&connection_limit=10&pool_timeout=15"
-```
-
-### Production (High Availability)
-
-```bash
-DATABASE_URL="postgresql://user:password@host:5432/trustbridge?schema=public&connection_limit=20&pool_timeout=30&idle_in_transaction_session_timeout=30000"
-```
-
-## Batch Operations & Pool Size
-
-### CSV/JSON Export
-
-Contributors table exports iterate through all registrations. Pool exhaustion occurs when:
-- Many concurrent export requests
-- Long-running queries holding connections
-- Default pool size too small for concurrency
-
-**Recommendation:** Set `connection_limit=20+` for production with concurrent exports.
-
-### Batch Contributor Recheck
-
-Rechecks call Horizon for each contributor and update the database. With 100+ contributors:
-- Sequential recheck: 1 connection per request
-- Concurrent recheck: multiple connections simultaneously
-
-**Recommendation:** Use `Promise.all()` with pooling; ensure `connection_limit ≥ 10`.
-
-## Monitoring
-
-### Verify Configuration
-
-```bash
-# Test connection with current pool settings
-psql "postgresql://user:password@host:5432/trustbridge?schema=public&connection_limit=10" -c "SELECT 1;"
-```
-
-### Check Current Connections
-
-```sql
--- Connect to your database and run:
-SELECT datname, count(*) as connections
-FROM pg_stat_activity
-GROUP BY datname
-ORDER BY connections DESC;
-
--- View specific connection limits
-SHOW max_connections;
-```
-
-### Monitor in Application
-
-Prisma logs connection events in debug mode:
-
-```bash
-DEBUG=* npm run dev
-```
-
-## Best Practices
-
-1. **Start conservative** — Use `connection_limit=5` locally, increase if you see timeouts
-2. **Match expected concurrency** — Number of concurrent requests in your heaviest operation
-3. **Set pool_timeout reasonably** — Long timeout (30s) for batch jobs, shorter (10s) for user-facing requests
-4. **Test under load** — Run batch operations with `ab` or similar to validate pool size
-5. **Monitor in production** — Periodically check connection count and adjust as needed
 
 ## Troubleshooting
 
@@ -155,31 +99,16 @@ DEBUG=* npm run dev
 **Cause:** Pool exhausted or queries running too long.
 
 **Fix:**
-1. Increase `connection_limit`
-2. Increase `pool_timeout`
-3. Optimize slow queries (check query plans)
-4. Reduce concurrent requests
+1. Increase `connection_limit` or `pool_timeout`
+2. Ensure queries are indexed and transactions are committed promptly
+3. Enable PgBouncer transaction pooling if deploying to serverless
 
-### Error: "FATAL: too many connections"
+### Error: "prepared statement does not exist" or "cannot run inside a transaction"
 
-**Cause:** Connection limit on database server exceeded.
+**Cause:** Prisma is sending prepared statements through PgBouncer in transaction pooling mode.
 
-**Fix:**
-1. Reduce `connection_limit` in Prisma
-2. Ask database provider to increase server-level `max_connections`
-3. Implement connection pooling middleware (e.g., PgBouncer)
+**Fix:** Add `?pgbouncer=true` to `DATABASE_URL`.
 
 ### Idle Connections Accumulating
 
-**Cause:** Connections left idle after queries complete.
-
-**Fix:**
-1. Prisma automatically closes idle connections; no manual action needed
-2. For persistent issues, reduce `connection_limit` or use `idle_in_transaction_session_timeout`
-
-## Related Files
-
-- `prisma/schema.prisma` — Prisma schema (models, indexes)
-- `src/lib/registrations.ts` — Batch export/recheck queries
-- `src/lib/csv.ts` — CSV generation helpers
-- `src/lib/prisma.ts` — Prisma client instantiation
+**Fix:** Use `idle_in_transaction_session_timeout=30000` to automatically terminate stuck transactions.
