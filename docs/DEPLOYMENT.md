@@ -146,3 +146,25 @@ jobs:
 - [Setup guide](./SETUP.md)
 - [Architecture](./ARCHITECTURE.md)
 - [Contributing](./CONTRIBUTING.md)
+
+---
+
+## Background Worker Process
+
+For durable background processing (such as batch rechecks across all contributors or asynchronous task runs), TrustBridge uses a durable database-backed queue (`QueueJob` table in PostgreSQL).
+
+### Running the Worker
+
+In production environments (or alongside Next.js on Render/Railway/Fly.io/EC2), run the dedicated worker process:
+
+```bash
+npm run worker
+```
+
+### Worker Architecture & Characteristics
+
+1. **Durable Persistence**: Jobs are enqueued into PostgreSQL with status `pending`. Jobs survive application deployments and server restarts without loss.
+2. **Atomic Claiming**: Workers atomically claim pending jobs (`UPDATE ... WHERE id = ... AND status = 'pending'`), preventing duplicate processing when multiple worker instances run in parallel.
+3. **Poison Message Handling**: If a job fails or encounters an unhandled exception, it is marked as `failed` with the error message persisted in the database. The worker continues executing subsequent jobs.
+4. **Graceful Shutdown**: The worker process listens for `SIGINT` and `SIGTERM` to finish processing the in-flight job before exiting cleanly.
+5. **Environment Configuration**: Ensure the worker has access to `DATABASE_URL`, `TOKEN_ENCRYPTION_KEY`, `GITHUB_MAINTAINER_ORG`, and `NEXT_PUBLIC_HORIZON_URL`.
