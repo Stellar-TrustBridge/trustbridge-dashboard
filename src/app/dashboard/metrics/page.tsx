@@ -64,6 +64,20 @@ export default function MetricsPage() {
     },
   });
 
+  const queueHealthQuery = useQuery<{
+    depth: number;
+    failedCount: number;
+    oldestPendingJobCreatedAt: string | null;
+    serverlessNotice: string;
+  }>({
+    queryKey: ["admin-queue-health"],
+    queryFn: async () => {
+      const res = await fetch("/api/contributors/queue/health");
+      if (!res.ok) return { depth: 0, failedCount: 0, oldestPendingJobCreatedAt: null, serverlessNotice: "" };
+      return res.json();
+    },
+  });
+
   if (metricsQuery.isLoading) {
     return (
       <div className="flex items-center justify-center py-20 text-muted-foreground">
@@ -163,6 +177,44 @@ export default function MetricsPage() {
               </p>
             </div>
           </div>
+        </CardContent>
+      </Card>
+
+      {/* ── Worker health & queue metrics ──────────────────────── */}
+      <Card className="mb-6" data-testid="metrics-queue-card">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Zap className="h-5 w-5 text-amber-500" />
+            Worker health & background queue
+          </CardTitle>
+          <CardDescription>
+            Live status of background recheck worker jobs and queue depth.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid grid-cols-1 gap-3 text-center sm:grid-cols-3 sm:gap-4">
+            <div className="rounded-lg border border-border px-4 py-3">
+              <p className="text-2xl font-bold">{queueHealthQuery.data?.depth ?? 0}</p>
+              <p className="mt-1 text-xs text-muted-foreground">Queue depth (pending)</p>
+            </div>
+            <div className="rounded-lg border border-border px-4 py-3">
+              <p className="text-2xl font-bold text-red-600 dark:text-red-400">
+                {queueHealthQuery.data?.failedCount ?? 0}
+              </p>
+              <p className="mt-1 text-xs text-muted-foreground">Failed jobs</p>
+            </div>
+            <div className="rounded-lg border border-border px-4 py-3">
+              <p className="text-sm font-medium">
+                {queueHealthQuery.data?.oldestPendingJobCreatedAt
+                  ? new Date(queueHealthQuery.data.oldestPendingJobCreatedAt).toLocaleTimeString()
+                  : "None"}
+              </p>
+              <p className="mt-1 text-xs text-muted-foreground">Oldest pending job</p>
+            </div>
+          </div>
+          <p className="text-xs text-muted-foreground bg-muted/30 p-3 rounded-md border border-border/50">
+            <strong>Serverless Note:</strong> {queueHealthQuery.data?.serverlessNotice || "Background jobs are persisted in PostgreSQL. Worker polling is bound to serverless request execution limits."}
+          </p>
         </CardContent>
       </Card>
 

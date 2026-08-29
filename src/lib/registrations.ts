@@ -62,6 +62,8 @@ export function toContributorRow(row: RegistrationWithUserRow): ContributorRow {
     lastCheckedAt: row.lastCheckedAt?.toISOString() ?? null,
     horizonLatencyMs: row.horizonLatencyMs ?? null,
     readiness: readinessOf(row),
+    notes: row.notes ?? null,
+    tags: row.tags ?? [],
     walletProof: buildWalletProofInfo(
       row.stellarAddress,
       row.user.githubUsername

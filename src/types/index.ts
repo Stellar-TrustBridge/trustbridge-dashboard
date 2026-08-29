@@ -71,6 +71,8 @@ export interface ContributorRow {
   lastCheckedAt: string | null;
   horizonLatencyMs: number | null;
   readiness: ReadinessStatus;
+  notes?: string | null;
+  tags?: string[];
   walletProof?: WalletProofInfo;
   horizonDebug?: HorizonDebugInfo;
 }

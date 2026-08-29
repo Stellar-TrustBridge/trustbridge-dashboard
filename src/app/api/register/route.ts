@@ -112,6 +112,29 @@ export async function POST(request: NextRequest) {
         : null;
 
     if (existing && existing.userId !== session.user.id) {
+      if (prisma.registrationConflict?.create) {
+        await prisma.registrationConflict
+          .create({
+            data: {
+              attemptedAddress: stellarAddress,
+              attemptedUserId: session.user.id,
+              existingUserId: existing.userId,
+            },
+          })
+          .catch((err) =>
+            console.error("Failed to record RegistrationConflict:", err)
+          );
+      }
+
+      await recordAuditLog({
+        action: "registration.conflict",
+        actorId: session.user.id,
+        actorLogin: session.user.githubUsername ?? null,
+        targetId: existing.id,
+        targetLabel: stellarAddress,
+        metadata: { attemptedAddress: stellarAddress },
+      });
+
       return NextResponse.json(
         {
           error: "This Stellar address is already registered to another user",

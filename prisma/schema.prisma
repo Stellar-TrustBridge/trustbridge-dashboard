@@ -25,6 +25,8 @@ model User {
   invites         Invite[]
   createdAt       DateTime      @default(now())
   updatedAt       DateTime      @updatedAt
+
+  @@index([githubUsername])
 }
 
 model TokenAuditLog {
@@ -59,11 +61,27 @@ model Registration {
   lastCheckedAt       DateTime?
   createdAt           DateTime      @default(now())
   updatedAt           DateTime      @updatedAt
+  notes               String?
+  tags                String[]      @default([])
   disputeProof        DisputeProof?
 
   @@index([trustlineReady])
   @@index([lastCheckedAt])
   @@index([deletedAt])
+  @@index([stellarAddress])
+  @@index([updatedAt])
+}
+
+model RegistrationConflict {
+  id               String   @id @default(cuid())
+  maintainerOrgId  String   @default("default")
+  attemptedAddress String
+  attemptedUserId  String
+  existingUserId   String?
+  createdAt        DateTime @default(now())
+
+  @@index([attemptedAddress])
+  @@index([createdAt])
 }
 
 enum DisputeStatus {

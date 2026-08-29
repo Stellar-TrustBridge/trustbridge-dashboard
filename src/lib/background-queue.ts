@@ -136,6 +136,30 @@ class BackgroundQueue {
     };
   }
 
+  async getWorkerHealthMetrics(): Promise<{
+    depth: number;
+    failedCount: number;
+    oldestPendingJobCreatedAt: string | null;
+    isServerlessInMemoryWarning: boolean;
+  }> {
+    const [depth, failedCount, oldestPending] = await Promise.all([
+      prisma.queueJob.count({ where: { status: "pending" } }),
+      prisma.queueJob.count({ where: { status: "failed" } }),
+      prisma.queueJob.findFirst({
+        where: { status: "pending" },
+        orderBy: { createdAt: "asc" },
+        select: { createdAt: true },
+      }),
+    ]);
+
+    return {
+      depth,
+      failedCount,
+      oldestPendingJobCreatedAt: oldestPending?.createdAt.toISOString() ?? null,
+      isServerlessInMemoryWarning: true,
+    };
+  }
+
   private async startWorker(): Promise<void> {
     if (this.workerStarted) return;
     this.workerStarted = true;

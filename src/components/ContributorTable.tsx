@@ -283,6 +283,7 @@ export function ContributorTable({
   registerUrl = "/register",
   className,
 }: ContributorTableProps) {
+  const headingId = useId();
   const columnPickerId = useId();
   const searchInputId = useId();
   const paletteTitleId = useId();
@@ -299,6 +300,10 @@ export function ContributorTable({
   const [pendingExport, setPendingExport] = useState<"csv" | "json" | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const csvExportRef = useRef<HTMLButtonElement | null>(null);
+  const jsonExportRef = useRef<HTMLButtonElement | null>(null);
+  const columnPickerToggleRef = useRef<HTMLButtonElement | null>(null);
+  const columnPickerRef = useRef<HTMLFieldSetElement | null>(null);
   const paletteRef = useRef<HTMLDivElement | null>(null);
   const paletteOpenerRef = useRef<HTMLElement | null>(null);
 
@@ -932,18 +937,26 @@ export function ContributorTable({
         }
         cancelLabel="Cancel"
         destructive={staleSummary.stale}
-        onCancel={() => setPendingExport(null)}
+        onCancel={() => {
+          const format = pendingExport;
+          const ref = format === "json" ? jsonExportRef : csvExportRef;
+          setPendingExport(null);
+          ref.current?.focus();
+        }}
         onConfirm={() => {
           const format = pendingExport;
+          const ref = format === "json" ? jsonExportRef : csvExportRef;
           setPendingExport(null);
-          if (format === "json") {
-            exportContributorsJson(contributors, true);
-          } else {
-            onExport?.();
-          }
+          runExport(() => {
+            if (format === "json") {
+              exportContributorsJson(contributors, true);
+            } else {
+              onExport?.();
+            }
+          }, ref);
         }}
       />
-    </div>
+    </section>
   );
 }
 
