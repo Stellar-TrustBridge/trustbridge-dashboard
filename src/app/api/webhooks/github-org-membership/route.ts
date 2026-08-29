@@ -7,43 +7,7 @@ import { recordAuditLog } from "@/lib/audit";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-/**
- * Verifies the GitHub webhook signature to ensure the request is authentic.
- * GitHub sends X-Hub-Signature-256 with each webhook.
- */
-function verifyWebhookSignature(
-  payload: Buffer,
-  signature: string | undefined
-): boolean {
-  const secret = process.env.GITHUB_WEBHOOK_SECRET?.trim();
-  if (!secret) {
-    console.warn(
-      "GITHUB_WEBHOOK_SECRET not configured — webhook signature verification skipped"
-    );
-    return false;
-  }
-
-  if (!signature) {
-    console.warn("Missing X-Hub-Signature-256 header");
-    return false;
-  }
-
-  const hmac = crypto.createHmac("sha256", secret);
-  hmac.update(payload);
-  const digest = `sha256=${hmac.digest("hex")}`;
-
-  // timingSafeEqual throws when buffer lengths differ — treat that as a failed
-  // verification instead of letting the outer catch return 202.
-  const digestBuf = Buffer.from(digest);
-  const signatureBuf = Buffer.from(signature);
-  if (digestBuf.length !== signatureBuf.length) {
-    return false;
-  }
-
-  return crypto.timingSafeEqual(digestBuf, signatureBuf);
-}
-
-interface GitHubMembershipEvent {
+export interface GitHubMembershipEvent {
   action: "added" | "deleted";
   member: {
     login: string;
@@ -58,106 +22,145 @@ interface GitHubMembershipEvent {
 }
 
 /**
+ * Verifies the GitHub webhook signature to ensure the request is authentic.
+ * GitHub sends X-Hub-Signature-256 with each webhook.
+ */
+export function verifyWebhookSignature(
+  payload: Buffer,
+  signature: string | undefined,
+): boolean {
+  const secret = process.env.GITHUB_WEBHOOK_SECRET?.trim();
+  if (!secret) {
+    console.warn(
+      "GITHUB_WEBHOOK_SECRET not configured — webhook signature verification skipped",
+    );
+    return false;
+  }
+
+  if (!signature) {
+    console.warn("Missing X-Hub-Signature-256 header");
+    return false;
+  }
+
+  const hmac = crypto.createHmac("sha256", secret);
+  hmac.update(payload);
+  const digest = `sha256=${hmac.digest("hex")}`;
+
+  const digestBuf = Buffer.from(digest);
+  const signatureBuf = Buffer.from(signature);
+  if (digestBuf.length !== signatureBuf.length) {
+    return false;
+  }
+
+  return crypto.timingSafeEqual(digestBuf, signatureBuf);
+}
+
+export async function processGithubOrgMembershipEvent(
+  event: GitHubMembershipEvent,
+  requestHeaders: Headers,
+): Promise<{ status: "accepted" | "ignored"; event: Record<string, unknown> }> {
+  const { action, member, organization, sender } = event;
+  const maintainerOrg = process.env.GITHUB_MAINTAINER_ORG?.trim();
+
+  if (
+    !maintainerOrg ||
+    organization.login.toLowerCase() !== maintainerOrg.toLowerCase()
+  ) {
+    return {
+      status: "ignored",
+      event: {
+        webhook: "github.organization.member",
+        action,
+        member: member.login,
+        actor: sender.login,
+        org: organization.login,
+        timestamp: new Date().toISOString(),
+      },
+    };
+  }
+
+  const eventLog = {
+    webhook: "github.organization.member",
+    action,
+    member: member.login,
+    actor: sender.login,
+    org: organization.login,
+    timestamp: new Date().toISOString(),
+  };
+
+  console.log("Webhook received:", eventLog);
+
+  if (action === "added" || action === "deleted") {
+    const user = await prisma.user.findUnique({
+      where: { githubUsername: member.login },
+    });
+
+    if (user) {
+      await recordAuditLog({
+        action: "webhook.org_membership_changed",
+        actorId: null,
+        actorLogin: sender.login,
+        targetId: user.id,
+        targetLabel: member.login,
+        metadata: {
+          membershipAction: action,
+          org: organization.login,
+          webhookId: requestHeaders.get("X-GitHub-Delivery") || "unknown",
+        },
+      });
+
+      console.log(
+        `Org membership sync: ${member.login} ${action} from ${organization.login}`,
+      );
+    } else {
+      console.log(
+        `User not found in database: ${member.login} (may not have registered yet)`,
+      );
+    }
+  }
+
+  return {
+    status: "accepted",
+    event: eventLog,
+  };
+}
+
+/**
  * GitHub organization membership webhook handler.
  * Syncs org membership changes to update maintainer access.
- *
- * Expects: member added/deleted events
- * Returns: 202 Accepted (async processing)
- * Logs: audit trail + health metrics
  */
 export async function POST(request: NextRequest) {
   try {
-    // Collect raw body for signature verification
     const body = await request.arrayBuffer();
     const payload = Buffer.from(body);
 
-    // Verify webhook signature
     const signature = request.headers.get("X-Hub-Signature-256") || undefined;
     if (!verifyWebhookSignature(payload, signature)) {
       console.warn("Webhook signature verification failed");
-      return NextResponse.json(
-        { error: "Unauthorized" },
-        { status: 403 }
-      );
+      return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
     }
 
-    // Parse JSON
-    const event: GitHubMembershipEvent = JSON.parse(
-      payload.toString("utf-8")
-    );
+    const event: GitHubMembershipEvent = JSON.parse(payload.toString("utf-8"));
+    const result = await processGithubOrgMembershipEvent(event, request.headers);
 
-    const { action, member, organization, sender } = event;
-    const maintainerOrg = process.env.GITHUB_MAINTAINER_ORG?.trim();
-
-    // Only process if this is our configured org
-    if (
-      !maintainerOrg ||
-      organization.login.toLowerCase() !== maintainerOrg.toLowerCase()
-    ) {
-      return NextResponse.json({ status: "ignored" }, { status: 202 });
-    }
-
-    // Log the webhook receipt for health visibility
-    const eventLog = {
-      webhook: "github.organization.member",
-      action,
-      member: member.login,
-      actor: sender.login,
-      org: organization.login,
-      timestamp: new Date().toISOString(),
-    };
-
-    console.log("Webhook received:", eventLog);
-
-    // Handle membership changes
-    if (action === "added" || action === "deleted") {
-      const user = await prisma.user.findUnique({
-        where: { githubUsername: member.login },
-      });
-
-      if (user) {
-        // Mark for audit — maintainer access is now stale and will be re-checked on next sign-in
-        await recordAuditLog({
-          action: "webhook.org_membership_changed",
-          actorId: null,
-          actorLogin: sender.login,
-          targetId: user.id,
-          targetLabel: member.login,
-          metadata: {
-            membershipAction: action,
-            org: organization.login,
-            webhookId: request.headers.get("X-GitHub-Delivery") || "unknown",
-          },
-        });
-
-        console.log(`Org membership sync: ${member.login} ${action} from ${organization.login}`);
-      } else {
-        console.log(
-          `User not found in database: ${member.login} (may not have registered yet)`
-        );
-      }
-    }
-
-    // Return 202 Accepted (webhook processed asynchronously)
     return NextResponse.json(
       {
-        status: "accepted",
-        event: eventLog,
+        status: result.status,
+        event: result.event,
       },
-      { status: 202 }
+      { status: 202 },
     );
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "Webhook processing failed";
     console.error("Webhook error:", message);
 
-    // Return 202 anyway to prevent GitHub from retrying
     return NextResponse.json(
       {
         status: "error",
         message,
       },
-      { status: 202 }
+      { status: 202 },
     );
   }
 }
