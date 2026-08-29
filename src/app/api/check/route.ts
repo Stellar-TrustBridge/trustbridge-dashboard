@@ -7,6 +7,7 @@ import { DEFAULT_ASSET } from "@/lib/constants";
 import { checkStellarAddress } from "@/lib/horizon";
 import { checkCache, buildCacheKey } from "@/lib/cache";
 import { captureException } from "@/lib/sentry";
+import { withSpan } from "@/lib/tracing";
 import type { CheckAddressPayload, HorizonCheckResult } from "@/types";
 
 export const runtime = "nodejs";
@@ -52,49 +53,11 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const body = (await request.json()) as CheckAddressPayload;
-    const address = body.address?.trim();
-
-    if (!address) {
-      return jsonCheckError(["Address is required"], 400);
-    }
-
-    const assetCode = body.asset_code ?? DEFAULT_ASSET.code;
-    const assetIssuer = body.asset_issuer ?? DEFAULT_ASSET.issuer;
-    const bypass = isCacheBypass(request);
-    const cacheKey = buildCheckCacheKey(address, assetCode, assetIssuer);
-
-    // ── KV cache read ────────────────────────────────────────────────────────
-    if (!bypass) {
-      const cached = checkCache.get(cacheKey) as HorizonCheckResult | null;
-      if (cached) {
-        return jsonCheckResult(cached);
-      }
-    }
-
-    // ── Horizon call ─────────────────────────────────────────────────────────
-    // Pass useCache: false when the caller explicitly bypassed the route cache
-    // so that even the internal horizon.ts verificationCache is skipped and a
-    // truly fresh Horizon response is returned.
-    const result = await checkStellarAddress(address, assetCode, assetIssuer, {
-      useCache: !bypass,
-    });
-
-    // ── KV cache write (success-only) ────────────────────────────────────────
-    // Transient / circuit-breaker errors are never cached so a follow-up
-    // request can succeed once Horizon recovers.
-    const isTransient =
-      result.errors?.some(
-        (e) =>
-          e.includes("temporarily unavailable") ||
-          e.startsWith("Horizon error:")
-      ) ?? false;
-
-    if (!bypass && !isTransient) {
-      checkCache.set(cacheKey, result);
-    }
-
-    return jsonCheckResult(result);
+    return await withSpan(
+      "api.check",
+      () => handleCheck(request),
+      { attributes: { "http.method": "POST", "http.route": "/api/check" } },
+    );
   } catch (error) {
     // NOTE: the address is intentionally *not* passed as context. It is the
     // one field a caller controls and it is a G-address — `captureException`
@@ -102,4 +65,50 @@ export async function POST(request: NextRequest) {
     captureException(error, { route: "/api/check", method: "POST" });
     return jsonCheckError(["Failed to check address"], 500);
   }
+}
+
+async function handleCheck(request: NextRequest): Promise<NextResponse> {
+  const body = (await request.json()) as CheckAddressPayload;
+  const address = body.address?.trim();
+
+  if (!address) {
+    return jsonCheckError(["Address is required"], 400);
+  }
+
+  const assetCode = body.asset_code ?? DEFAULT_ASSET.code;
+  const assetIssuer = body.asset_issuer ?? DEFAULT_ASSET.issuer;
+  const bypass = isCacheBypass(request);
+  const cacheKey = buildCheckCacheKey(address, assetCode, assetIssuer);
+
+  // ── KV cache read ────────────────────────────────────────────────────────
+  if (!bypass) {
+    const cached = checkCache.get(cacheKey) as HorizonCheckResult | null;
+    if (cached) {
+      return jsonCheckResult(cached);
+    }
+  }
+
+  // ── Horizon call ─────────────────────────────────────────────────────────
+  // Pass useCache: false when the caller explicitly bypassed the route cache
+  // so that even the internal horizon.ts verificationCache is skipped and a
+  // truly fresh Horizon response is returned.
+  const result = await checkStellarAddress(address, assetCode, assetIssuer, {
+    useCache: !bypass,
+  });
+
+  // ── KV cache write (success-only) ────────────────────────────────────────
+  // Transient / circuit-breaker errors are never cached so a follow-up
+  // request can succeed once Horizon recovers.
+  const isTransient =
+    result.errors?.some(
+      (e) =>
+        e.includes("temporarily unavailable") ||
+        e.startsWith("Horizon error:")
+    ) ?? false;
+
+  if (!bypass && !isTransient) {
+    checkCache.set(cacheKey, result);
+  }
+
+  return jsonCheckResult(result);
 }

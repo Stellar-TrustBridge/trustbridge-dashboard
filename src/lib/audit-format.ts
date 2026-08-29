@@ -7,6 +7,7 @@ export const AUDIT_ACTION_LABELS: Record<string, string> = {
   "registration.create": "Registered a Stellar address",
   "registration.update": "Updated a Stellar address",
   network_config_mismatch_detected: "Detected a Horizon/Soroban network mismatch",
+  "queue.job.retried": "Retried a failed job from the dead-letter queue",
 };
 
 export function describeAuditAction(action: string): string {

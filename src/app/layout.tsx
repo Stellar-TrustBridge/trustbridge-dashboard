@@ -1,7 +1,9 @@
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 
+import { MaintenanceBanner } from "@/components/MaintenanceBanner";
 import { Providers } from "@/components/Providers";
+import { getMaintenanceMessage, isMaintenanceMode } from "@/lib/maintenance";
 
 import "./globals.css";
 
@@ -30,15 +32,23 @@ export const metadata: Metadata = {
   },
 };
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  const maintenance = await isMaintenanceMode();
+
   return (
     <html lang="en" suppressHydrationWarning>
       <body className={`${inter.variable} font-sans min-h-screen`}>
-        <Providers>{children}</Providers>
+        <Providers>
+          <MaintenanceBanner
+            enabled={maintenance}
+            message={getMaintenanceMessage()}
+          />
+          {children}
+        </Providers>
       </body>
     </html>
   );

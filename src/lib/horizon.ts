@@ -12,6 +12,7 @@ import {
   isAccountNotFoundError,
 } from "@/lib/readiness";
 import { withRetry } from "@/lib/retry";
+import { withSpan } from "@/lib/tracing";
 import {
   isValidStellarAddress,
   normalizeStellarAddress,
@@ -52,10 +53,22 @@ export function getHorizonCircuitBreakerMetrics(): ReturnType<
 
 async function loadAccountFromHorizon(address: string) {
   const server = getHorizonServer();
-  // SDK typings expose AccountResponse; runtime payload includes sponsorship fields.
-  return server.loadAccount(address) as unknown as Promise<
-    Horizon.ServerApi.AccountRecord
-  >;
+  // Span name carries no address (issue #203); the account is a G-address.
+  return withSpan(
+    "horizon.loadAccount",
+    () =>
+      // SDK typings expose AccountResponse; runtime payload includes sponsorship fields.
+      server.loadAccount(address) as unknown as Promise<
+        Horizon.ServerApi.AccountRecord
+      >,
+    {
+      attributes: {
+        "peer.service": "horizon",
+        "horizon.url":
+          process.env.NEXT_PUBLIC_HORIZON_URL?.trim() || DEFAULT_HORIZON_URL,
+      },
+    },
+  );
 }
 
 /** True when the balance line is a trustline for the requested asset. */

@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { refreshMaintainerSession, requireMaintainerSession } from "@/lib/api-auth";
 import { recordAuditLog } from "@/lib/audit";
 import { assertSameOrigin } from "@/lib/csrf";
+import { isFeatureEnabled } from "@/lib/feature-flags";
 import { getRegistryMode } from "@/lib/registry-mode";
 import { getContributors } from "@/lib/registrations";
 import { backgroundQueue } from "@/lib/background-queue";
@@ -74,6 +75,16 @@ export async function POST(request: NextRequest) {
   const session = await requireMaintainerSession();
   if (!session) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+
+  // Gated behind the `batch_recheck` feature flag (issue #201). A full batch
+  // recheck fans out one Horizon call per contributor, so it is a risky write
+  // that fails closed when the flag source is unreachable.
+  if (!(await isFeatureEnabled("batch_recheck"))) {
+    return NextResponse.json(
+      { error: "Batch recheck is currently disabled" },
+      { status: 403 }
+    );
   }
 
   try {

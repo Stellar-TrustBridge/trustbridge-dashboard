@@ -163,7 +163,7 @@ const WALLETS: WalletConfig[] = [
       {
         label: "Create or import a wallet",
         description:
-          "Open LOBSTR and tap "Create account" or "Import with secret key / recovery phrase". Back up your recovery phrase before continuing.",
+          'Open LOBSTR and tap "Create account" or "Import with secret key / recovery phrase". Back up your recovery phrase before continuing.',
       },
       {
         label: "Fund with XLM",
@@ -241,7 +241,7 @@ const WALLETS: WalletConfig[] = [
       {
         label: "Create or import a wallet",
         description:
-          "Open xBull and choose "Create a new wallet" or "Import wallet". Safely record your passphrase before moving on.",
+          'Open xBull and choose "Create a new wallet" or "Import wallet". Safely record your passphrase before moving on.',
       },
       {
         label: "Fund with XLM",
@@ -355,8 +355,6 @@ export function WalletInstallStepper({ className }: WalletInstallStepperProps) {
       setActiveIdx(WALLETS.length - 1);
     }
   }
-
-  const active = WALLETS[activeIdx];
 
   return (
     <div className={className}>

@@ -287,6 +287,92 @@ Minimum time between `/api/contract-sync` runs; a trigger inside this window ret
 
 ---
 
+## Feature flags (issue #201)
+
+`src/lib/feature-flags.ts` resolves each flag in this order:
+
+1. **Env override** — `FEATURE_FLAG_<KEY>` (highest precedence)
+2. **Database row** — only when `FEATURE_FLAGS_DB_ENABLED` is truthy
+3. **Built-in default**
+
+Risky flags **fail closed**: if the DB source is enabled but unreadable, they
+resolve to `false` regardless of their default, so a database outage can never
+silently open a dangerous write path. See [FEATURE_FLAGS.md](./FEATURE_FLAGS.md)
+for the full table and per-flag defaults.
+
+Accepted truthy values: `1`, `true`, `on`, `yes`, `enabled` (case-insensitive).
+Anything else is treated as falsy / "not set".
+
+### `FEATURE_FLAGS_DB_ENABLED`
+
+Optional. When truthy, the `FeatureFlag` table is consulted as source 2. When
+unset, only env overrides + built-in defaults apply and **no** database query is
+made. Default: unset.
+
+### `FEATURE_FLAGS_CACHE_TTL_MS`
+
+In-process cache TTL for DB-sourced flags. Default `30000` (30s). A failed DB
+read is cached for at most 5s so an outage can't hammer the connection pool.
+`clearFeatureFlagCache()` drops the cache immediately after a write.
+
+### `FEATURE_FLAG_BATCH_RECHECK` · `FEATURE_FLAG_INVITE_GENERATION` · `FEATURE_FLAG_DLQ_RETRY` · `FEATURE_FLAG_MAINTENANCE_MODE` · `FEATURE_FLAG_OTEL_TRACES`
+
+Per-flag env overrides. Set to a falsy value to freeze the corresponding
+feature during a Wave; unset to fall back to the DB row / default.
+
+---
+
+## Maintenance mode (issue #202)
+
+### `MAINTENANCE`
+
+Truthy => the maintenance banner is shown on every page and **mutating** API
+requests (`POST`/`PUT`/`PATCH`/`DELETE`) return `503` with `Retry-After: 120`.
+Reads (`GET`/`HEAD`) keep working. `/api/auth/*`, `/api/webhooks/*` and
+`/api/health` are exempt.
+
+This is the recommended kill switch and is **env-only on purpose** — a broken
+database can never strand maintainers who need to turn it back off. The
+`maintenance_mode` feature flag is an additional DB-backed toggle for operators
+who run with `FEATURE_FLAGS_DB_ENABLED`.
+
+See [DEPLOYMENT.md](./DEPLOYMENT.md#maintenance-mode) for the deploy runbook and
+the cron / webhook caveats.
+
+### `MAINTENANCE_MESSAGE`
+
+Optional. Overrides the banner + 503 body text.
+
+---
+
+## OpenTelemetry tracing (issue #203)
+
+Tracing is **off by default**. When enabled, spans are emitted for the API
+route, the Prisma query and the Horizon call on a request. Span names are
+scrubbed of Stellar addresses / emails and span attributes are run through the
+Sentry redactor before they leave the process.
+
+If `@opentelemetry/api` + an OTEL SDK are installed, the standard `OTEL_*`
+collector variables are honoured by that SDK. Otherwise spans are emitted as
+structured `trace` logs (visible only with `DEBUG` set) so the test suite needs
+no collector.
+
+### `OTEL_TRACES_ENABLED`
+
+Truthy => tracing on. Also toggled by `FEATURE_FLAG_OTEL_TRACES`. Default: off.
+
+### `OTEL_SERVICE_NAME`
+
+Service name reported on spans. Default `trustbridge-dashboard`.
+
+### `OTEL_EXPORTER_OTLP_ENDPOINT`
+
+Optional OTLP collector URL, consumed by the OTEL SDK when present. On
+serverless, ensure the SDK is configured with a span processor that flushes on
+function suspend (the SDK's responsibility, not this app's).
+
+---
+
 ## Vercel configuration
 
 1. Project → **Settings** → **Environment Variables**
@@ -310,6 +396,7 @@ For preview deployments, set `NEXTAUTH_URL` to the preview URL or use Vercel's a
 
 - [Setup guide](./SETUP.md)
 - [Deployment](./DEPLOYMENT.md)
+- [Feature flags](./FEATURE_FLAGS.md)
 - [Architecture](./ARCHITECTURE.md)
 
 - // src/lib/notifications/webhook.ts
