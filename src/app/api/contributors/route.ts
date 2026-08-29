@@ -6,6 +6,11 @@ import { assertSameOrigin } from "@/lib/csrf";
 import { getRegistryMode } from "@/lib/registry-mode";
 import { getContributors } from "@/lib/registrations";
 import { backgroundQueue } from "@/lib/background-queue";
+import {
+  recheckLockCache,
+  buildRecheckLockKey,
+  parseRecheckIdempotencyTtl,
+} from "@/lib/cache";
 import { captureException } from "@/lib/sentry";
 import type { ReadinessStatus } from "@/types";
 
@@ -76,6 +81,31 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
+  // Check for explicit Idempotency-Key header or use actor-scoped window key
+  const customIdempotencyKey = request.headers.get("idempotency-key");
+  const lockKey = customIdempotencyKey
+    ? `recheck:custom:${customIdempotencyKey}`
+    : buildRecheckLockKey("batch", session.user.id);
+
+  // If a recheck request was already enqueued within the idempotency window, return existing job
+  const existing = recheckLockCache.get(lockKey);
+  if (existing) {
+    return NextResponse.json(
+      {
+        jobId: existing.jobId,
+        status: "pending",
+        message: "Batch recheck already enqueued (idempotent response).",
+        idempotent: true,
+      },
+      {
+        headers: {
+          "Idempotency-Key": customIdempotencyKey ?? lockKey,
+          "X-Idempotent-Replay": "true",
+        },
+      }
+    );
+  }
+
   try {
     const jobId = await backgroundQueue.enqueue(
       "recheck.batch",
@@ -83,20 +113,32 @@ export async function POST(request: NextRequest) {
       session.user.id
     );
 
+    // Lock the recheck key for the duration of the idempotency window
+    recheckLockCache.set(lockKey, { jobId, createdAt: Date.now() }, parseRecheckIdempotencyTtl());
+
     await recordAuditLog({
       action: "recheck.batch.queued",
       actorId: session.user.id,
       actorLogin: session.user.githubUsername ?? null,
       metadata: {
         jobId,
+        idempotencyKey: customIdempotencyKey ?? lockKey,
       },
     });
 
-    return NextResponse.json({
-      jobId,
-      status: "pending",
-      message: "Batch recheck enqueued. Poll /api/contributors/queue/jobs/" + jobId + " for progress.",
-    });
+    return NextResponse.json(
+      {
+        jobId,
+        status: "pending",
+        message: "Batch recheck enqueued. Poll /api/contributors/queue/jobs/" + jobId + " for progress.",
+        idempotent: false,
+      },
+      {
+        headers: {
+          "Idempotency-Key": customIdempotencyKey ?? lockKey,
+        },
+      }
+    );
   } catch (error) {
     captureException(error, {
       route: "/api/contributors",
