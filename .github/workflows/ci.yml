@@ -32,6 +32,18 @@ jobs:
           GITHUB_CLIENT_ID: ci-placeholder
           GITHUB_CLIENT_SECRET: ci-placeholder
 
+  horizon-mock:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Run Horizon Mock Contract Tests
+        run: npm run test:mock
+
   e2e:
     runs-on: ubuntu-latest
     steps:
