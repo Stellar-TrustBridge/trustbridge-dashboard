@@ -201,6 +201,11 @@ describe("POST /api/register — error codes", () => {
   it("tags a contested address with ADDRESS_TAKEN", async () => {
     signedIn("user-1");
     // Someone else already holds it.
+    vi.mocked(prisma.registration.findFirst).mockResolvedValue({
+      id: "reg-9",
+      userId: "user-2",
+      stellarAddress: validAddress,
+    } as never);
     vi.mocked(prisma.registration.findUnique).mockResolvedValue({
       id: "reg-9",
       userId: "user-2",
@@ -233,6 +238,11 @@ describe("POST /api/register — error codes", () => {
       usdc_balance: "0",
       errors: [],
       readiness: "ready",
+    } as never);
+    vi.mocked(prisma.registration.findFirst).mockResolvedValue({
+      id: "reg-9",
+      userId: "user-2",
+      stellarAddress: validAddress,
     } as never);
     vi.mocked(prisma.registration.findUnique).mockResolvedValue({
       id: "reg-9",

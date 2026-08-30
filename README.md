@@ -197,13 +197,19 @@ All docs are cross-linked from this README:
 | `/api/actions/lookup` | GET | Cached Horizon readiness lookup + wizard `nextAction` guidance, `?address=G...` — **publicly cached** (30 s TTL) |
 | `/api/soroban/events` | GET | Recent events for `SOROBAN_CONTRACT_ID` (maintainer only) |
 | `/api/settings/network` | GET | Resolved Horizon/Soroban network + mismatch warnings (maintainer only) |
-| `/api/health` | GET | Liveness + readiness probe — DB ping, CSV staleness, and contract-sync status (public, always 200) |
 | `/api/contract-sync` | GET/POST | GET: last sync result (public). POST: trigger a contract-to-Postgres sync (maintainer session or `CRON_SECRET`) |
+| `/api/cron/export` | GET/POST | GET: last export result (public). POST: trigger an automated nightly treasury CSV dump (maintainer session or `CRON_SECRET`) |
 
 ### Contract-to-Postgres sync job
 
 - **`src/lib/contract-sync.ts`** re-syncs Postgres registration state against Horizon-verified funded/trustline/balance state, intended to be driven by a scheduler (e.g. Vercel Cron) rather than a maintainer clicking "recheck all". Trigger with `POST /api/contract-sync` (maintainer session, or a scheduler presenting `Authorization: Bearer $CRON_SECRET`); read the last run via `GET /api/contract-sync` or the `contractSync` block of `/api/health`.
 - Rate-limited via `CONTRACT_SYNC_MIN_INTERVAL_MS` (default 60s) so a mis-configured scheduler can't fan out into repeated full-table Horizon sweeps, and never throws — Horizon/RPC outages and DB errors are captured in the result instead of raising a 500.
+
+### Nightly treasury CSV export cron
+
+- **`src/lib/cron-export.ts`** automates nightly contributor CSV dumps for treasury payout operations during Waves. Trigger with `POST /api/cron/export` (maintainer session or `Authorization: Bearer $CRON_SECRET`).
+- Checks contributor staleness against `STALE_CSV_MAX_AGE_MS` (default 24h), attaches the full CSV dataset, emails the destination configured via `TREASURY_EXPORT_EMAIL`, and records an audit log entry (`export.cron`).
+- Rate-limited via `CRON_EXPORT_MIN_INTERVAL_MS` (default 60s) to prevent spamming destinations, and never throws unhandled errors. Check the last run status via `GET /api/cron/export`.
 
 ### Resilience
 

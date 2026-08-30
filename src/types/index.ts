@@ -82,7 +82,11 @@ export type AuditAction =
   | "registration.create"
   | "registration.update"
   | "network_config_mismatch_detected"
-  | "contract.sync";
+  | "contract.sync"
+  | "export.csv"
+  | "export.csv.failed"
+  | "export.cron"
+  | "export.cron.failed";
 
 export interface AuditLogEntry {
   id: string;

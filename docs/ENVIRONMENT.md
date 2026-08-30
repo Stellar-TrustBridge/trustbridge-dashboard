@@ -263,10 +263,22 @@ Soroban RPC endpoint used to fetch contract events for the timeline panel. Defau
 
 ### `CRON_SECRET`
 
-Bearer token that authorizes a scheduler (e.g. Vercel Cron) to trigger `POST /api/contract-sync` without a maintainer session. Send as `Authorization: Bearer $CRON_SECRET`.
+Bearer token that authorizes a scheduler (e.g. Vercel Cron) to trigger `POST /api/contract-sync` and `POST /api/cron/export` without a maintainer session. Send as `Authorization: Bearer $CRON_SECRET`.
 
-- **Optional.** With it unset, only maintainer sessions can trigger a sync — the endpoint never falls back to an open/unauthenticated trigger.
+- **Optional.** With it unset, only maintainer sessions can trigger automated syncs or exports — the endpoints never fall back to open/unauthenticated triggers.
 - Generate the same way as `NEXTAUTH_SECRET`: `openssl rand -base64 32`
+
+### `TREASURY_EXPORT_EMAIL`
+
+Destination email address for automated nightly treasury CSV exports (`POST /api/cron/export`).
+
+- **Optional.** When set (e.g., `treasury@yourorg.com`), scheduled runs generate the full contributor CSV dump and email it as an attachment along with operational metrics (total contributors, ready count, stale count).
+- **Fork-safe & Privacy:** If unset, exports are generated and audited without sending emails to unconfigured destinations. The email notification body only contains aggregate metrics and warnings; contributor records are contained within the attached CSV file.
+- **Service:** Uses Resend when `RESEND_API_KEY` is configured, or logs to console in development.
+
+### `CRON_EXPORT_MIN_INTERVAL_MS`
+
+Minimum time between `/api/cron/export` runs; repeated triggers within this window return `{ status: "skipped" }` to prevent duplicate emails and scheduler retry storms. Defaults to `60000` (1 minute).
 
 ### `NEXT_PUBLIC_POSTHOG_API_KEY`
 

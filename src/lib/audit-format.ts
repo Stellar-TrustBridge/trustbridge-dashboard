@@ -9,6 +9,11 @@ export const AUDIT_ACTION_LABELS: Record<string, string> = {
   "registration.delete": "Soft-deleted a registration",
   "registration.restore": "Restored a registration",
   network_config_mismatch_detected: "Detected a Horizon/Soroban network mismatch",
+  "contract.sync": "Synced Soroban contract registrations",
+  "export.csv": "Exported contributors CSV",
+  "export.csv.failed": "Failed to export contributors CSV",
+  "export.cron": "Automated nightly treasury CSV export",
+  "export.cron.failed": "Automated nightly treasury CSV export failed",
 };
 
 export function describeAuditAction(action: string): string {

@@ -105,6 +105,17 @@ const envSchema = z.object({
     .pipe(z.number().int().positive())
     .optional()
     .default("86400000"), // 24 hours
+
+  // Cron authentication & export configuration (optional)
+  CRON_SECRET: z.string().optional(),
+  TREASURY_EXPORT_EMAIL: z.string().email().optional(),
+  CRON_EXPORT_EMAIL: z.string().email().optional(),
+  CRON_EXPORT_MIN_INTERVAL_MS: z
+    .string()
+    .transform((v) => parseInt(v, 10))
+    .pipe(z.number().int().positive())
+    .optional()
+    .default("60000"),
 });
 
 export type Environment = z.infer<typeof envSchema>;
