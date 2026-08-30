@@ -161,6 +161,8 @@ describe("POST /api/register — error codes", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(prisma.registration.findFirst).mockResolvedValue(null as never);
+    vi.mocked(prisma.registration.findUnique).mockResolvedValue(null as never);
     vi.mocked(checkStellarAddress).mockResolvedValue({
       funded: true,
       trustline: true,

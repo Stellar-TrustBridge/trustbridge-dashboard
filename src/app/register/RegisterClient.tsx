@@ -205,6 +205,7 @@ export function RegisterClient() {
             <Card
               className="border-emerald-500/30 bg-emerald-500/5"
               data-testid="current-registration"
+              aria-busy={isPendingSave ? "true" : "false"}
             >
               <CardHeader className="pb-3">
                 <CardTitle className="flex items-center gap-2 text-lg">
@@ -229,11 +230,17 @@ export function RegisterClient() {
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
-                {existingQuery.data?.registration?.readiness && (
-                  <TrustlineStatusBadge
-                    status={existingQuery.data.registration.readiness}
-                    showDescription
-                  />
+                {isPendingSave ? (
+                  <p className="text-sm text-muted-foreground">
+                    Confirming with the Stellar network…
+                  </p>
+                ) : (
+                  existingQuery.data?.registration?.readiness && (
+                    <TrustlineStatusBadge
+                      status={existingQuery.data.registration.readiness}
+                      showDescription
+                    />
+                  )
                 )}
                 {isValidGAddress(existingAddress) && (
                   <div data-testid="current-registration-qr">
@@ -266,14 +273,15 @@ export function RegisterClient() {
                 disabled={saveMutation.isPending}
               />
 
-              {saveMutation.isError && (
+              {failure && (
                 <p
                   className="text-sm text-destructive"
                   aria-live="polite"
                   role="alert"
                   data-testid="registration-error"
+                  data-failure-kind={failure.kind}
                 >
-                  {(saveMutation.error as Error).message}
+                  {failure.message}
                 </p>
               )}
 

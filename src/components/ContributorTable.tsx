@@ -943,7 +943,7 @@ export function ContributorTable({
           }
         }}
       />
-    </div>
+    </section>
   );
 }
 
