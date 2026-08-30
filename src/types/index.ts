@@ -57,6 +57,8 @@ export interface CheckAddressPayload {
   asset_issuer?: string;
 }
 
+export type OnboardingChecklistState = Record<string, boolean>;
+
 export interface ContributorRow {
   id: string;
   githubUsername: string;
@@ -71,6 +73,7 @@ export interface ContributorRow {
   lastCheckedAt: string | null;
   horizonLatencyMs: number | null;
   readiness: ReadinessStatus;
+  checklistCompleted?: OnboardingChecklistState | null;
   walletProof?: WalletProofInfo;
   horizonDebug?: HorizonDebugInfo;
 }
@@ -81,6 +84,7 @@ export type AuditAction =
   | "recheck.self_service"
   | "registration.create"
   | "registration.update"
+  | "checklist.update"
   | "network_config_mismatch_detected"
   | "contract.sync"
   | "export.csv"

@@ -24,11 +24,12 @@ import {
 import { isValidGAddress } from "@/lib/stellar-address";
 import { buildWalletProofInfo } from "@/lib/registration-insights";
 import { mapRegisterError, type RegisterFailure } from "@/lib/register-error";
-import type { HorizonDebugInfo, WalletProofInfo } from "@/types";
+import type { HorizonDebugInfo, OnboardingChecklistState, WalletProofInfo } from "@/types";
 
 interface RegistrationRecord {
   stellarAddress: string;
   readiness: "ready" | "low_reserve" | "not_ready";
+  checklistCompleted?: OnboardingChecklistState | null;
   walletProof?: WalletProofInfo;
   horizonDebug?: HorizonDebugInfo;
   /**
@@ -40,6 +41,7 @@ interface RegistrationRecord {
 
 interface RegistrationResponse {
   registration?: RegistrationRecord | null;
+  checklistCompleted?: OnboardingChecklistState | null;
 }
 
 const REGISTRATION_QUERY_KEY = ["registration"] as const;
@@ -168,6 +170,74 @@ export function RegisterClient() {
     },
   });
 
+  const checklistMutation = useMutation({
+    mutationFn: async ({
+      stepId,
+      completed,
+    }: {
+      stepId: string;
+      completed: boolean;
+    }) => {
+      const response = await fetch("/api/register/checklist", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({ stepId, completed }),
+      });
+
+      if (!response.ok) {
+        throw new Error("Failed to save checklist step");
+      }
+
+      return (await response.json()) as {
+        success: boolean;
+        checklistCompleted: OnboardingChecklistState;
+      };
+    },
+
+    onMutate: async ({ stepId, completed }) => {
+      await queryClient.cancelQueries({ queryKey: REGISTRATION_QUERY_KEY });
+      const previous = queryClient.getQueryData<RegistrationResponse>(
+        REGISTRATION_QUERY_KEY
+      );
+
+      queryClient.setQueryData<RegistrationResponse>(
+        REGISTRATION_QUERY_KEY,
+        (current) => {
+          const currentChecklist =
+            current?.checklistCompleted ??
+            current?.registration?.checklistCompleted ??
+            {};
+          const updatedChecklist = {
+            ...currentChecklist,
+            [stepId]: completed,
+          };
+
+          return {
+            ...current,
+            checklistCompleted: updatedChecklist,
+            registration: current?.registration
+              ? {
+                  ...current.registration,
+                  checklistCompleted: updatedChecklist,
+                }
+              : null,
+          };
+        }
+      );
+
+      return { previous };
+    },
+
+    onError: (_error, _vars, context) => {
+      queryClient.setQueryData(REGISTRATION_QUERY_KEY, context?.previous);
+    },
+
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: REGISTRATION_QUERY_KEY });
+    },
+  });
+
   const currentRegistration = existingQuery.data?.registration ?? null;
   const existingAddress = currentRegistration?.stellarAddress ?? "";
   const isPendingSave = Boolean(currentRegistration?.pending);
@@ -175,6 +245,15 @@ export function RegisterClient() {
   const proof =
     existingQuery.data?.registration?.walletProof ??
     buildWalletProofInfo(proofAddress, session?.user?.githubUsername ?? null);
+
+  const rawChecklist =
+    existingQuery.data?.checklistCompleted ??
+    currentRegistration?.checklistCompleted ??
+    {};
+  const checklistCompleted: OnboardingChecklistState = {
+    ...rawChecklist,
+    ...(existingAddress ? { register_address: true } : {}),
+  };
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-10 sm:px-6" data-testid="register-page">
@@ -317,7 +396,13 @@ export function RegisterClient() {
 
         <div className="space-y-6 lg:col-span-2">
           <FreighterProofCard proof={proof} addressReady={Boolean(proofAddress)} />
-          <TrustlineGuidancePanel />
+          <TrustlineGuidancePanel
+            checklistCompleted={checklistCompleted}
+            onToggleStep={(stepId, completed) =>
+              checklistMutation.mutate({ stepId, completed })
+            }
+            isUpdating={checklistMutation.isPending}
+          />
         </div>
       </div>
 
