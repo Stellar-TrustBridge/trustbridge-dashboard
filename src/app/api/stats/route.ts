@@ -1,10 +1,18 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 
 import { buildStatsCacheHeaders, parseStatsCacheTtl } from "@/lib/cache";
 import { getDashboardStats } from "@/lib/registrations";
+import {
+  checkRateLimit,
+  extractClientIp,
+  buildRateLimitHeaders,
+} from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+/** Generous limit for the public stats endpoint (120 req/min default). */
+const STATS_MAX_REQUESTS = 120;
 
 /**
  * GET /api/stats
@@ -40,11 +48,28 @@ export const dynamic = "force-dynamic";
  * - **100+ contributor scale** — the query uses a lean `select` (no joins)
  *   so it remains efficient even at large contributor counts.
  */
-export async function GET() {
+export async function GET(request: NextRequest) {
+  // ── Rate limit ─────────────────────────────────────────────────────────────
+  const clientIp = extractClientIp(request);
+  const rateLimit = checkRateLimit(clientIp, {
+    maxRequests: STATS_MAX_REQUESTS,
+  });
+  const rateLimitHeaders = buildRateLimitHeaders(rateLimit, STATS_MAX_REQUESTS);
+
+  if (!rateLimit.allowed) {
+    return NextResponse.json(
+      { error: "Rate limit exceeded" },
+      { status: 429, headers: rateLimitHeaders }
+    );
+  }
+
   const stats = await getDashboardStats();
   const ttlMs = parseStatsCacheTtl();
 
   return NextResponse.json(stats, {
-    headers: buildStatsCacheHeaders(ttlMs),
+    headers: {
+      ...buildStatsCacheHeaders(ttlMs),
+      ...rateLimitHeaders,
+    },
   });
 }

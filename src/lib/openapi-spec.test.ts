@@ -6,6 +6,16 @@ import {
   type OpenAPISpec,
 } from "@/lib/openapi-spec";
 
+/** Paths that MUST be present in the spec to avoid spec-drift. */
+const REQUIRED_PATHS = [
+  "/api/register",
+  "/api/check",
+  "/api/contributors",
+  "/api/stats",
+  "/api/actions/lookup",
+  "/api/webhooks/trustbridge-action",
+];
+
 describe("OpenAPI Spec Generation", () => {
   describe("generateOpenAPISpec", () => {
     it("generates valid OpenAPI 3.0.0 spec", () => {
@@ -103,6 +113,25 @@ describe("OpenAPI Spec Generation", () => {
       expect(statsPath.get.responses["200"]).toBeDefined();
     });
 
+    it("documents GET /api/actions/lookup endpoint", () => {
+      const spec = generateOpenAPISpec();
+      const lookupPath = spec.paths["/api/actions/lookup"];
+
+      expect(lookupPath).toBeDefined();
+      expect(lookupPath.get).toBeDefined();
+      expect(lookupPath.get.summary).toContain("lookup");
+      expect(lookupPath.get.tags).toContain("Actions");
+
+      const params = lookupPath.get.parameters as any[];
+      const addressParam = params.find((p) => p.name === "address");
+      expect(addressParam).toBeDefined();
+      expect(addressParam.required).toBe(true);
+
+      expect(lookupPath.get.responses["200"]).toBeDefined();
+      expect(lookupPath.get.responses["400"]).toBeDefined();
+      expect(lookupPath.get.responses["429"]).toBeDefined();
+    });
+
     it("documents POST /api/webhooks/trustbridge-action endpoint", () => {
       const spec = generateOpenAPISpec();
       const webhookPath = spec.paths["/api/webhooks/trustbridge-action"];
@@ -126,6 +155,7 @@ describe("OpenAPI Spec Generation", () => {
       expect(spec.components!.schemas!.ContributorList).toBeDefined();
       expect(spec.components!.schemas!.DashboardStats).toBeDefined();
       expect(spec.components!.schemas!.WebhookPayload).toBeDefined();
+      expect(spec.components!.schemas!.ActionLookupResult).toBeDefined();
     });
 
     it("defines security schemes", () => {
@@ -147,6 +177,26 @@ describe("OpenAPI Spec Generation", () => {
       const spec = generateOpenAPISpec();
 
       expect(spec.servers[0].url).toBe("http://localhost:3000");
+    });
+
+    // ── Spec-drift guard ────────────────────────────────────────────────
+    it("includes all REQUIRED_PATHS (spec-drift guard)", () => {
+      const spec = generateOpenAPISpec();
+
+      for (const path of REQUIRED_PATHS) {
+        expect(spec.paths[path]).toBeDefined();
+      }
+    });
+
+    it("every documented path has at least one operation", () => {
+      const spec = generateOpenAPISpec();
+
+      for (const [path, methods] of Object.entries(spec.paths)) {
+        const ops = Object.keys(methods).filter((m) =>
+          ["get", "post", "put", "patch", "delete"].includes(m)
+        );
+        expect(ops.length).toBeGreaterThan(0);
+      }
     });
   });
 

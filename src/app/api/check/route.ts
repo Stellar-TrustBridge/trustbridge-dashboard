@@ -1,7 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { assertSameOrigin } from "@/lib/csrf";
-import { extractClientIp, checkRateLimit } from "@/lib/rate-limit";
+import {
+  extractClientIp,
+  checkRateLimit,
+  buildRateLimitHeaders,
+} from "@/lib/rate-limit";
 import { jsonCheckError, jsonCheckResult } from "@/lib/check-api";
 import { DEFAULT_ASSET } from "@/lib/constants";
 import { checkStellarAddress } from "@/lib/horizon";
@@ -44,10 +48,12 @@ export async function POST(request: NextRequest) {
   // ── Rate limit ─────────────────────────────────────────────────────────────
   const clientIp = extractClientIp(request);
   const rateLimit = checkRateLimit(clientIp);
+  const rateLimitHeaders = buildRateLimitHeaders(rateLimit, 10);
+
   if (!rateLimit.allowed) {
     return NextResponse.json(
       { errors: ["Rate limit exceeded. Please try again later."] },
-      { status: 429, headers: { "Retry-After": String(rateLimit.retryAfter) } }
+      { status: 429, headers: rateLimitHeaders }
     );
   }
 
@@ -68,7 +74,11 @@ export async function POST(request: NextRequest) {
     if (!bypass) {
       const cached = checkCache.get(cacheKey) as HorizonCheckResult | null;
       if (cached) {
-        return jsonCheckResult(cached);
+        const res = jsonCheckResult(cached);
+        for (const [k, v] of Object.entries(rateLimitHeaders)) {
+          res.headers.set(k, v);
+        }
+        return res;
       }
     }
 
@@ -94,7 +104,11 @@ export async function POST(request: NextRequest) {
       checkCache.set(cacheKey, result);
     }
 
-    return jsonCheckResult(result);
+    const res = jsonCheckResult(result);
+    for (const [k, v] of Object.entries(rateLimitHeaders)) {
+      res.headers.set(k, v);
+    }
+    return res;
   } catch (error) {
     // NOTE: the address is intentionally *not* passed as context. It is the
     // one field a caller controls and it is a G-address — `captureException`

@@ -3,6 +3,7 @@ import {
   checkRateLimit,
   extractClientIp,
   resetRateLimit,
+  buildRateLimitHeaders,
 } from "@/lib/rate-limit";
 import { NextRequest } from "next/server";
 
@@ -232,6 +233,42 @@ describe("Rate Limiting", () => {
       const ip = extractClientIp(request);
 
       expect(ip).toBe("192.168.1.1");
+    });
+  });
+
+  describe("buildRateLimitHeaders", () => {
+    it("returns standard headers for allowed request", () => {
+      const result = { allowed: true, retryAfter: 0, remaining: 7 };
+      const headers = buildRateLimitHeaders(result, 10);
+
+      expect(headers["RateLimit-Limit"]).toBe("10");
+      expect(headers["RateLimit-Remaining"]).toBe("7");
+      expect(headers["RateLimit-Reset"]).toBe("0");
+      expect(headers["Retry-After"]).toBeUndefined();
+    });
+
+    it("returns Retry-After header when rate limited", () => {
+      const result = { allowed: false, retryAfter: 15, remaining: 0 };
+      const headers = buildRateLimitHeaders(result, 10);
+
+      expect(headers["RateLimit-Limit"]).toBe("10");
+      expect(headers["RateLimit-Remaining"]).toBe("0");
+      expect(headers["RateLimit-Reset"]).toBe("15");
+      expect(headers["Retry-After"]).toBe("15");
+    });
+
+    it("floors remaining at 0", () => {
+      const result = { allowed: false, retryAfter: 5, remaining: -1 };
+      const headers = buildRateLimitHeaders(result, 10);
+
+      expect(headers["RateLimit-Remaining"]).toBe("0");
+    });
+
+    it("sets Reset to 0 for allowed requests", () => {
+      const result = { allowed: true, retryAfter: 0, remaining: 9 };
+      const headers = buildRateLimitHeaders(result, 10);
+
+      expect(headers["RateLimit-Reset"]).toBe("0");
     });
   });
 

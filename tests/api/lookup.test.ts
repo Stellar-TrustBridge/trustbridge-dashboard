@@ -313,4 +313,20 @@ describe("GET /api/actions/lookup", () => {
       expect(response.headers.get("content-type")).toMatch(/application\/json/i);
     });
   });
+
+  describe("rate-limit headers", () => {
+    it("returns RateLimit-* headers on successful response", async () => {
+      const mockResult = { nextAction: "none" };
+      vi.mocked(cacheLib.verificationCache.getOrCompute).mockResolvedValue(mockResult);
+
+      const request = new NextRequest(
+        `http://localhost:3000/api/actions/lookup?address=${VALID_ADDRESS}`
+      );
+      const response = await GET(request);
+
+      expect(response.headers.get("ratelimit-limit")).toBeTruthy();
+      expect(response.headers.get("ratelimit-remaining")).toBeTruthy();
+      expect(response.headers.get("ratelimit-reset")).toBeTruthy();
+    });
+  });
 });
