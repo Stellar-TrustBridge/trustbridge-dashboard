@@ -8,6 +8,7 @@ import { CheckCircle2, Loader2 } from "lucide-react";
 
 import { AddressHistoryPanel } from "@/components/AddressHistoryPanel";
 import { AddressInput } from "@/components/AddressInput";
+import { ProfilePrivacyPanel } from "@/components/ProfilePrivacyPanel";
 import { AddressQr } from "@/components/AddressQr";
 import { FreighterProofCard } from "@/components/FreighterProofCard";
 import { OutreachTemplateGenerator } from "@/components/OutreachTemplateGenerator";
@@ -309,6 +310,7 @@ export function RegisterClient() {
         <div className="space-y-6 lg:col-span-2">
           <FreighterProofCard proof={proof} addressReady={Boolean(proofAddress)} />
           <TrustlineGuidancePanel />
+          {existingAddress && <ProfilePrivacyPanel />}
         </div>
       </div>
 

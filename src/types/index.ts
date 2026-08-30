@@ -82,7 +82,8 @@ export type AuditAction =
   | "registration.create"
   | "registration.update"
   | "network_config_mismatch_detected"
-  | "contract.sync";
+  | "contract.sync"
+  | "profile.privacy_updated";
 
 export interface AuditLogEntry {
   id: string;
@@ -180,3 +181,20 @@ export interface NetworkConfig {
 
 /** Maintainer RBAC role (see next-auth session.user.role). */
 export type AppRole = "admin" | "operator" | "viewer";
+
+/** Public profile shown at /profile/[username]. G-address only when opted in. */
+export interface PublicProfile {
+  githubUsername: string;
+  /** Readiness status — only present when the contributor has an active registration. */
+  readiness: ReadinessStatus | null;
+  /** Stellar address — only present when showStellarAddress=true. */
+  stellarAddress: string | null;
+  /** ISO timestamp of last Horizon check, or null. */
+  lastCheckedAt: string | null;
+}
+
+/** Privacy settings for the authenticated user's own profile. */
+export interface ProfilePrivacySettings {
+  profilePublic: boolean;
+  showStellarAddress: boolean;
+}
