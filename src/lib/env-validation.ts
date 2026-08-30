@@ -19,6 +19,7 @@ const envSchema = z.object({
   NEXTAUTH_URL: z.string().url("NEXTAUTH_URL must be a valid URL"),
   NEXTAUTH_SECRET: z.string().min(1, "NEXTAUTH_SECRET is required"),
   TOKEN_ENCRYPTION_KEY: z.string().min(1, "TOKEN_ENCRYPTION_KEY is required"),
+  BADGE_SIGNING_KEY: z.string().optional(),
 
   // Required: GitHub org/team for maintainer access
   GITHUB_MAINTAINER_ORG: z.string().min(1, "GITHUB_MAINTAINER_ORG is required"),
