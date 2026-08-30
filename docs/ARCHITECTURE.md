@@ -348,6 +348,38 @@ End-to-end/browser coverage (e.g. Playwright) for the event timeline panel and a
 
 ---
 
+## CORS Policy
+
+The trustbridge-action runs **server-side** (Node.js fetch in GitHub Actions), so CORS does not apply to its calls. However, the public endpoints `/api/actions/lookup` and `/api/check` may be called from browser-based tools (Swagger UI, custom scripts), so we lock them down defensively.
+
+### Configuration
+
+CORS headers are applied via `next.config.mjs` → `headers()`:
+
+| Header | Value |
+|--------|-------|
+| `Access-Control-Allow-Origin` | `https://github.com, https://github.io` |
+| `Access-Control-Allow-Methods` | `GET, POST, OPTIONS` |
+| `Access-Control-Allow-Headers` | `Content-Type, Authorization, X-Cache-Bypass` |
+| `Access-Control-Max-Age` | `86400` (24 hours) |
+| `Vary` | `Origin` |
+
+### Security constraints
+
+- **No wildcard (`*`) with credentials.** The allowed origins are explicitly listed.
+- **Default deny.** Only the two paths above receive CORS headers. Authenticated endpoints (`/api/register`, `/api/contributors`, `/api/stats`) are same-origin only.
+- **No credentials header.** `Access-Control-Allow-Credentials` is intentionally omitted — these endpoints don't use cookies.
+- **To add a new origin**, append it to `ALLOWED_ORIGINS` in `next.config.mjs`.
+
+### Tests
+
+CORS configuration is tested in `tests/unit/cors.test.ts`:
+- Verifies correct origins are allowed
+- Verifies no wildcard origin
+- Verifies authenticated endpoints are excluded
+
+---
+
 ## Related docs
 
 - [Project structure](./PROJECT_STRUCTURE.md)
