@@ -147,6 +147,7 @@ All docs are cross-linked from this README:
 | [**Architecture**](./docs/ARCHITECTURE.md) | System design, data flow, auth model |
 | [**Project structure**](./docs/PROJECT_STRUCTURE.md) | Directory layout and key files |
 | [**Deployment**](./docs/DEPLOYMENT.md) | Vercel deployment checklist |
+| [**Grafana dashboards & metrics**](./docs/grafana/README.md) | Ready-to-import Grafana JSON dashboards, Prometheus metric freeze specification, on-call alert rules |
 | [**Contributing**](./docs/CONTRIBUTING.md) | How to contribute to this repo |
 | [**CSRF protection**](./docs/CSRF.md) | Threat model, protected routes, non-browser client policy, testing guide |
 | [**Sentry error tracking**](./docs/SENTRY.md) | Setup, environment variables, instrumented routes, testing guide |

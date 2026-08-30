@@ -107,6 +107,7 @@ Update or create OAuth App:
 
 ## Monitoring & limits
 
+- **Grafana Dashboards & Metrics** — import ready-made dashboards in [docs/grafana/](./grafana/README.md) ([Overview JSON](./grafana/trustbridge-overview.json) / [JSON API JSON](./grafana/trustbridge-json-api.json)) for live payout readiness and health monitoring.
 - **Horizon rate limits** — batch re-check queries one account per registration; large Waves may need throttling (future enhancement)
 - **Vercel serverless timeout** — default 10s on Hobby; batch re-check may need pagination for 100+ contributors
 - **Database connections** — use connection pooling (Neon pooler, Supabase pooler, or Prisma Accelerate)
@@ -143,6 +144,7 @@ jobs:
 
 ## Related docs
 
+- [Grafana dashboards & metrics](./grafana/README.md)
 - [Setup guide](./SETUP.md)
 - [Architecture](./ARCHITECTURE.md)
 - [Contributing](./CONTRIBUTING.md)
