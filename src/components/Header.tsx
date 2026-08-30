@@ -15,6 +15,7 @@ import {
 import { useTheme } from "next-themes";
 
 import { GitHubIcon } from "@/components/icons/GitHubIcon";
+import { NotificationBell } from "@/components/NotificationBell";
 import { SignInButton } from "@/components/SignInButton";
 
 import { Button } from "@/components/ui/button";
@@ -185,6 +186,8 @@ export function Header() {
             <Sun className="h-4 w-4 rotate-0 scale-100 transition-all dark:-rotate-90 dark:scale-0" />
             <Moon className="absolute h-4 w-4 rotate-90 scale-0 transition-all dark:rotate-0 dark:scale-100" />
           </Button>
+
+          {session && <NotificationBell />}
 
           {session ? (
             <div className="flex items-center gap-1.5">
