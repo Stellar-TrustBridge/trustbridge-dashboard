@@ -102,3 +102,19 @@ for every state, so a badge can never promise something the wizard contradicts.
    `spendable_xlm_balance` and friends never appear in contributor copy.
 4. **One next step.** Every state ends with exactly one thing to do.
 5. **Update this file and `readiness-copy.test.ts` in the same change.**
+
+## README Readiness Badge Endpoint
+
+Repositories can embed an SVG readiness badge in their README via `GET /api/badge/[username]?sig=...`.
+
+### HMAC Integrity & Anti-Spoofing
+- Badges require a valid HMAC-SHA256 signature (`sig`) generated with `signBadge(username, exp)`.
+- Secret key resolved from `BADGE_SIGNING_KEY` (or `NEXTAUTH_SECRET` / `TOKEN_ENCRYPTION_KEY`).
+- Optional expiration timestamp (`exp` in seconds) supported for short-lived signed URLs.
+- Requests with missing, invalid, or expired signatures return `403 Forbidden`.
+
+### Privacy & User Enumeration Protection
+- Badges are public ONLY if the user has an active registration with `profilePublic: true`.
+- Requests for private, missing, or soft-deleted profiles return an identical `404 Not Found` response.
+- SVG output contains NO PII or Stellar addresses.
+
