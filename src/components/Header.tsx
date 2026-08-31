@@ -151,6 +151,11 @@ export function Header() {
             </Link>
           )}
           {session?.user?.isMaintainer && (
+            <Link href="/dashboard/queue" className={navLinkClass}>
+              Failed jobs
+            </Link>
+          )}
+          {session?.user?.isMaintainer && (
             <Link href="/dashboard/settings" className={navLinkClass}>
               Settings
             </Link>
@@ -324,6 +329,15 @@ export function Header() {
                   onClick={closeMenu}
                 >
                   Dashboard
+                </Link>
+              )}
+              {session?.user?.isMaintainer && (
+                <Link
+                  href="/dashboard/queue"
+                  className={cn(navLinkClass, "rounded-md px-3 py-2")}
+                  onClick={closeMenu}
+                >
+                  Failed jobs
                 </Link>
               )}
               {session?.user?.isMaintainer && (

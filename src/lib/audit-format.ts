@@ -9,6 +9,7 @@ export const AUDIT_ACTION_LABELS: Record<string, string> = {
   "registration.delete": "Soft-deleted a registration",
   "registration.restore": "Restored a registration",
   network_config_mismatch_detected: "Detected a Horizon/Soroban network mismatch",
+  "queue.job.retried": "Retried a failed job from the dead-letter queue",
 };
 
 export function describeAuditAction(action: string): string {

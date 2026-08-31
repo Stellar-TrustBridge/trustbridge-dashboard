@@ -21,6 +21,8 @@ const nextConfig = {
   // Next 14: keep stellar-sdk out of the RSC bundler (native deps)
   experimental: {
     serverComponentsExternalPackages: ["stellar-sdk", "sodium-native"],
+    // Enables src/instrumentation.ts (opt-in OpenTelemetry tracing, issue #203).
+    instrumentationHook: true,
   },
 
   async headers() {

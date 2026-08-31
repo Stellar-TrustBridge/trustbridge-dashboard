@@ -105,6 +105,37 @@ const envSchema = z.object({
     .pipe(z.number().int().positive())
     .optional()
     .default("86400000"), // 24 hours
+
+  // ── Feature flags (issue #201) ──────────────────────────────────────────────
+  // Optional DB source. When falsy, only env overrides + built-in defaults apply.
+  FEATURE_FLAGS_DB_ENABLED: z.string().optional(),
+  // In-process cache TTL for DB-sourced flags.
+  FEATURE_FLAGS_CACHE_TTL_MS: z
+    .string()
+    .transform((v) => parseInt(v, 10))
+    .pipe(z.number().int().nonnegative())
+    .optional()
+    .default("30000"),
+  // Per-flag env overrides (highest precedence). See src/lib/feature-flags.ts.
+  FEATURE_FLAG_BATCH_RECHECK: z.string().optional(),
+  FEATURE_FLAG_INVITE_GENERATION: z.string().optional(),
+  FEATURE_FLAG_DLQ_RETRY: z.string().optional(),
+  FEATURE_FLAG_MAINTENANCE_MODE: z.string().optional(),
+  FEATURE_FLAG_OTEL_TRACES: z.string().optional(),
+
+  // ── Maintenance mode (issue #202) ──────────────────────────────────────────
+  // Truthy => banner shown and mutating APIs return 503. Env-only kill switch.
+  MAINTENANCE: z.string().optional(),
+  MAINTENANCE_MESSAGE: z.string().optional(),
+
+  // ── OpenTelemetry tracing (issue #203) ────────────────────────────────────
+  // Default off. Truthy => spans emitted for route / prisma / horizon hops.
+  OTEL_TRACES_ENABLED: z.string().optional(),
+  OTEL_SERVICE_NAME: z.string().optional().default("trustbridge-dashboard"),
+  OTEL_EXPORTER_OTLP_ENDPOINT: z
+    .string()
+    .url("OTEL_EXPORTER_OTLP_ENDPOINT must be a valid URL")
+    .optional(),
 });
 
 export type Environment = z.infer<typeof envSchema>;

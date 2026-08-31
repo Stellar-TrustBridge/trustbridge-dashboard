@@ -4,6 +4,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { authOptions } from "@/lib/auth";
 import { recordAuditLog } from "@/lib/audit";
 import { assertSameOrigin } from "@/lib/csrf";
+import { isFeatureEnabled } from "@/lib/feature-flags";
 import {
   createInvite,
   generateInviteCode,
@@ -32,6 +33,15 @@ export async function POST(request: NextRequest) {
 
   if (!session?.user?.id || !session.user.isMaintainer) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+
+  // Gated behind the `invite_generation` feature flag (issue #201) so invite
+  // issuance can be frozen during a Wave. Risky write → fails closed.
+  if (!(await isFeatureEnabled("invite_generation"))) {
+    return NextResponse.json(
+      { error: "Invite generation is currently disabled" },
+      { status: 403 }
+    );
   }
 
   const body = (await request.json()) as GenerateBulkInvitesRequest;
