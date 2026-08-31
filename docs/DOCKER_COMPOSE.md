@@ -108,6 +108,40 @@ docker-compose logs -f postgres
 docker-compose logs -f postgres-admin
 ```
 
+## Backup and restore drill
+
+> Never commit database dumps to git. PostgreSQL contains user identity data, GitHub usernames, and wallet addresses; treat dumps as sensitive PII.
+
+### Create a dump from the local Postgres container
+
+```bash
+docker-compose exec postgres pg_dump -U trustbridge -d trustbridge_dashboard --format=custom --file=/tmp/trustbridge_dashboard.pg_dump
+```
+
+To copy the dump off the container for safekeeping:
+
+```bash
+docker cp trustbridge-postgres:/tmp/trustbridge_dashboard.pg_dump ./artifacts/trustbridge_dashboard.pg_dump
+```
+
+### Restore a dump into a fresh local database
+
+```bash
+rm -rf ./artifacts && mkdir -p ./artifacts
+docker cp ./artifacts/trustbridge_dashboard.pg_dump trustbridge-postgres:/tmp/trustbridge_dashboard.pg_dump
+docker-compose exec postgres pg_restore --clean --if-exists -U trustbridge -d trustbridge_dashboard /tmp/trustbridge_dashboard.pg_dump
+```
+
+### Restore after a full stack reset
+
+```bash
+docker-compose down -v
+# Recreate the database from the dump
+# Note: use a fresh volume or existing data as appropriate
+```
+
+For a clean restore path, prefer a dedicated backup job or a scheduled `pg_dump` to an encrypted object store. Local development may use `pg_dump` directly; production MUST not keep plaintext dumps in the repo or on a shared workstation.
+
 ## Stopping and Cleanup
 
 ### Stop containers (preserve data)

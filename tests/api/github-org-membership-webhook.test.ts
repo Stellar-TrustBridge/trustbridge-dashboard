@@ -2,6 +2,12 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import crypto from "crypto";
 import { NextRequest } from "next/server";
 import { POST } from "@/app/api/webhooks/github-org-membership/route";
+import { POST as ReplayPOST } from "@/app/api/webhooks/github-org-membership/replay/route";
+import { requireAdmin } from "@/lib/api-auth";
+
+vi.mock("@/lib/api-auth", () => ({
+  requireAdmin: vi.fn(),
+}));
 
 vi.mock("@/lib/prisma", () => ({
   prisma: {
@@ -47,6 +53,7 @@ function createWebhookRequest(
 describe("POST /api/webhooks/github-org-membership", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(requireAdmin).mockResolvedValue(null);
     process.env.GITHUB_WEBHOOK_SECRET = WEBHOOK_SECRET;
     process.env.GITHUB_MAINTAINER_ORG = "test-org";
   });
@@ -244,5 +251,25 @@ describe("POST /api/webhooks/github-org-membership", () => {
     const req = createWebhookRequest(event);
     const res = await POST(req);
     expect(res.status).toBe(202);
+  });
+
+  it("requires admin access for replay requests", async () => {
+    vi.mocked(requireAdmin).mockResolvedValue(null);
+
+    const req = new NextRequest("http://localhost:3000/api/webhooks/github-org-membership/replay", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        action: "added",
+        member: { login: "testuser", id: 123 },
+        organization: { login: "test-org" },
+        sender: { login: "admin" },
+      }),
+    });
+
+    const res = await ReplayPOST(req);
+    expect(res.status).toBe(403);
   });
 });

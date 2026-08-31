@@ -105,6 +105,39 @@ Update or create OAuth App:
 
 ---
 
+## Backup and restore drill (Docker Compose)
+
+Use the same Postgres container defined in [DOCKER_COMPOSE.md](./DOCKER_COMPOSE.md) for a local recovery drill. This is a write-up, not a production substitute for automated backups.
+
+### 1) Create a dump
+
+```bash
+docker-compose exec postgres pg_dump -U trustbridge -d trustbridge_dashboard --format=custom --file=/tmp/trustbridge_dashboard.pg_dump
+```
+
+### 2) Copy the dump off the container
+
+```bash
+docker cp trustbridge-postgres:/tmp/trustbridge_dashboard.pg_dump ./artifacts/trustbridge_dashboard.pg_dump
+```
+
+### 3) Restore into a fresh database
+
+```bash
+docker-compose exec postgres createdb -U trustbridge trustbridge_dashboard
+
+docker cp ./artifacts/trustbridge_dashboard.pg_dump trustbridge-postgres:/tmp/trustbridge_dashboard.pg_dump
+docker-compose exec postgres pg_restore --clean --if-exists -U trustbridge -d trustbridge_dashboard /tmp/trustbridge_dashboard.pg_dump
+```
+
+### 4) Re-run migrations after restore
+
+```bash
+DATABASE_URL="postgresql://trustbridge:trustbridge-dev-password@localhost:5432/trustbridge_dashboard?schema=public" npm run db:deploy
+```
+
+> Never commit dump files or leave them in a shared working tree. These dumps may contain GitHub usernames, wallet addresses, registration history, and other personal data. Use encrypted storage or a managed backup service for production.
+
 ## Monitoring & limits
 
 - **Horizon rate limits** — batch re-check queries one account per registration; large Waves may need throttling (future enhancement)
