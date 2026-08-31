@@ -17,6 +17,9 @@ vi.mock("@/lib/prisma", () => ({
       findFirst: vi.fn(),
       upsert: vi.fn(),
     },
+    registrationConflict: {
+      create: vi.fn().mockResolvedValue({}),
+    },
   },
 }));
 
@@ -161,6 +164,8 @@ describe("POST /api/register — error codes", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(prisma.registration.findFirst).mockResolvedValue(null as never);
+    vi.mocked(prisma.registration.findUnique).mockResolvedValue(null as never);
     vi.mocked(checkStellarAddress).mockResolvedValue({
       funded: true,
       trustline: true,
@@ -201,7 +206,7 @@ describe("POST /api/register — error codes", () => {
   it("tags a contested address with ADDRESS_TAKEN", async () => {
     signedIn("user-1");
     // Someone else already holds it.
-    vi.mocked(prisma.registration.findUnique).mockResolvedValue({
+    vi.mocked(prisma.registration.findFirst).mockResolvedValue({
       id: "reg-9",
       userId: "user-2",
       stellarAddress: validAddress,

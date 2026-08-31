@@ -177,6 +177,17 @@ DEBUG=* npm run dev
 1. Prisma automatically closes idle connections; no manual action needed
 2. For persistent issues, reduce `connection_limit` or use `idle_in_transaction_session_timeout`
 
+## Contributor Search Indexes & Performance Tuning
+
+To prevent sequential scans (`seq-scan`) during contributor search and filtering as Wave data grows, the following indexes are configured in `prisma/schema.prisma`:
+
+- `User(githubUsername)`: Indexed for fast username filtering and exact/prefix searches.
+- `Registration(stellarAddress)`: Indexed for quick address lookup and collision detection.
+- `Registration(updatedAt)`: Indexed for sorting and paginated timeline queries.
+- `RegistrationConflict(attemptedAddress, createdAt)`: Indexed for maintainer collision audit queries.
+
+Ensure `prisma migrate deploy` is executed to apply migration `20260829120000_contributor_search_indexes`.
+
 ## Related Files
 
 - `prisma/schema.prisma` — Prisma schema (models, indexes)
