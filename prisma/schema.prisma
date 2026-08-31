@@ -60,7 +60,10 @@ model Registration {
   usdcBalance         String        @default("0")
   horizonLatencyMs    Int?
   lastCheckedAt       DateTime?
-  checklistCompleted  Json?         @default("{}")
+  /// Opt-in public profile. Default false (private).
+  profilePublic       Boolean       @default(false)
+  /// Only relevant when profilePublic=true. Shows G-address on public profile.
+  showStellarAddress  Boolean       @default(false)
   createdAt           DateTime      @default(now())
   updatedAt           DateTime      @updatedAt
   notes               String?
@@ -70,20 +73,7 @@ model Registration {
   @@index([trustlineReady])
   @@index([lastCheckedAt])
   @@index([deletedAt])
-  @@index([stellarAddress])
-  @@index([updatedAt])
-}
-
-model RegistrationConflict {
-  id               String   @id @default(cuid())
-  maintainerOrgId  String   @default("default")
-  attemptedAddress String
-  attemptedUserId  String
-  existingUserId   String?
-  createdAt        DateTime @default(now())
-
-  @@index([attemptedAddress])
-  @@index([createdAt])
+  @@index([profilePublic])
 }
 
 enum DisputeStatus {
