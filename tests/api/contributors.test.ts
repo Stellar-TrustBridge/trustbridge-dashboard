@@ -276,3 +276,64 @@ describe("POST /api/contributors", () => {
     expect(refreshAllContributors).not.toHaveBeenCalled();
   });
 });
+
+// ---------------------------------------------------------------------------
+// POST — Idempotency & Horizon Stampede Protection
+// ---------------------------------------------------------------------------
+describe("POST /api/contributors — Idempotency & Horizon protection", () => {
+  beforeEach(async () => {
+    const { recheckLockCache } = await import("@/lib/cache");
+    recheckLockCache.clear();
+    vi.mocked(requireMaintainerSession).mockResolvedValue({
+      user: { id: "maintainer-user-1", isMaintainer: true },
+    } as any);
+  });
+
+  it("prevents double-click stampede by returning the same jobId within the window", async () => {
+    vi.mocked(backgroundQueue.enqueue).mockResolvedValueOnce("job-batch-unique-1");
+
+    const r1 = post();
+    const res1 = await POST(r1);
+    expect(res1.status).toBe(200);
+    const json1 = await res1.json();
+    expect(json1.jobId).toBe("job-batch-unique-1");
+    expect(json1.idempotent).toBe(false);
+
+    // Second immediate click (double-click)
+    const r2 = post();
+    const res2 = await POST(r2);
+    expect(res2.status).toBe(200);
+    const json2 = await res2.json();
+    expect(json2.jobId).toBe("job-batch-unique-1");
+    expect(json2.idempotent).toBe(true);
+    expect(res2.headers.get("X-Idempotent-Replay")).toBe("true");
+
+    // Background queue was only enqueued once
+    expect(backgroundQueue.enqueue).toHaveBeenCalledTimes(1);
+  });
+
+  it("supports explicit Idempotency-Key header", async () => {
+    vi.mocked(backgroundQueue.enqueue).mockResolvedValueOnce("job-idempotency-key-test");
+
+    const headersWithKey = {
+      ...sameOriginHeaders,
+      "idempotency-key": "wave-batch-2026-08-29",
+    };
+
+    const r1 = post(headersWithKey);
+    const res1 = await POST(r1);
+    expect(res1.status).toBe(200);
+    const json1 = await res1.json();
+    expect(json1.jobId).toBe("job-idempotency-key-test");
+    expect(json1.idempotent).toBe(false);
+
+    const r2 = post(headersWithKey);
+    const res2 = await POST(r2);
+    expect(res2.status).toBe(200);
+    const json2 = await res2.json();
+    expect(json2.jobId).toBe("job-idempotency-key-test");
+    expect(json2.idempotent).toBe(true);
+
+    expect(backgroundQueue.enqueue).toHaveBeenCalledTimes(1);
+  });
+});
