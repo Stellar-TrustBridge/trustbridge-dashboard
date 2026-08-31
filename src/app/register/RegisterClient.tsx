@@ -23,6 +23,7 @@ import {
 } from "@/components/ui/card";
 import { isValidGAddress } from "@/lib/stellar-address";
 import { buildWalletProofInfo } from "@/lib/registration-insights";
+import { mapRegisterError, type RegisterFailure } from "@/lib/register-error";
 import type { HorizonDebugInfo, WalletProofInfo } from "@/types";
 
 interface RegistrationRecord {
@@ -141,7 +142,7 @@ export function RegisterClient() {
 
       const mapped =
         error && typeof error === "object" && "kind" in error
-          ? (error as RegisterFailure)
+          ? (error as unknown as RegisterFailure)
           : mapRegisterError(500, null);
 
       setFailure(mapped);

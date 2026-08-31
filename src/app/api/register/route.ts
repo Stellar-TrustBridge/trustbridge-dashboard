@@ -16,6 +16,9 @@ import { computeReadiness } from "@/lib/readiness";
 import { captureException } from "@/lib/sentry";
 import { mirrorRegistrationToSoroban } from "@/lib/soroban-register";
 import { recordInitialAddress, recordAddressChange } from "@/lib/address-history";
+import { enforceFreezeWindowGuard } from "@/lib/freeze-window";
+import { evaluateAndAuditAddressChangeAnomaly } from "@/lib/address-anomaly";
+import { isUserBanned } from "@/lib/ban-service";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -81,6 +84,21 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  // Check if contributor is banned
+  const banStatus = await isUserBanned(
+    session.user.id,
+    session.user.githubUsername ?? null
+  );
+  if (banStatus.banned) {
+    return NextResponse.json(
+      {
+        error: `Account is suspended from registration: ${banStatus.reason}`,
+        code: "USER_BANNED",
+      },
+      { status: 403 }
+    );
+  }
+
   try {
     const body = (await request.json()) as { stellarAddress?: string };
 
@@ -126,6 +144,19 @@ export async function POST(request: NextRequest) {
       activeUserRegistration &&
       activeUserRegistration.stellarAddress !== stellarAddress;
 
+    if (isAddressChange) {
+      const freezeGuard = await enforceFreezeWindowGuard({
+        request,
+        isMaintainer: Boolean(session.user.isMaintainer),
+        userId: session.user.id,
+        userLogin: session.user.githubUsername ?? null,
+        actionLabel: "address_change",
+      });
+      if (freezeGuard.blocked && freezeGuard.response) {
+        return freezeGuard.response;
+      }
+    }
+
     const horizonResult = await checkStellarAddress(
       stellarAddress,
       DEFAULT_ASSET.code,
@@ -167,6 +198,11 @@ export async function POST(request: NextRequest) {
         activeUserRegistration.stellarAddress,
         stellarAddress
       );
+      // Check for sudden mass address change anomaly (non-blocking)
+      void evaluateAndAuditAddressChangeAnomaly(
+        session.user.id,
+        session.user.githubUsername ?? null
+      ).catch((err) => console.error("Anomaly evaluation error:", err));
     }
 
     // Mirror registration to Soroban contract (best-effort, non-blocking).

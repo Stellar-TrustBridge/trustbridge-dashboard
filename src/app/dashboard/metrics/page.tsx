@@ -12,6 +12,10 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { WaveReadinessBar } from "@/components/WaveReadinessBar";
+import { HorizonLatencyChart } from "@/components/HorizonLatencyChart";
+import { AddressAnomalyBanner } from "@/components/AddressAnomalyBanner";
+import type { HorizonLatencyStats } from "@/lib/stats";
+import type { AnomalyStatus } from "@/lib/address-anomaly";
 
 // ── API response types ────────────────────────────────────────────────────
 
@@ -26,6 +30,8 @@ interface MetricsResponse {
       not_ready: number;
     };
   };
+  horizonLatency?: HorizonLatencyStats;
+  addressAnomaly?: AnomalyStatus;
   audit: {
     recentEntries: number;
     byAction: Record<string, number>;
@@ -117,6 +123,9 @@ export default function MetricsPage() {
         </Button>
       </div>
 
+      {/* ── Security Anomaly Alert ────────────────────────────── */}
+      <AddressAnomalyBanner status={data.addressAnomaly} />
+
       {/* ── Contributor readiness ─────────────────────────────── */}
       <Card className="mb-6">
         <CardHeader>
@@ -165,6 +174,9 @@ export default function MetricsPage() {
           </div>
         </CardContent>
       </Card>
+
+      {/* ── Horizon API Latency ─────────────────────────────────── */}
+      <HorizonLatencyChart stats={data.horizonLatency} />
 
       {/* ── Recent audit activity ─────────────────────────────── */}
       <Card className="mb-6">

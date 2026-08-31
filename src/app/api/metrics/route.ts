@@ -3,7 +3,9 @@ import { NextResponse } from "next/server";
 import { requireMaintainerSession } from "@/lib/api-auth";
 import { getRecentAuditLog } from "@/lib/audit";
 import { getContributors } from "@/lib/registrations";
-import { summarizeContributors } from "@/lib/stats";
+import { summarizeContributors, computeHorizonLatencyStats } from "@/lib/stats";
+import { checkAddressChangeAnomaly } from "@/lib/address-anomaly";
+import { prisma } from "@/lib/prisma";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -13,6 +15,8 @@ export const dynamic = "force-dynamic";
  *
  * Returns a lightweight admin metrics snapshot for the maintainer dashboard:
  * - contributor readiness counts
+ * - horizon latency statistics (p50, p95, avg)
+ * - mass address change anomaly detection
  * - recent audit log summary (last 50 entries)
  * - circuit-breaker & rate-limit env configuration
  *
@@ -33,6 +37,17 @@ export async function GET() {
     low_reserve: contributors.filter((c) => c.readiness === "low_reserve").length,
     not_ready: contributors.filter((c) => c.readiness === "not_ready").length,
   };
+
+  // Horizon latency snapshot
+  const latencyRecords = await prisma.registration.findMany({
+    select: { horizonLatencyMs: true },
+  });
+  const horizonLatency = computeHorizonLatencyStats(
+    latencyRecords.map((r) => r.horizonLatencyMs)
+  );
+
+  // Address change anomaly snapshot
+  const addressAnomaly = await checkAddressChangeAnomaly();
 
   // Recent audit log activity
   const auditEntries = await getRecentAuditLog(50);
@@ -61,6 +76,8 @@ export async function GET() {
       readyPercent: readinessSummary.readyPercent,
       byStatus,
     },
+    horizonLatency,
+    addressAnomaly,
     audit: {
       recentEntries: auditEntries.length,
       byAction: auditByAction,
