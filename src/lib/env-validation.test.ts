@@ -206,3 +206,49 @@ describe("env-validation", () => {
     });
   });
 });
+
+  describe("validateEnv - DATABASE_URL pool and pgbouncer settings", () => {
+    it("accepts DATABASE_URL with connection_limit and pool_timeout", () => {
+      process.env = {
+        GITHUB_CLIENT_ID: "test-id",
+        GITHUB_CLIENT_SECRET: "test-secret",
+        NEXTAUTH_URL: "http://localhost:3000",
+        NEXTAUTH_SECRET: "test-secret",
+        TOKEN_ENCRYPTION_KEY: "test-key",
+        GITHUB_MAINTAINER_ORG: "test-org",
+        DATABASE_URL: "postgresql://localhost/test?connection_limit=5&pool_timeout=10&pgbouncer=true&idle_in_transaction_session_timeout=30000",
+      };
+
+      const env = validateEnv();
+      expect(env.DATABASE_URL).toContain("connection_limit=5");
+      expect(env.DATABASE_URL).toContain("pgbouncer=true");
+    });
+
+    it("fails when connection_limit is invalid", () => {
+      process.env = {
+        GITHUB_CLIENT_ID: "test-id",
+        GITHUB_CLIENT_SECRET: "test-secret",
+        NEXTAUTH_URL: "http://localhost:3000",
+        NEXTAUTH_SECRET: "test-secret",
+        TOKEN_ENCRYPTION_KEY: "test-key",
+        GITHUB_MAINTAINER_ORG: "test-org",
+        DATABASE_URL: "postgresql://localhost/test?connection_limit=-1",
+      };
+
+      expect(() => validateEnv()).toThrow("Environment validation failed");
+    });
+
+    it("fails when pool_timeout is negative", () => {
+      process.env = {
+        GITHUB_CLIENT_ID: "test-id",
+        GITHUB_CLIENT_SECRET: "test-secret",
+        NEXTAUTH_URL: "http://localhost:3000",
+        NEXTAUTH_SECRET: "test-secret",
+        TOKEN_ENCRYPTION_KEY: "test-key",
+        GITHUB_MAINTAINER_ORG: "test-org",
+        DATABASE_URL: "postgresql://localhost/test?pool_timeout=-5",
+      };
+
+      expect(() => validateEnv()).toThrow("Environment validation failed");
+    });
+  });

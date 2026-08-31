@@ -181,3 +181,10 @@ All configuration is in `docker-compose.yml`. For development, the defaults are:
 **Do not use these credentials in production.** For production deployments, use managed database services (AWS RDS, Google Cloud SQL, Neon, Vercel Postgres, etc.) and follow your provider's security guidelines.
 
 See [DEPLOYMENT.md](./DEPLOYMENT.md) for production setup.
+
+## Connection Pooling & PgBouncer Notes
+
+The local Docker Compose environment runs standard PostgreSQL 16 on port 5432. PgBouncer is not required for local development.
+
+- Default connection string includes `connection_limit=5`.
+- For production setups using external PgBouncer (e.g. Supabase pooler on port 6543, Neon, or AWS RDS Proxy), refer to [docs/PRISMA_POOL_TUNING.md](./PRISMA_POOL_TUNING.md).
