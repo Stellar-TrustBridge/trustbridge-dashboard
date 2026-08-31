@@ -23,6 +23,7 @@ model User {
   auditLogs       TokenAuditLog[]
   addressHistory  AddressHistoryRecord[]
   invites         Invite[]
+  checklistCompleted Json?      @default("{}")
   createdAt       DateTime      @default(now())
   updatedAt       DateTime      @updatedAt
 
@@ -59,6 +60,7 @@ model Registration {
   usdcBalance         String        @default("0")
   horizonLatencyMs    Int?
   lastCheckedAt       DateTime?
+  checklistCompleted  Json?         @default("{}")
   createdAt           DateTime      @default(now())
   updatedAt           DateTime      @updatedAt
   notes               String?
