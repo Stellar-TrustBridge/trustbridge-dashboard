@@ -5,11 +5,25 @@ import { getRecentAuditLog } from "@/lib/audit";
 import { getHorizonCircuitBreakerMetrics } from "@/lib/horizon";
 import { getRateLimitMetrics } from "@/lib/rate-limit";
 import { getContributors } from "@/lib/registrations";
-import { summarizeContributors } from "@/lib/stats";
+import { summarizeContributors, computeHorizonLatencyStats } from "@/lib/stats";
+import { checkAddressChangeAnomaly } from "@/lib/address-anomaly";
+import { prisma } from "@/lib/prisma";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+/**
+ * GET /api/metrics
+ *
+ * Returns a lightweight admin metrics snapshot for the maintainer dashboard:
+ * - contributor readiness counts
+ * - horizon latency statistics (p50, p95, avg)
+ * - mass address change anomaly detection
+ * - recent audit log summary (last 50 entries)
+ * - circuit-breaker & rate-limit env configuration
+ *
+ * Requires an authenticated maintainer session.
+ */
 export async function GET() {
   const session = await requireMaintainerSession();
   if (!session) {
@@ -25,6 +39,18 @@ export async function GET() {
     not_ready: contributors.filter((c) => c.readiness === "not_ready").length,
   };
 
+  // Horizon latency snapshot
+  const latencyRecords = await prisma.registration.findMany({
+    select: { horizonLatencyMs: true },
+  });
+  const horizonLatency = computeHorizonLatencyStats(
+    latencyRecords.map((r) => r.horizonLatencyMs)
+  );
+
+  // Address change anomaly snapshot
+  const addressAnomaly = await checkAddressChangeAnomaly();
+
+  // Recent audit log activity
   const auditEntries = await getRecentAuditLog(50);
   const auditByAction: Record<string, number> = {};
   for (const entry of auditEntries) {
@@ -52,6 +78,8 @@ export async function GET() {
       readyPercent: readinessSummary.readyPercent,
       byStatus,
     },
+    horizonLatency,
+    addressAnomaly,
     audit: {
       recentEntries: auditEntries.length,
       byAction: auditByAction,

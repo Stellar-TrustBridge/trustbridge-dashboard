@@ -126,6 +126,33 @@ export default function DashboardPage() {
     },
   });
 
+  const banMutation = useMutation({
+    mutationFn: async ({
+      githubUsername,
+      action,
+      reason,
+    }: {
+      githubUsername: string;
+      action: "ban" | "unban";
+      reason?: string;
+    }) => {
+      const res = await fetch("/api/maintainer/ban", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ githubUsername, action, reason }),
+      });
+      if (!res.ok) {
+        const json = await res.json();
+        throw new Error(json.error || "Failed to update ban status");
+      }
+      return res.json();
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["contributors"] });
+      void queryClient.invalidateQueries({ queryKey: ["paginated-contributors"] });
+    },
+  });
+
   const sorobanQuery = useQuery({
     queryKey: ["soroban-events"],
     queryFn: async () => {
@@ -295,6 +322,9 @@ export default function DashboardPage() {
             // stacks a second, native `window.confirm()` on top of it.
             onExport={() => exportContributorsCsv(pager.contributors, true)}
             onRecheck={(id) => recheckOneMutation.mutate(id)}
+            onBanToggle={async (githubUsername, action, reason) => {
+              await banMutation.mutateAsync({ githubUsername, action, reason });
+            }}
             onLoadMore={() => void contributorsQuery.fetchNextPage()}
             hasMore={Boolean(contributorsQuery.hasNextPage)}
             isLoadingMore={contributorsQuery.isFetchingNextPage}

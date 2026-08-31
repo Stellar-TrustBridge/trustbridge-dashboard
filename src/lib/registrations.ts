@@ -31,7 +31,7 @@ type PersistedRegistration = Pick<
 >;
 
 type RegistrationWithUserRow = Registration & {
-  user: { githubUsername: string };
+  user: { githubUsername: string; banned?: boolean; banReason?: string | null };
 };
 
 /** Readiness for any persisted registration row (with or without its user join). */
@@ -62,7 +62,8 @@ export function toContributorRow(row: RegistrationWithUserRow): ContributorRow {
     lastCheckedAt: row.lastCheckedAt?.toISOString() ?? null,
     horizonLatencyMs: row.horizonLatencyMs ?? null,
     readiness: readinessOf(row),
-    checklistCompleted: (row.checklistCompleted as Record<string, boolean>) ?? null,
+    banned: row.user.banned ?? false,
+    banReason: row.user.banReason ?? undefined,
     walletProof: buildWalletProofInfo(
       row.stellarAddress,
       row.user.githubUsername
@@ -138,7 +139,7 @@ export async function getContributors(
       where: { deletedAt: null },
       include: {
         user: {
-          select: { githubUsername: true },
+          select: { githubUsername: true, banned: true, banReason: true },
         },
       },
       orderBy: { updatedAt: "desc" },

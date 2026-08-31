@@ -73,7 +73,8 @@ export interface ContributorRow {
   lastCheckedAt: string | null;
   horizonLatencyMs: number | null;
   readiness: ReadinessStatus;
-  checklistCompleted?: OnboardingChecklistState | null;
+  banned?: boolean;
+  banReason?: string;
   walletProof?: WalletProofInfo;
   horizonDebug?: HorizonDebugInfo;
 }

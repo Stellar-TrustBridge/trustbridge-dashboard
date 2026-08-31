@@ -23,9 +23,23 @@ model User {
   auditLogs       TokenAuditLog[]
   addressHistory  AddressHistoryRecord[]
   invites         Invite[]
-  notifications   Notification[]
+  banned          Boolean       @default(false)
+  bannedAt        DateTime?
+  banReason       String?
+  bannedById      String?
   createdAt       DateTime      @default(now())
   updatedAt       DateTime      @updatedAt
+
+  @@index([githubUsername])
+}
+
+model BannedContributor {
+  id              String   @id @default(cuid())
+  maintainerOrgId String   @default("default")
+  githubUsername  String   @unique
+  reason          String
+  bannedById      String?
+  createdAt       DateTime @default(now())
 
   @@index([githubUsername])
 }
