@@ -8,12 +8,35 @@ const globalForPrisma = globalThis as unknown as {
   prisma: PrismaClient | undefined;
 };
 
-/**
- * Global Prisma Client instance.
- * Reuses existing client in development to prevent connection exhaustion during Next.js hot reloads.
- * Reads pool parameters (connection_limit, pool_timeout, pgbouncer) directly from DATABASE_URL.
- */
-export const prisma =
+export function redactParams(paramsStr: string): string {
+  if (!paramsStr) return "";
+  return paramsStr
+    .replace(/\bG[A-Z0-9]{55}\b/g, "G***[REDACTED]")
+    .replace(/"accessToken"\s*:\s*"[^"]+"/g, '"accessToken":"[REDACTED]"')
+    .replace(/"token"\s*:\s*"[^"]+"/g, '"token":"[REDACTED]"')
+    .replace(/"password"\s*:\s*"[^"]+"/g, '"password":"[REDACTED]"')
+    .replace(/"codeHash"\s*:\s*"[^"]+"/g, '"codeHash":"[REDACTED]"');
+}
+
+export function logSlowQuery(
+  model: string,
+  action: string,
+  durationMs: number,
+  params?: string,
+  customThreshold?: number
+): boolean {
+  const threshold = customThreshold ?? Number(process.env.SLOW_QUERY_THRESHOLD_MS || 200);
+  if (durationMs >= threshold) {
+    const redacted = params ? redactParams(params) : "";
+    console.warn(
+      `[SLOW_QUERY] Prisma query ${model}.${action} took ${durationMs}ms (threshold: ${threshold}ms). Params: ${redacted}`
+    );
+    return true;
+  }
+  return false;
+}
+
+const basePrisma =
   globalForPrisma.prisma ??
   new PrismaClient({
     log:
@@ -22,23 +45,20 @@ export const prisma =
         : ["error"],
   });
 
-// Opt-in query spans (issue #203). The middleware is registered once per
-// client instance; the check is a cheap env read when tracing is off.
-const tracedClient = prisma as PrismaClient & { __tracingMiddleware?: boolean };
-if (!tracedClient.__tracingMiddleware) {
-  tracedClient.__tracingMiddleware = true;
-  prisma.$use(async (params, next) => {
-    if (!isTracingEnabled()) return next(params);
-    const model = params.model ?? "raw";
-    return withSpan(`prisma.${model}.${params.action}`, () => next(params), {
-      attributes: {
-        "db.system": "postgresql",
-        "db.model": model,
-        "db.operation": params.action,
-      },
-    });
-  });
-}
+basePrisma.$use(async (params, next) => {
+  const start = Date.now();
+  const result = await next(params);
+  const duration = Date.now() - start;
+  logSlowQuery(
+    params.model || "Raw",
+    params.action,
+    duration,
+    JSON.stringify(params.args || {})
+  );
+  return result;
+});
+
+export const prisma = basePrisma;
 
 if (process.env.NODE_ENV !== "production") {
   globalForPrisma.prisma = prisma;
