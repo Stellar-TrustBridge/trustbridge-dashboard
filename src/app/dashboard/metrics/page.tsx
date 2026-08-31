@@ -1,9 +1,19 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { Loader2, RefreshCw, ShieldCheck, Users, Zap } from "lucide-react";
+import {
+  AlertTriangle,
+  CheckCircle2,
+  Loader2,
+  RefreshCw,
+  ShieldCheck,
+  TimerReset,
+  Users,
+  Zap,
+} from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import {
   Card,
   CardContent,
@@ -13,7 +23,11 @@ import {
 } from "@/components/ui/card";
 import { WaveReadinessBar } from "@/components/WaveReadinessBar";
 
-// ── API response types ────────────────────────────────────────────────────
+interface CircuitBreakerTripEvent {
+  trippedAt: number;
+  failureCountAtTrip: number;
+  recoveredAt: number | null;
+}
 
 interface MetricsResponse {
   contributors: {
@@ -31,18 +45,32 @@ interface MetricsResponse {
     byAction: Record<string, number>;
     latestAt: string | null;
   };
+  circuitBreaker: {
+    state: "CLOSED" | "OPEN" | "HALF_OPEN";
+    failureCount: number;
+    successCount: number;
+    lastFailureTime: number | null;
+    totalTrips: number;
+    recentTrips: CircuitBreakerTripEvent[];
+    processLocal: boolean;
+  };
+  rateLimit: {
+    activeIdentifiers: number;
+    totalAllowed: number;
+    totalBlocked: number;
+    processLocal: boolean;
+  };
   config: {
     rateLimitWindowMs: number;
     rateLimitMaxRequests: number;
     circuitBreakerFailureThreshold: number;
+    circuitBreakerSuccessThreshold: number;
     circuitBreakerRecoveryMs: number;
     staleCsvMaxAgeMs: number;
     horizonUrl: string;
     sorobanContractConfigured: boolean;
   };
 }
-
-// ── Helpers ───────────────────────────────────────────────────────────────
 
 function msToSeconds(ms: number) {
   return (ms / 1000).toFixed(0);
@@ -52,7 +80,44 @@ function msToHours(ms: number) {
   return (ms / 3_600_000).toFixed(1);
 }
 
-// ── Page ──────────────────────────────────────────────────────────────────
+function formatTimestamp(ts: number | null): string {
+  if (!ts) return "Never";
+  return new Date(ts).toLocaleString();
+}
+
+function CircuitBreakerStateBadge({ state }: { state: MetricsResponse["circuitBreaker"]["state"] }) {
+  switch (state) {
+    case "CLOSED":
+      return (
+        <Badge className="bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300">
+          <CheckCircle2 className="mr-1 h-3 w-3" />
+          Closed — Healthy
+        </Badge>
+      );
+    case "OPEN":
+      return (
+        <Badge className="bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300">
+          <AlertTriangle className="mr-1 h-3 w-3" />
+          Open — Tripped
+        </Badge>
+      );
+    case "HALF_OPEN":
+      return (
+        <Badge className="bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300">
+          <TimerReset className="mr-1 h-3 w-3" />
+          Half-open — Recovering
+        </Badge>
+      );
+  }
+}
+
+function ProcessLocalNote() {
+  return (
+    <p className="mt-2 text-xs text-muted-foreground">
+      ⚠️ Process-local data only — each server instance reports its own state until Redis is deployed.
+    </p>
+  );
+}
 
 export default function MetricsPage() {
   const metricsQuery = useQuery<MetricsResponse>({
@@ -62,6 +127,7 @@ export default function MetricsPage() {
       if (!res.ok) throw new Error("Failed to load metrics");
       return res.json();
     },
+    refetchInterval: 15000,
   });
 
   const queueHealthQuery = useQuery<{
@@ -99,7 +165,7 @@ export default function MetricsPage() {
   }
 
   const data = metricsQuery.data!;
-  const { contributors, audit, config } = data;
+  const { contributors, audit, circuitBreaker, rateLimit, config } = data;
   const auditEntries = Object.entries(audit.byAction).sort((a, b) => b[1] - a[1]);
 
   return (
@@ -107,12 +173,12 @@ export default function MetricsPage() {
       className="mx-auto max-w-5xl px-4 py-8 sm:px-6 sm:py-10"
       data-testid="metrics-page"
     >
-      {/* Header */}
       <div className="mb-6 flex flex-col gap-4 sm:mb-8 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 className="text-2xl font-bold sm:text-3xl">Admin metrics</h1>
           <p className="mt-2 text-sm text-muted-foreground sm:text-base">
             Real-time operational snapshot for the TrustBridge maintainer team.
+            Auto-refreshes every 15s.
           </p>
         </div>
         <Button
@@ -131,6 +197,177 @@ export default function MetricsPage() {
         </Button>
       </div>
 
+      {/* ── Circuit Breaker Status ─────────────────────────────── */}
+      <Card className="mb-6" data-testid="metrics-circuit-breaker">
+        <CardHeader>
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <CardTitle className="flex items-center gap-2">
+                <Zap className="h-5 w-5" />
+                Horizon circuit breaker
+              </CardTitle>
+              <CardDescription>
+                Protects Horizon from cascading failures during incidents.
+              </CardDescription>
+            </div>
+            <CircuitBreakerStateBadge state={circuitBreaker.state} />
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <div className="rounded-lg border border-border-strong px-3 py-3">
+              <p className="text-xs text-muted-foreground">State</p>
+              <p className="mt-1 text-lg font-semibold tabular-nums">{circuitBreaker.state}</p>
+            </div>
+            <div className="rounded-lg border border-border-strong px-3 py-3">
+              <p className="text-xs text-muted-foreground">Total trips</p>
+              <p className="mt-1 text-lg font-semibold tabular-nums">{circuitBreaker.totalTrips}</p>
+            </div>
+            <div className="rounded-lg border border-border-strong px-3 py-3">
+              <p className="text-xs text-muted-foreground">Current failures</p>
+              <p className="mt-1 text-lg font-semibold tabular-nums">
+                {circuitBreaker.failureCount}
+                <span className="text-xs text-muted-foreground">
+                  /{config.circuitBreakerFailureThreshold}
+                </span>
+              </p>
+            </div>
+            <div className="rounded-lg border border-border-strong px-3 py-3">
+              <p className="text-xs text-muted-foreground">Last failure</p>
+              <p className="mt-1 text-xs font-medium">
+                {formatTimestamp(circuitBreaker.lastFailureTime)}
+              </p>
+            </div>
+          </div>
+
+          <div>
+            <h3 className="mb-2 text-sm font-medium">Recent trips</h3>
+            {circuitBreaker.recentTrips.length === 0 ? (
+              <p className="rounded-lg border border-dashed border-border-strong px-4 py-3 text-sm text-muted-foreground">
+                No trips recorded. Circuit has been healthy since process start.
+              </p>
+            ) : (
+              <div
+                className="overflow-x-auto"
+                data-testid="metrics-circuit-breaker-trips"
+              >
+                <table className="w-full min-w-[320px] text-sm">
+                  <caption className="sr-only">
+                    Recent circuit breaker trips, most recent first.
+                  </caption>
+                  <thead>
+                    <tr className="border-b-2 border-border-strong text-left text-muted-foreground">
+                      <th scope="col" className="pb-2 font-medium">
+                        Tripped at
+                      </th>
+                      <th scope="col" className="pb-2 font-medium">
+                        Failures at trip
+                      </th>
+                      <th scope="col" className="pb-2 font-medium">
+                        Recovered at
+                      </th>
+                      <th scope="col" className="pb-2 font-medium">
+                        Duration
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {[...circuitBreaker.recentTrips]
+                      .reverse()
+                      .map((trip, idx) => (
+                        <tr
+                          key={`${trip.trippedAt}-${idx}`}
+                          className="border-b border-border-strong last:border-0"
+                        >
+                          <td className="py-3 font-mono text-xs">
+                            {new Date(trip.trippedAt).toLocaleString()}
+                          </td>
+                          <td className="py-3 tabular-nums">
+                            {trip.failureCountAtTrip}
+                          </td>
+                          <td className="py-3 font-mono text-xs">
+                            {trip.recoveredAt
+                              ? new Date(trip.recoveredAt).toLocaleString()
+                              : (
+                                <Badge variant="destructive" className="text-xs">
+                                  Still open
+                                </Badge>
+                              )}
+                          </td>
+                          <td className="py-3 tabular-nums">
+                            {trip.recoveredAt
+                              ? `${Math.round((trip.recoveredAt - trip.trippedAt) / 1000)}s`
+                              : `${Math.round((Date.now() - trip.trippedAt) / 1000)}s*`}
+                          </td>
+                        </tr>
+                      ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          <ProcessLocalNote />
+        </CardContent>
+      </Card>
+
+      {/* ── Rate Limit Status ──────────────────────────────────── */}
+      <Card className="mb-6" data-testid="metrics-rate-limit">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <ShieldCheck className="h-5 w-5" />
+            Rate limiting
+          </CardTitle>
+          <CardDescription>
+            Per-IP request throttling for the check endpoint.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+            <div className="rounded-lg border border-emerald-300 bg-emerald-50 px-4 py-4 dark:border-emerald-600 dark:bg-emerald-950/40">
+              <p className="text-xs text-emerald-700 dark:text-emerald-300">
+                Requests allowed
+              </p>
+              <p className="mt-1 text-2xl font-bold tabular-nums text-emerald-700 dark:text-emerald-300">
+                {rateLimit.totalAllowed.toLocaleString()}
+              </p>
+            </div>
+            <div className="rounded-lg border border-red-300 bg-red-50 px-4 py-4 dark:border-red-600 dark:bg-red-950/40">
+              <p className="text-xs text-red-700 dark:text-red-300">
+                Requests blocked
+              </p>
+              <p className="mt-1 text-2xl font-bold tabular-nums text-red-700 dark:text-red-300">
+                {rateLimit.totalBlocked.toLocaleString()}
+              </p>
+            </div>
+            <div className="rounded-lg border border-border-strong px-4 py-4">
+              <p className="text-xs text-muted-foreground">
+                Active clients (window)
+              </p>
+              <p className="mt-1 text-2xl font-bold tabular-nums">
+                {rateLimit.activeIdentifiers.toLocaleString()}
+              </p>
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-border-strong px-3 py-3">
+            <div className="flex items-center justify-between text-sm">
+              <span className="text-muted-foreground">
+                Window: {msToSeconds(config.rateLimitWindowMs)}s · Max: {config.rateLimitMaxRequests} req
+              </span>
+              <span className="font-mono text-xs text-muted-foreground">
+                Block rate:{" "}
+                {rateLimit.totalAllowed + rateLimit.totalBlocked > 0
+                  ? `${((rateLimit.totalBlocked / (rateLimit.totalAllowed + rateLimit.totalBlocked)) * 100).toFixed(1)}%`
+                  : "0%"}
+              </span>
+            </div>
+          </div>
+
+          <ProcessLocalNote />
+        </CardContent>
+      </Card>
+
       {/* ── Contributor readiness ─────────────────────────────── */}
       <Card className="mb-6">
         <CardHeader>
@@ -148,16 +385,13 @@ export default function MetricsPage() {
             readyCount={contributors.ready}
             totalCount={contributors.total}
           />
-          {/* Dark mode: -300 heading + -200 sub-label on dark:bg-*-950/40 gives
-              ≥ 7:1 contrast against the page background (WCAG AAA).
-              Light mode: -700 on white/tinted bg gives ≥ 6.5:1 (WCAG AA). */}
           <div className="grid grid-cols-1 gap-3 text-center sm:grid-cols-3 sm:gap-4">
             <div className="min-h-11 rounded-lg border border-emerald-300 bg-emerald-50 px-4 py-4 dark:border-emerald-600 dark:bg-emerald-950/40">
               <p className="text-2xl font-bold text-emerald-700 dark:text-emerald-300">
                 {contributors.byStatus.ready}
               </p>
               <p className="mt-1 text-xs text-emerald-700 dark:text-emerald-200">
-                ✅ Ready
+                Ready
               </p>
             </div>
             <div className="min-h-11 rounded-lg border border-amber-300 bg-amber-50 px-4 py-4 dark:border-amber-600 dark:bg-amber-950/40">
@@ -165,7 +399,7 @@ export default function MetricsPage() {
                 {contributors.byStatus.low_reserve}
               </p>
               <p className="mt-1 text-xs text-amber-700 dark:text-amber-200">
-                ⚠️ Low reserve
+                Low reserve
               </p>
             </div>
             <div className="min-h-11 rounded-lg border border-red-300 bg-red-50 px-4 py-4 dark:border-red-600 dark:bg-red-950/40">
@@ -173,7 +407,7 @@ export default function MetricsPage() {
                 {contributors.byStatus.not_ready}
               </p>
               <p className="mt-1 text-xs text-red-700 dark:text-red-200">
-                ❌ Not ready
+                Not ready
               </p>
             </div>
           </div>
@@ -324,12 +558,17 @@ export default function MetricsPage() {
               hint="RATE_LIMIT_MAX_REQUESTS"
             />
             <ConfigRow
-              label="Circuit breaker threshold"
+              label="CB failure threshold"
               value={`${config.circuitBreakerFailureThreshold} failures`}
               hint="HORIZON_CB_FAILURE_THRESHOLD"
             />
             <ConfigRow
-              label="Circuit breaker recovery"
+              label="CB success threshold"
+              value={`${config.circuitBreakerSuccessThreshold} successes`}
+              hint="HORIZON_CB_SUCCESS_THRESHOLD"
+            />
+            <ConfigRow
+              label="CB recovery timeout"
               value={`${msToSeconds(config.circuitBreakerRecoveryMs)}s`}
               hint="HORIZON_CB_RECOVERY_MS"
             />
@@ -345,7 +584,7 @@ export default function MetricsPage() {
             />
             <ConfigRow
               label="Soroban contract"
-              value={config.sorobanContractConfigured ? "Configured ✅" : "Not set ⚠️"}
+              value={config.sorobanContractConfigured ? "Configured" : "Not set"}
               hint="SOROBAN_CONTRACT_ID"
             />
           </dl>
@@ -368,8 +607,6 @@ function ConfigRow({
     <div className="min-h-11 rounded-md border border-border-strong px-3 py-3 sm:py-2">
       <dt className="text-xs text-muted-foreground">{label}</dt>
       <dd className="mt-0.5 font-medium">{value}</dd>
-      {/* Full-strength muted foreground: the env-var name is the part a
-          maintainer copies, so it should not be the faintest thing on screen. */}
       <dd className="mt-0.5 font-mono text-xs text-muted-foreground">{hint}</dd>
     </div>
   );

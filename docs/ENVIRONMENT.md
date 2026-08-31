@@ -287,89 +287,59 @@ Minimum time between `/api/contract-sync` runs; a trigger inside this window ret
 
 ---
 
-## Feature flags (issue #201)
+## Prometheus metrics (optional)
 
-`src/lib/feature-flags.ts` resolves each flag in this order:
+### `PROMETHEUS_SCRAPE_TOKENS`
 
-1. **Env override** — `FEATURE_FLAG_<KEY>` (highest precedence)
-2. **Database row** — only when `FEATURE_FLAGS_DB_ENABLED` is truthy
-3. **Built-in default**
+Comma-separated list of bearer tokens that authorize `/api/metrics/prometheus`
+scrapes without requiring a maintainer browser session. Intended for
+Prometheus / VictoriaMetrics / Grafana Agent.
 
-Risky flags **fail closed**: if the DB source is enabled but unreadable, they
-resolve to `false` regardless of their default, so a database outage can never
-silently open a dangerous write path. See [FEATURE_FLAGS.md](./FEATURE_FLAGS.md)
-for the full table and per-flag defaults.
+```
+PROMETHEUS_SCRAPE_TOKENS=prod-scrape-token-abc,staging-scrape-token-xyz
+```
 
-Accepted truthy values: `1`, `true`, `on`, `yes`, `enabled` (case-insensitive).
-Anything else is treated as falsy / "not set".
+- Each token should be ≥ 32 chars of high entropy; generate with `openssl rand -base64 32`
+- **Server-only** — never commit tokens or expose them in `NEXT_PUBLIC_*`
+- When unset, the endpoint falls back to requiring a maintainer session (cookie auth)
+- Session auth and token auth are OR'd: either succeeds, both are never required
 
-### `FEATURE_FLAGS_DB_ENABLED`
+#### Example Prometheus `scrape_configs`
 
-Optional. When truthy, the `FeatureFlag` table is consulted as source 2. When
-unset, only env overrides + built-in defaults apply and **no** database query is
-made. Default: unset.
+```yaml
+scrape_configs:
+  - job_name: trustbridge-dashboard
+    scrape_interval: 30s
+    metrics_path: /api/metrics/prometheus
+    static_configs:
+      - targets: ["trustbridge.example.com"]
+    scheme: https
+    authorization:
+      type: Bearer
+      credentials: "prod-scrape-token-abc"
+```
 
-### `FEATURE_FLAGS_CACHE_TTL_MS`
+#### Exported metrics (all maintainer-scoped, no PII in labels)
 
-In-process cache TTL for DB-sourced flags. Default `30000` (30s). A failed DB
-read is cached for at most 5s so an outage can't hammer the connection pool.
-`clearFeatureFlagCache()` drops the cache immediately after a write.
+| Metric | Type | Labels | Notes |
+| --- | --- | --- | --- |
+| `trustbridge_contributors_total` | gauge | — | |
+| `trustbridge_contributors_ready` | gauge | — | |
+| `trustbridge_contributors_low_reserve` | gauge | — | |
+| `trustbridge_contributors_not_ready` | gauge | — | |
+| `trustbridge_circuit_breaker_state` | gauge | — | 0=CLOSED, 1=HALF_OPEN, 2=OPEN |
+| `trustbridge_circuit_breaker_total_trips` | counter | — | Process-local since start |
+| `trustbridge_circuit_breaker_failure_count` | gauge | — | Current consecutive failures |
+| `trustbridge_circuit_breaker_last_failure_timestamp_seconds` | gauge | — | 0 if none, else Unix seconds |
+| `trustbridge_rate_limit_active_identifiers` | gauge | — | Count inside current window (process-local) |
+| `trustbridge_rate_limit_requests_allowed_total` | counter | — | Process-local since start |
+| `trustbridge_rate_limit_requests_blocked_total` | counter | — | Process-local since start |
+| `trustbridge_process_local_info` | gauge | `scope="process"` | Always 1 — honest marker that counters are per-process, not globally aggregated, until Redis-backed state ships. |
 
-### `FEATURE_FLAG_BATCH_RECHECK` · `FEATURE_FLAG_INVITE_GENERATION` · `FEATURE_FLAG_DLQ_RETRY` · `FEATURE_FLAG_MAINTENANCE_MODE` · `FEATURE_FLAG_OTEL_TRACES`
-
-Per-flag env overrides. Set to a falsy value to freeze the corresponding
-feature during a Wave; unset to fall back to the DB row / default.
-
----
-
-## Maintenance mode (issue #202)
-
-### `MAINTENANCE`
-
-Truthy => the maintenance banner is shown on every page and **mutating** API
-requests (`POST`/`PUT`/`PATCH`/`DELETE`) return `503` with `Retry-After: 120`.
-Reads (`GET`/`HEAD`) keep working. `/api/auth/*`, `/api/webhooks/*` and
-`/api/health` are exempt.
-
-This is the recommended kill switch and is **env-only on purpose** — a broken
-database can never strand maintainers who need to turn it back off. The
-`maintenance_mode` feature flag is an additional DB-backed toggle for operators
-who run with `FEATURE_FLAGS_DB_ENABLED`.
-
-See [DEPLOYMENT.md](./DEPLOYMENT.md#maintenance-mode) for the deploy runbook and
-the cron / webhook caveats.
-
-### `MAINTENANCE_MESSAGE`
-
-Optional. Overrides the banner + 503 body text.
-
----
-
-## OpenTelemetry tracing (issue #203)
-
-Tracing is **off by default**. When enabled, spans are emitted for the API
-route, the Prisma query and the Horizon call on a request. Span names are
-scrubbed of Stellar addresses / emails and span attributes are run through the
-Sentry redactor before they leave the process.
-
-If `@opentelemetry/api` + an OTEL SDK are installed, the standard `OTEL_*`
-collector variables are honoured by that SDK. Otherwise spans are emitted as
-structured `trace` logs (visible only with `DEBUG` set) so the test suite needs
-no collector.
-
-### `OTEL_TRACES_ENABLED`
-
-Truthy => tracing on. Also toggled by `FEATURE_FLAG_OTEL_TRACES`. Default: off.
-
-### `OTEL_SERVICE_NAME`
-
-Service name reported on spans. Default `trustbridge-dashboard`.
-
-### `OTEL_EXPORTER_OTLP_ENDPOINT`
-
-Optional OTLP collector URL, consumed by the OTEL SDK when present. On
-serverless, ensure the SDK is configured with a span processor that flushes on
-function suspend (the SDK's responsibility, not this app's).
+⚠️ **Cardinality / PII policy:** the route never emits dynamic labels (no per-user,
+per-IP, per-address). All label sets are static. Addresses / GitHub handles / IPs
+are never serialized into the metrics body. If you add new metrics, keep this
+contract.
 
 ---
 

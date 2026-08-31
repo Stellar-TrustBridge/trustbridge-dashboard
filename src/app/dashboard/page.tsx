@@ -21,6 +21,10 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import {
+  StaleDataBanner,
+  buildStalenessSummaryClient,
+} from "@/components/StaleDataBanner";
 import { countReadyContributors } from "@/lib/contributors";
 import { useJobProgress } from "@/lib/use-job-progress";
 import {
@@ -28,7 +32,6 @@ import {
   useInfiniteContributors,
 } from "@/lib/use-infinite-contributors";
 import { usePaginatedContributors } from "@/lib/use-paginated-contributors";
-import { useJobProgress } from "@/lib/use-job-progress";
 import type {
   ContributorRow,
   NetworkConfig,
@@ -143,6 +146,7 @@ export default function DashboardPage() {
 
   const contributors = flattenContributorPages(contributorsQuery.data);
   const readyCount = countReadyContributors(contributors);
+  const staleness = buildStalenessSummaryClient(contributors);
 
   const isRecheckRunning = recheckMutation.isPending || isStreaming;
   const recheckStatus = event?.type === "completed"
@@ -212,6 +216,16 @@ export default function DashboardPage() {
       <p className="sr-only" role="status" aria-live="polite">
         {recheckStatus ? `Batch re-check: ${recheckStatus}` : ""}
       </p>
+
+      {!contributorsQuery.isLoading &&
+        !contributorsQuery.isError &&
+        contributors.length > 0 && (
+          <StaleDataBanner
+            staleness={staleness}
+            onRecheckAll={() => recheckMutation.mutate()}
+            isRecheckRunning={isRecheckRunning}
+          />
+        )}
 
       {event?.type === "completed" && (
         <Card className="mb-4 border-green-200 bg-green-50 dark:border-green-800 dark:bg-green-950">

@@ -3,6 +3,7 @@ import {
   checkRateLimit,
   extractClientIp,
   resetRateLimit,
+  getRateLimitMetrics,
   buildRateLimitHeaders,
 } from "@/lib/rate-limit";
 import { NextRequest } from "next/server";
@@ -24,7 +25,7 @@ describe("Rate Limiting", () => {
       const result = checkRateLimit("user-1");
 
       expect(result.allowed).toBe(true);
-      expect(result.remaining).toBe(9); // 10 max - 1 used
+      expect(result.remaining).toBe(9);
       expect(result.retryAfter).toBe(0);
     });
 
@@ -36,11 +37,10 @@ describe("Rate Limiting", () => {
       const result = checkRateLimit("user-1");
 
       expect(result.allowed).toBe(true);
-      expect(result.remaining).toBe(4); // 10 - 6 total
+      expect(result.remaining).toBe(4);
     });
 
     it("blocks after max requests", () => {
-      // Max is 10 by default
       for (let i = 0; i < 10; i++) {
         checkRateLimit("user-1");
       }
@@ -87,7 +87,6 @@ describe("Rate Limiting", () => {
       });
       expect(result.allowed).toBe(false);
 
-      // Advance past window
       vi.advanceTimersByTime(6_000);
 
       result = checkRateLimit("user-3", {
@@ -102,15 +101,12 @@ describe("Rate Limiting", () => {
     it("calculates retryAfter correctly", () => {
       const opts = { windowMs: 10_000, maxRequests: 2 };
 
-      // Fill up limit at time 0
       checkRateLimit("user-4", opts);
       checkRateLimit("user-4", opts);
 
-      // Try at time 3_000
       vi.advanceTimersByTime(3_000);
       const result = checkRateLimit("user-4", opts);
 
-      // First request expires at 10_000, so retry-after is 7 seconds
       expect(result.allowed).toBe(false);
       expect(result.retryAfter).toBe(7);
     });
@@ -129,7 +125,6 @@ describe("Rate Limiting", () => {
       process.env.RATE_LIMIT_WINDOW_MS = "30000";
       process.env.RATE_LIMIT_MAX_REQUESTS = "5";
 
-      // Fill to max with env defaults
       for (let i = 0; i < 5; i++) {
         checkRateLimit("env-user");
       }
@@ -148,10 +143,94 @@ describe("Rate Limiting", () => {
 
       const result = checkRateLimit("user-5");
 
-      // Should use default (10)
       expect(result.allowed).toBe(true);
       expect(result.remaining).toBe(9);
 
+      delete process.env.RATE_LIMIT_MAX_REQUESTS;
+    });
+  });
+
+  describe("getRateLimitMetrics", () => {
+    it("returns initial zero metrics when store is empty", () => {
+      const metrics = getRateLimitMetrics();
+      expect(metrics.activeIdentifiers).toBe(0);
+      expect(metrics.totalAllowed).toBe(0);
+      expect(metrics.totalBlocked).toBe(0);
+      expect(metrics.processLocal).toBe(true);
+      expect(metrics.options.windowMs).toBeGreaterThan(0);
+      expect(metrics.options.maxRequests).toBeGreaterThan(0);
+    });
+
+    it("counts allowed requests in totalAllowed", () => {
+      checkRateLimit("u1");
+      checkRateLimit("u1");
+      checkRateLimit("u2");
+
+      const metrics = getRateLimitMetrics();
+      expect(metrics.totalAllowed).toBe(3);
+      expect(metrics.totalBlocked).toBe(0);
+    });
+
+    it("counts blocked requests in totalBlocked", () => {
+      for (let i = 0; i < 10; i++) {
+        checkRateLimit("blocked-user", { maxRequests: 10, windowMs: 60_000 });
+      }
+      checkRateLimit("blocked-user", { maxRequests: 10, windowMs: 60_000 });
+      checkRateLimit("blocked-user", { maxRequests: 10, windowMs: 60_000 });
+
+      const metrics = getRateLimitMetrics();
+      expect(metrics.totalAllowed).toBe(10);
+      expect(metrics.totalBlocked).toBe(2);
+    });
+
+    it("reports activeIdentifiers with requests in the current window", () => {
+      const opts = { windowMs: 60_000, maxRequests: 10 };
+      checkRateLimit("alice", opts);
+      checkRateLimit("bob", opts);
+      checkRateLimit("carol", opts);
+
+      expect(getRateLimitMetrics().activeIdentifiers).toBe(3);
+
+      vi.advanceTimersByTime(61_000);
+
+      expect(getRateLimitMetrics().activeIdentifiers).toBe(0);
+    });
+
+    it("does NOT expose any identifier strings or IPs in metrics", () => {
+      checkRateLimit("192.168.1.100");
+      checkRateLimit("sensitive-identifier");
+
+      const metrics = getRateLimitMetrics();
+      const serialized = JSON.stringify(metrics);
+
+      expect(serialized).not.toContain("192.168.1.100");
+      expect(serialized).not.toContain("sensitive-identifier");
+      expect(typeof metrics.activeIdentifiers).toBe("number");
+    });
+
+    it("resets counters when resetRateLimit() is called with no args", () => {
+      for (let i = 0; i < 5; i++) {
+        checkRateLimit("x");
+      }
+      expect(getRateLimitMetrics().totalAllowed).toBe(5);
+
+      resetRateLimit();
+
+      const after = getRateLimitMetrics();
+      expect(after.totalAllowed).toBe(0);
+      expect(after.totalBlocked).toBe(0);
+      expect(after.activeIdentifiers).toBe(0);
+    });
+
+    it("returns options from environment or defaults", () => {
+      process.env.RATE_LIMIT_WINDOW_MS = "45000";
+      process.env.RATE_LIMIT_MAX_REQUESTS = "7";
+
+      const metrics = getRateLimitMetrics();
+      expect(metrics.options.windowMs).toBe(45_000);
+      expect(metrics.options.maxRequests).toBe(7);
+
+      delete process.env.RATE_LIMIT_WINDOW_MS;
       delete process.env.RATE_LIMIT_MAX_REQUESTS;
     });
   });
