@@ -23,7 +23,7 @@ model User {
   auditLogs       TokenAuditLog[]
   addressHistory  AddressHistoryRecord[]
   invites         Invite[]
-  checklistCompleted Json?      @default("{}")
+  notifications   Notification[]
   createdAt       DateTime      @default(now())
   updatedAt       DateTime      @updatedAt
 
@@ -211,38 +211,29 @@ model VerificationToken {
   @@unique([identifier, token])
 }
 
-enum OutboxStatus {
-  PENDING
-  PROCESSING
-  COMPLETED
-  FAILED
+enum NotificationType {
+  BATCH_JOB_COMPLETED
+  BATCH_JOB_FAILED
+  READINESS_CHANGED
+  DISPUTE_SUBMITTED
+  INVITE_USED
 }
 
-model SorobanOutbox {
-  id              String       @id @default(cuid())
-  maintainerOrgId String       @default("default")
-  action          String
-  payload         Json
-  status          OutboxStatus @default(PENDING)
-  attempts        Int          @default(0)
-  maxAttempts     Int          @default(5)
-  lastError       String?
-  nextAttemptAt   DateTime     @default(now())
-  createdAt       DateTime     @default(now())
-  updatedAt       DateTime     @updatedAt
+model Notification {
+  id              String           @id @default(cuid())
+  maintainerOrgId String           @default("default")
+  userId          String?
+  user            User?            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type            NotificationType
+  title           String
+  body            String
+  read            Boolean          @default(false)
+  metadata        Json?
+  createdAt       DateTime         @default(now())
+  readAt          DateTime?
 
-  @@index([status, nextAttemptAt])
+  @@index([userId])
   @@index([maintainerOrgId])
-}
-
-model SorobanEventCursor {
-  id              String   @id @default(cuid())
-  maintainerOrgId String   @default("default")
-  eventType       String
-  cursor          String
-  lastPagingToken String?
-  lastSyncedAt    DateTime @default(now())
-  updatedAt       DateTime @updatedAt
-
-  @@unique([maintainerOrgId, eventType])
+  @@index([read])
+  @@index([createdAt])
 }
