@@ -25,5 +25,12 @@ export default defineConfig({
     ],
     include: ["src/**/*.test.{ts,tsx}", "tests/**/*.test.{ts,tsx}"],
     setupFiles: ["./tests/setup.ts"],
+    pool: "threads",
+    poolOptions: {
+      threads: {
+        maxThreads: 4,
+        minThreads: 1,
+      },
+    },
   },
 });

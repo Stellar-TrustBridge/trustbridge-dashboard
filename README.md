@@ -137,7 +137,7 @@ Open [http://localhost:3000](http://localhost:3000).
 
 ## Documentation
 
-All docs are cross-linked from this README:
+Full index: [docs/README.md](./docs/README.md)
 
 | Document | Description |
 |----------|-------------|

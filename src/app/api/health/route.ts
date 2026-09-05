@@ -93,8 +93,6 @@ async function probeSorobanRpc(): Promise<{ ok: boolean; latencyMs: number }> {
  * booleans, latencies, and counts.
  *
  * Cached for 30 s at the CDN layer to absorb monitoring poll bursts.
- *
- * @see docs/SENTRY.md for how Sentry integrates with this endpoint.
  */
 export async function GET(): Promise<NextResponse<HealthResponse>> {
   const timestamp = new Date().toISOString();
