@@ -837,3 +837,8 @@ Implement immediate access revocation when a GitHub organization member is remov
 [ ] PR description explains the revocation strategy.
 
 [ ] PR is ready for maintainer review.
+
+## Handsoff notes
+
+<!-- handsoff-issue-324 -->
+- #324: Component tests for TrustlineStatusBadge
