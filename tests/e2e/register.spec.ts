@@ -141,6 +141,43 @@ async function mockRegisterApis(page: Page, options: RegisterApiOptions = {}) {
   return { savePayloads };
 }
 
+interface PrivacySettingsFixture {
+  profilePublic: boolean;
+  showStellarAddress: boolean;
+}
+
+async function mockProfilePrivacyApi(
+  page: Page,
+  initial: PrivacySettingsFixture = {
+    profilePublic: false,
+    showStellarAddress: false,
+  }
+) {
+  let settings = { ...initial };
+  const patchPayloads: PrivacySettingsFixture[] = [];
+
+  await page.route("**/api/profile", async (route) => {
+    if (route.request().method() === "PATCH") {
+      const payload = route.request().postDataJSON() as PrivacySettingsFixture;
+      patchPayloads.push(payload);
+      settings = {
+        profilePublic: payload.profilePublic,
+        showStellarAddress: payload.profilePublic
+          ? payload.showStellarAddress
+          : false,
+      };
+    }
+
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ settings }),
+    });
+  });
+
+  return { patchPayloads };
+}
+
 /** Pretend the Freighter extension is installed in this page. */
 async function installFreighterStub(page: Page) {
   await page.addInitScript(() => {
@@ -352,6 +389,113 @@ test.describe("Register page — saving", () => {
       "That Stellar address is already registered"
     );
     await expect(page.getByTestId("registration-saved")).toHaveCount(0);
+  });
+});
+
+// ── Profile privacy ──────────────────────────────────────────────────────
+
+test.describe("Register page — profile privacy", () => {
+  test.beforeEach(async ({ page, context }) => {
+    await signInAsContributor(context, page);
+  });
+
+  test("privacy toggles save and persist across reloads", async ({ page }) => {
+    const { patchPayloads } = await mockProfilePrivacyApi(page);
+    await interceptApi(page, "**/api/address-history", { history: [] });
+    await mockRegisterApis(page, {
+      existing: { stellarAddress: READY_ADDRESS, readiness: "ready" },
+    });
+    await page.goto("/register");
+
+    const panel = page.getByTestId("profile-privacy-panel");
+    const publicToggle = panel.getByTestId("toggle-profile-public");
+    const addressToggle = panel.getByTestId("toggle-show-address");
+
+    await expect(panel).toBeVisible();
+    await expect(
+      publicToggle,
+      "Public profile toggle should start private"
+    ).toHaveAttribute("aria-pressed", "false");
+    await expect(
+      addressToggle,
+      "Stellar address should start hidden and unavailable"
+    ).toBeDisabled();
+
+    await publicToggle.click();
+    await expect(
+      publicToggle,
+      "Public profile toggle did not enable the profile"
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(patchPayloads[0], "Public profile toggle sent the wrong settings").toEqual({
+      profilePublic: true,
+      showStellarAddress: false,
+    });
+
+    await page.reload();
+    await expect(
+      publicToggle,
+      "Public profile setting was not persisted after reload"
+    ).toHaveAttribute("aria-pressed", "true");
+    await expect(
+      addressToggle,
+      "Address visibility should remain off after enabling the public profile"
+    ).toHaveAttribute("aria-pressed", "false");
+
+    await addressToggle.click();
+    await expect(
+      addressToggle,
+      "Show Stellar address toggle did not enable address visibility"
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(patchPayloads[1], "Show Stellar address toggle sent the wrong settings").toEqual({
+      profilePublic: true,
+      showStellarAddress: true,
+    });
+
+    await page.reload();
+    await expect(
+      addressToggle,
+      "Stellar address visibility was not persisted after reload"
+    ).toHaveAttribute("aria-pressed", "true");
+
+    await addressToggle.click();
+    await expect(
+      addressToggle,
+      "Hide Stellar address toggle did not hide the address"
+    ).toHaveAttribute("aria-pressed", "false");
+    expect(patchPayloads[2], "Hide Stellar address toggle sent the wrong settings").toEqual({
+      profilePublic: true,
+      showStellarAddress: false,
+    });
+
+    await page.reload();
+    await expect(
+      addressToggle,
+      "Hidden Stellar address setting was not persisted after reload"
+    ).toHaveAttribute("aria-pressed", "false");
+
+    await publicToggle.click();
+    await expect(
+      publicToggle,
+      "Make private toggle did not disable the public profile"
+    ).toHaveAttribute("aria-pressed", "false");
+    await expect(
+      addressToggle,
+      "Making the profile private should also hide the Stellar address"
+    ).toHaveAttribute("aria-pressed", "false");
+    expect(patchPayloads[3], "Make private toggle sent the wrong settings").toEqual({
+      profilePublic: false,
+      showStellarAddress: false,
+    });
+
+    await page.reload();
+    await expect(
+      publicToggle,
+      "Private profile setting was not persisted after reload"
+    ).toHaveAttribute("aria-pressed", "false");
+    await expect(
+      addressToggle,
+      "Address visibility should remain off for a private profile"
+    ).toBeDisabled();
   });
 });
 

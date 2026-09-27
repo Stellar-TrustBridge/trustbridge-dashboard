@@ -7,6 +7,7 @@ import {
   ContributorTable,
   exportContributorsCsv,
 } from "@/components/ContributorTable";
+import { BatchRecheckLiveRegion } from "@/components/BatchRecheckLiveRegion";
 import { ContributorPager } from "@/components/ContributorPager";
 import { NetworkStatusPanel } from "@/components/NetworkStatusPanel";
 import { DisputePanel } from "@/components/DisputePanel";
@@ -244,9 +245,12 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      <p className="sr-only" role="status" aria-live="polite">
-        {recheckStatus ? `Batch re-check: ${recheckStatus}` : ""}
-      </p>
+      <BatchRecheckLiveRegion
+        event={event}
+        isStarting={recheckMutation.isPending}
+        isStreaming={isStreaming}
+        error={recheckMutation.isError ? recheckMutation.error.message : error}
+      />
 
       {!allContributorsQuery.isLoading &&
         !allContributorsQuery.isError &&
