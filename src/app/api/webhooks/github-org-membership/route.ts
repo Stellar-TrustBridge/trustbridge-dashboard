@@ -31,8 +31,8 @@ export function verifyWebhookSignature(
 ): boolean {
   const secret = process.env.GITHUB_WEBHOOK_SECRET?.trim();
   if (!secret) {
-    console.warn(
-      "GITHUB_WEBHOOK_SECRET not configured — webhook signature verification skipped",
+    console.error(
+      "GITHUB_WEBHOOK_SECRET not configured — rejecting webhook request",
     );
     return false;
   }
