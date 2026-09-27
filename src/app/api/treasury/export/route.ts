@@ -1,7 +1,6 @@
-import { getServerSession } from "next-auth";
 import { NextRequest, NextResponse } from "next/server";
 
-import { authOptions } from "@/lib/auth";
+import { requireOperator } from "@/lib/api-auth";
 import { assertSameOrigin } from "@/lib/csrf";
 import { prisma } from "@/lib/prisma";
 import { computeReadiness } from "@/lib/readiness";
@@ -32,9 +31,8 @@ interface TreasuryExportResponse {
 }
 
 export async function GET() {
-  const session = await getServerSession(authOptions);
-
-  if (!session?.user?.id || !session.user.isMaintainer) {
+  const session = await requireOperator("treasury.export");
+  if (!session) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
@@ -110,9 +108,8 @@ export async function POST(request: NextRequest) {
   const csrf = assertSameOrigin(request);
   if (csrf) return csrf;
 
-  const session = await getServerSession(authOptions);
-
-  if (!session?.user?.id || !session.user.isMaintainer) {
+  const session = await requireOperator("treasury.export");
+  if (!session) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
