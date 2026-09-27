@@ -35,22 +35,134 @@ beforeEach(() => {
 });
 
 describe("sanitizeJobError", () => {
-  it("redacts a Stellar address from the message", () => {
-    const out = sanitizeJobError(`account ${SAMPLE_ADDRESS} not found`);
-    expect(out).not.toContain(SAMPLE_ADDRESS);
-    expect(out).toContain("redacted:stellar-address");
+  describe("truncation limits", () => {
+    it("caps oversized messages to MAX_ERROR_LENGTH plus truncation suffix", () => {
+      const longMessage = "x".repeat(MAX_ERROR_LENGTH + 5000);
+      const out = sanitizeJobError(longMessage);
+      expect(out.startsWith("x".repeat(MAX_ERROR_LENGTH))).toBe(true);
+      expect(out.endsWith("…[truncated]")).toBe(true);
+      expect(out.length).toBe(MAX_ERROR_LENGTH + "…[truncated]".length);
+    });
+
+    it("does not truncate a message that is exactly MAX_ERROR_LENGTH characters", () => {
+      const exactMessage = "a".repeat(MAX_ERROR_LENGTH);
+      const out = sanitizeJobError(exactMessage);
+      expect(out).toBe(exactMessage);
+      expect(out.length).toBe(MAX_ERROR_LENGTH);
+      expect(out).not.toContain("…[truncated]");
+    });
+
+    it("truncates a message that is MAX_ERROR_LENGTH + 1 characters", () => {
+      const slightlyLongMessage = "b".repeat(MAX_ERROR_LENGTH + 1);
+      const out = sanitizeJobError(slightlyLongMessage);
+      expect(out.startsWith("b".repeat(MAX_ERROR_LENGTH))).toBe(true);
+      expect(out.endsWith("…[truncated]")).toBe(true);
+      expect(out.length).toBe(MAX_ERROR_LENGTH + "…[truncated]".length);
+    });
+
+    it("leaves a short benign message untouched", () => {
+      const msg = "Horizon connection timeout after 15000ms";
+      expect(sanitizeJobError(msg)).toBe(msg);
+    });
+
+    it("redacts secrets before applying the truncation length cap", () => {
+      const secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+      const longMessageWithSecret = `Failed with token ${secret}: ${"z".repeat(MAX_ERROR_LENGTH + 100)}`;
+      const out = sanitizeJobError(longMessageWithSecret);
+      expect(out).not.toContain(secret);
+      expect(out).toContain("[redacted:github-token]");
+      expect(out.endsWith("…[truncated]")).toBe(true);
+    });
   });
 
-  it("caps the length", () => {
-    const out = sanitizeJobError("x".repeat(MAX_ERROR_LENGTH + 5000));
-    expect(out.length).toBeLessThanOrEqual(MAX_ERROR_LENGTH + 20);
-    expect(out.endsWith("…[truncated]")).toBe(true);
+  describe("known secret pattern redaction", () => {
+    it("redacts a Stellar public G-address", () => {
+      const out = sanitizeJobError(`account ${SAMPLE_ADDRESS} not found`);
+      expect(out).not.toContain(SAMPLE_ADDRESS);
+      expect(out).toContain("[redacted:stellar-address]");
+    });
+
+    it("redacts a Stellar secret S-seed distinctly from public address", () => {
+      const secretSeed = "SCZANGBA5YHTNYVVV4C3U252E2B6P6F5PSSFTGNJDQTFJDAXLHIRP4A6";
+      const out = sanitizeJobError(`error signing with seed ${secretSeed}`);
+      expect(out).not.toContain(secretSeed);
+      expect(out).toContain("[redacted:stellar-secret]");
+    });
+
+    it.each([
+      ["ghp_", "ghp_1234567890abcdefghijklmnopqrstuvwxyz"],
+      ["gho_", "gho_1234567890abcdefghijklmnopqrstuvwxyz"],
+      ["ghs_", "ghs_1234567890abcdefghijklmnopqrstuvwxyz"],
+      ["ghu_", "ghu_1234567890abcdefghijklmnopqrstuvwxyz"],
+      ["ghr_", "ghr_1234567890abcdefghijklmnopqrstuvwxyz"],
+      ["github_pat_", "github_pat_11ABCDEFG0abcdefghijklmnopqrstuvwxyz012345"],
+    ])("redacts GitHub token of type %s", (_prefix, token) => {
+      const out = sanitizeJobError(`Unauthorized request with token ${token}`);
+      expect(out).not.toContain(token);
+      expect(out).toContain("[redacted:github-token]");
+    });
+
+    it("redacts credentials in database connection strings", () => {
+      const connStr = "postgresql://tb_user:super_secret_pw@db.internal:5432/trustbridge";
+      const out = sanitizeJobError(`Connection failed: ${connStr}`);
+      expect(out).not.toContain("super_secret_pw");
+      expect(out).not.toContain("tb_user");
+      expect(out).toContain("postgresql://[redacted:credentials]@db.internal:5432/trustbridge");
+    });
+
+    it("redacts Authorization bearer and token headers", () => {
+      const outBearer = sanitizeJobError("Request header Authorization: Bearer secret_jwt_token_1234567890");
+      expect(outBearer).not.toContain("secret_jwt_token_1234567890");
+      expect(outBearer).toContain("Bearer [redacted:token]");
+
+      const outToken = sanitizeJobError("Request header Authorization: Token secret_api_key_1234567890");
+      expect(outToken).not.toContain("secret_api_key_1234567890");
+      expect(outToken).toContain("Token [redacted:token]");
+    });
+
+    it("redacts email addresses", () => {
+      const out = sanitizeJobError("Failed notifying user alice.contributor@example.com");
+      expect(out).not.toContain("alice.contributor@example.com");
+      expect(out).toContain("[redacted:email]");
+    });
+
+    it("redacts multiple mixed secrets in a single message", () => {
+      const token = "ghp_1234567890abcdefghijklmnopqrstuvwxyz";
+      const email = "maintainer@trustbridge.org";
+      const out = sanitizeJobError(`User ${email} with ${SAMPLE_ADDRESS} and token ${token} failed`);
+      expect(out).not.toContain(token);
+      expect(out).not.toContain(email);
+      expect(out).not.toContain(SAMPLE_ADDRESS);
+      expect(out).toContain("[redacted:github-token]");
+      expect(out).toContain("[redacted:email]");
+      expect(out).toContain("[redacted:stellar-address]");
+    });
   });
 
-  it("leaves a short benign message untouched", () => {
-    expect(sanitizeJobError("Horizon connection timeout")).toBe(
-      "Horizon connection timeout",
-    );
+  describe("empty and null inputs fallback", () => {
+    it("returns 'Unknown error' when input is null", () => {
+      expect(sanitizeJobError(null)).toBe("Unknown error");
+    });
+
+    it("returns 'Unknown error' when input is undefined", () => {
+      expect(sanitizeJobError(undefined)).toBe("Unknown error");
+      expect(sanitizeJobError()).toBe("Unknown error");
+    });
+
+    it("returns 'Unknown error' when input is empty string", () => {
+      expect(sanitizeJobError("")).toBe("Unknown error");
+    });
+
+    it("returns 'Unknown error' when input is whitespace only", () => {
+      expect(sanitizeJobError("   ")).toBe("Unknown error");
+      expect(sanitizeJobError("\t\n\r")).toBe("Unknown error");
+    });
+
+    it("returns 'Unknown error' when non-string value is passed", () => {
+      expect(sanitizeJobError(123 as unknown as string)).toBe("Unknown error");
+      expect(sanitizeJobError({} as unknown as string)).toBe("Unknown error");
+      expect(sanitizeJobError([] as unknown as string)).toBe("Unknown error");
+    });
   });
 });
 
