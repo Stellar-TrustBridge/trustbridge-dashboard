@@ -4,6 +4,7 @@ import { getContractSyncHealth } from "@/lib/contract-sync";
 import { prisma } from "@/lib/prisma";
 import { buildStalenessSummary } from "@/lib/stale-export";
 import { toContributorRow } from "@/lib/registrations";
+import { publicOptionsResponse, withPublicCors } from "@/lib/public-cors";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -153,5 +154,9 @@ export async function GET(): Promise<NextResponse<HealthResponse>> {
     version,
   };
 
-  return NextResponse.json(body, { status: 200 });
+  return withPublicCors(NextResponse.json(body, { status: 200 }));
+}
+
+export function OPTIONS() {
+  return publicOptionsResponse("GET, OPTIONS");
 }

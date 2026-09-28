@@ -5,6 +5,7 @@ import { buildCacheKey, buildLookupCacheHeaders, verificationCache } from "@/lib
 import { DEFAULT_ASSET } from "@/lib/constants";
 import { checkStellarAddress } from "@/lib/horizon";
 import { isValidStellarAddress } from "@/lib/stellar";
+import { publicOptionsResponse, withPublicCors } from "@/lib/public-cors";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -17,17 +18,17 @@ export async function GET(request: NextRequest) {
   const address = request.nextUrl.searchParams.get("address")?.trim();
 
   if (!address) {
-    return NextResponse.json(
+    return withPublicCors(NextResponse.json(
       { error: "address query parameter is required" },
       { status: 400 }
-    );
+    ));
   }
 
   if (!isValidStellarAddress(address)) {
-    return NextResponse.json(
+    return withPublicCors(NextResponse.json(
       { error: "Invalid Stellar public key (must be a valid G-address)" },
       { status: 400 }
-    );
+    ));
   }
 
   const assetCode =
@@ -48,10 +49,14 @@ export async function GET(request: NextRequest) {
       LOOKUP_CACHE_TTL_MS
     );
 
-    return NextResponse.json(result, {
+    return withPublicCors(NextResponse.json(result, {
       headers: buildLookupCacheHeaders(LOOKUP_CACHE_TTL_MS),
-    });
+    }));
   } catch {
-    return NextResponse.json({ error: "Lookup failed" }, { status: 500 });
+    return withPublicCors(NextResponse.json({ error: "Lookup failed" }, { status: 500 }));
   }
+}
+
+export function OPTIONS() {
+  return publicOptionsResponse("GET, OPTIONS");
 }

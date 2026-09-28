@@ -2,6 +2,9 @@
   "name": "trustbridge-dashboard",
   "version": "0.1.0",
   "private": true,
+  "engines": {
+    "node": ">=18.17.0"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "npm run prisma:generate && node scripts/next-build.mjs",

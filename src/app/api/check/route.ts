@@ -7,6 +7,7 @@ import { DEFAULT_ASSET } from "@/lib/constants";
 import { checkStellarAddress } from "@/lib/horizon";
 import { checkCache, buildCacheKey } from "@/lib/cache";
 import { captureException } from "@/lib/sentry";
+import { publicOptionsResponse, withPublicCors } from "@/lib/public-cors";
 import type { CheckAddressPayload, HorizonCheckResult } from "@/types";
 
 export const runtime = "nodejs";
@@ -39,16 +40,16 @@ function isCacheBypass(request: NextRequest): boolean {
 export async function POST(request: NextRequest) {
   // ── CSRF guard ─────────────────────────────────────────────────────────────
   const csrf = assertSameOrigin(request);
-  if (csrf) return csrf;
+  if (csrf) return withPublicCors(csrf);
 
   // ── Rate limit ─────────────────────────────────────────────────────────────
   const clientIp = extractClientIp(request);
   const rateLimit = checkRateLimit(clientIp);
   if (!rateLimit.allowed) {
-    return NextResponse.json(
+    return withPublicCors(NextResponse.json(
       { errors: ["Rate limit exceeded. Please try again later."] },
       { status: 429, headers: { "Retry-After": String(rateLimit.retryAfter) } }
-    );
+    ));
   }
 
   try {
@@ -56,7 +57,7 @@ export async function POST(request: NextRequest) {
     const address = body.address?.trim();
 
     if (!address) {
-      return jsonCheckError(["Address is required"], 400);
+      return withPublicCors(jsonCheckError(["Address is required"], 400));
     }
 
     const assetCode = body.asset_code ?? DEFAULT_ASSET.code;
@@ -68,7 +69,7 @@ export async function POST(request: NextRequest) {
     if (!bypass) {
       const cached = checkCache.get(cacheKey) as HorizonCheckResult | null;
       if (cached) {
-        return jsonCheckResult(cached);
+        return withPublicCors(jsonCheckResult(cached));
       }
     }
 
@@ -94,12 +95,16 @@ export async function POST(request: NextRequest) {
       checkCache.set(cacheKey, result);
     }
 
-    return jsonCheckResult(result);
+    return withPublicCors(jsonCheckResult(result));
   } catch (error) {
     // NOTE: the address is intentionally *not* passed as context. It is the
     // one field a caller controls and it is a G-address — `captureException`
     // would redact it anyway, so sending it buys nothing.
     captureException(error, { route: "/api/check", method: "POST" });
-    return jsonCheckError(["Failed to check address"], 500);
+    return withPublicCors(jsonCheckError(["Failed to check address"], 500));
   }
+}
+
+export function OPTIONS() {
+  return publicOptionsResponse("POST, OPTIONS");
 }
