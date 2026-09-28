@@ -7,6 +7,12 @@ import { prisma } from "@/lib/prisma";
 import { computeReadiness } from "@/lib/readiness";
 import { recordAuditLog } from "@/lib/audit";
 import { assertFreshExport } from "@/lib/stale-export";
+import {
+  DEFAULT_EXPORT_PAGE_SIZE,
+  MAX_EXPORT_PAGE_SIZE,
+  parseExportPagination,
+  streamJsonExport,
+} from "@/lib/treasury-export";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -32,79 +38,108 @@ interface TreasuryExportResponse {
   contributors: TreasuryExportItem[];
 }
 
-export async function GET() {
+function toExportItem(reg: {
+  stellarAddress: string;
+  funded: boolean;
+  trustlineReady: boolean;
+  trustlineAuthorized: boolean;
+  xlmBalance: string;
+  spendableXlmBalance: string;
+  lastCheckedAt: Date | null;
+  user: { githubUsername: string };
+}): TreasuryExportItem {
+  const readiness = computeReadiness(
+    reg.funded,
+    reg.trustlineReady,
+    reg.xlmBalance,
+    {
+      authorized: reg.trustlineAuthorized,
+      spendableBalance: reg.spendableXlmBalance,
+    }
+  );
+
+  return {
+    githubUsername: reg.user.githubUsername,
+    stellarAddress: reg.stellarAddress,
+    readiness,
+    funded: reg.funded,
+    trustlineReady: reg.trustlineReady,
+    trustlineAuthorized: reg.trustlineAuthorized,
+    xlmBalance: reg.xlmBalance,
+    spendableXlmBalance: reg.spendableXlmBalance,
+    lastCheckedAt: reg.lastCheckedAt?.toISOString() ?? null,
+  };
+}
+
+export async function GET(request: NextRequest) {
   const session = await getServerSession(authOptions);
 
   if (!session?.user?.id || !session.user.isMaintainer) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  const registrations = await prisma.registration.findMany({
-    where: { deletedAt: null },
-    include: {
-      user: {
-        select: {
-          githubUsername: true,
+  const pagination = parseExportPagination(request.nextUrl.searchParams);
+  if (!pagination.ok) {
+    return NextResponse.json({ error: pagination.error }, { status: 400 });
+  }
+
+  const { offset, limit } = pagination;
+
+  const [totalContributors, registrations] = await Promise.all([
+    prisma.registration.count({ where: { deletedAt: null } }),
+    prisma.registration.findMany({
+      where: { deletedAt: null },
+      orderBy: { id: "asc" },
+      skip: offset,
+      take: limit,
+      include: {
+        user: {
+          select: {
+            githubUsername: true,
+          },
         },
       },
-    },
-  });
+    }),
+  ]);
 
-  const contributors: TreasuryExportItem[] = [];
-  let readyCount = 0;
-  let notReadyCount = 0;
-
-  for (const reg of registrations) {
-    const readiness = computeReadiness(
-      reg.funded,
-      reg.trustlineReady,
-      reg.xlmBalance,
-      {
-        authorized: reg.trustlineAuthorized,
-        spendableBalance: reg.spendableXlmBalance,
-      }
-    );
-
-    contributors.push({
-      githubUsername: reg.user.githubUsername,
-      stellarAddress: reg.stellarAddress,
-      readiness,
-      funded: reg.funded,
-      trustlineReady: reg.trustlineReady,
-      trustlineAuthorized: reg.trustlineAuthorized,
-      xlmBalance: reg.xlmBalance,
-      spendableXlmBalance: reg.spendableXlmBalance,
-      lastCheckedAt: reg.lastCheckedAt?.toISOString() ?? null,
-    });
-
-    if (readiness === "ready") {
-      readyCount++;
-    } else {
-      notReadyCount++;
-    }
-  }
+  const contributors = registrations.map(toExportItem);
+  const readyCount = contributors.filter((c) => c.readiness === "ready").length;
+  const notReadyCount = contributors.length - readyCount;
+  const nextOffset = offset + contributors.length;
+  const hasMore = nextOffset < totalContributors;
 
   await recordAuditLog({
     action: "treasury.export",
     actorId: session.user.id,
     actorLogin: session.user.githubUsername ?? null,
     metadata: {
-      totalContributors: contributors.length,
+      totalContributors,
       readyCount,
       notReadyCount,
+      offset,
+      limit,
     },
   });
 
-  const response: TreasuryExportResponse = {
+  const response: TreasuryExportResponse & {
+    offset: number;
+    limit: number;
+    hasMore: boolean;
+    nextOffset: number | null;
+  } = {
     exportedAt: new Date().toISOString(),
     exportedBy: session.user.email ?? session.user.githubUsername ?? "",
-    totalContributors: contributors.length,
+    totalContributors,
     readyCount,
     notReadyCount,
     contributors,
+    offset,
+    limit,
+    hasMore,
+    nextOffset: hasMore ? nextOffset : null,
   };
 
-  return NextResponse.json(response);
+  return streamJsonExport(response);
 }
 
 export async function POST(request: NextRequest) {
@@ -120,6 +155,8 @@ export async function POST(request: NextRequest) {
   const body = (await request.json()) as {
     format?: string;
     snapshotAt?: string;
+    offset?: number;
+    limit?: number;
   };
   const format = body.format ?? "json";
 
@@ -149,60 +186,52 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const registrations = await prisma.registration.findMany({
-    where: { deletedAt: null },
-    include: {
-      user: {
-        select: {
-          githubUsername: true,
-        },
-      },
+  const pagination = parseExportPagination({
+    get: (key: string) => {
+      const value = body[key as "offset" | "limit"];
+      return value === undefined || value === null ? null : String(value);
     },
   });
-
-  const contributors: TreasuryExportItem[] = [];
-  let readyCount = 0;
-  let notReadyCount = 0;
-
-  for (const reg of registrations) {
-    const readiness = computeReadiness(
-      reg.funded,
-      reg.trustlineReady,
-      reg.xlmBalance,
-      {
-        authorized: reg.trustlineAuthorized,
-        spendableBalance: reg.spendableXlmBalance,
-      }
-    );
-
-    contributors.push({
-      githubUsername: reg.user.githubUsername,
-      stellarAddress: reg.stellarAddress,
-      readiness,
-      funded: reg.funded,
-      trustlineReady: reg.trustlineReady,
-      trustlineAuthorized: reg.trustlineAuthorized,
-      xlmBalance: reg.xlmBalance,
-      spendableXlmBalance: reg.spendableXlmBalance,
-      lastCheckedAt: reg.lastCheckedAt?.toISOString() ?? null,
-    });
-
-    if (readiness === "ready") {
-      readyCount++;
-    } else {
-      notReadyCount++;
-    }
+  if (!pagination.ok) {
+    return NextResponse.json({ error: pagination.error }, { status: 400 });
   }
+
+  const { offset, limit } = pagination;
+
+  const [totalContributors, registrations] = await Promise.all([
+    prisma.registration.count({ where: { deletedAt: null } }),
+    prisma.registration.findMany({
+      where: { deletedAt: null },
+      orderBy: { id: "asc" },
+      skip: offset,
+      take: limit,
+      include: {
+        user: {
+          select: {
+            githubUsername: true,
+          },
+        },
+      },
+    }),
+  ]);
+
+  const contributors = registrations.map(toExportItem);
+  const readyCount = contributors.filter((c) => c.readiness === "ready").length;
+  const notReadyCount = contributors.length - readyCount;
+  const nextOffset = offset + contributors.length;
+  const hasMore = nextOffset < totalContributors;
 
   await recordAuditLog({
     action: "treasury.export",
     actorId: session.user.id,
     actorLogin: session.user.githubUsername ?? null,
     metadata: {
-      totalContributors: contributors.length,
+      totalContributors,
       readyCount,
       notReadyCount,
       format,
+      offset,
+      limit,
     },
   });
 
@@ -242,14 +271,23 @@ export async function POST(request: NextRequest) {
     });
   }
 
-  const response: TreasuryExportResponse = {
+  const response: TreasuryExportResponse & {
+    offset: number;
+    limit: number;
+    hasMore: boolean;
+    nextOffset: number | null;
+  } = {
     exportedAt: new Date().toISOString(),
     exportedBy: session.user.email ?? session.user.githubUsername ?? "",
-    totalContributors: contributors.length,
+    totalContributors,
     readyCount,
     notReadyCount,
     contributors,
+    offset,
+    limit,
+    hasMore,
+    nextOffset: hasMore ? nextOffset : null,
   };
 
-  return NextResponse.json(response);
+  return streamJsonExport(response);
 }
