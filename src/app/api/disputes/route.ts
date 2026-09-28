@@ -15,6 +15,11 @@ const createSchema = z.object({
   proofCid: z.string().trim().max(200).optional(),
 });
 
+const updateSchema = z.object({
+  disputeId: z.string().min(1),
+  status: z.enum(["VALIDATED", "REJECTED"]),
+});
+
 export async function GET(request: NextRequest) {
   const session = await getServerSession(authOptions);
   if (!session?.user?.id) {
@@ -86,4 +91,52 @@ export async function POST(request: NextRequest) {
     select: { id: true, registrationId: true, reason: true, proofCid: true, status: true, createdAt: true },
   });
   return NextResponse.json({ dispute }, { status: 201 });
+}
+
+export async function PATCH(request: NextRequest) {
+  const csrf = assertSameOrigin(request);
+  if (csrf) return csrf;
+
+  const session = await getServerSession(authOptions);
+  if (!session?.user?.id) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  if (!session.user.isMaintainer) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+
+  const parsed = updateSchema.safeParse(await request.json().catch(() => null));
+  if (!parsed.success) {
+    return NextResponse.json({ error: "Invalid dispute update" }, { status: 400 });
+  }
+
+  const dispute = await prisma.disputeProof.findUnique({
+    where: { id: parsed.data.disputeId },
+    select: { id: true, status: true },
+  });
+
+  if (!dispute) {
+    return NextResponse.json({ error: "Dispute not found" }, { status: 404 });
+  }
+
+  const updated = await prisma.disputeProof.update({
+    where: { id: parsed.data.disputeId },
+    data: {
+      status: parsed.data.status,
+      resolvedAt: new Date(),
+    },
+    select: {
+      id: true,
+      registrationId: true,
+      reason: true,
+      proofCid: true,
+      status: true,
+      createdAt: true,
+      updatedAt: true,
+      resolvedAt: true,
+    },
+  });
+
+  return NextResponse.json({ dispute: updated });
 }

@@ -8,6 +8,15 @@
  * - PostHog (if POSTHOG_API_KEY is set)
  * - Console logging (fallback for development)
  * - No-op (default when no key is configured)
+ *
+ * Environment variables:
+ * - NEXT_PUBLIC_POSTHOG_API_KEY — enables PostHog in the browser
+ * - NEXT_PUBLIC_POSTHOG_HOST   — optional PostHog ingestion host (browser)
+ * - POSTHOG_API_KEY            — enables PostHog on the server (Node.js API routes)
+ * - POSTHOG_HOST               — optional PostHog ingestion host (server)
+ *
+ * When neither key is set the adapter is a no-op; no events are sent and no
+ * errors are raised. Set DEBUG=true to see console-logged events in development.
  */
 
 export type EventType =
@@ -219,4 +228,120 @@ export function identifyUser(userId: string, properties?: Record<string, unknown
  */
 export function resetAnalytics(): void {
   adapter.reset();
+}
+
+// ---------------------------------------------------------------------------
+// Server-side analytics
+// ---------------------------------------------------------------------------
+
+/**
+ * Lightweight server-side adapter.
+ *
+ * Uses the PostHog Events API (server-to-server) when POSTHOG_API_KEY is set,
+ * falls back to console logging in development, and is a no-op otherwise.
+ * Never throws — analytics must not affect request latency or correctness.
+ */
+class ServerPostHogAdapter implements AnalyticsAdapter {
+  private readonly apiKey: string;
+  private readonly host: string;
+
+  constructor(apiKey: string, host?: string) {
+    this.apiKey = apiKey;
+    this.host = (host ?? "https://app.posthog.com").replace(/\/$/, "");
+  }
+
+  track(event: EventType, properties?: Record<string, unknown>): void {
+    const body = JSON.stringify({
+      api_key: this.apiKey,
+      event,
+      distinct_id: (properties?.userId as string | undefined) ?? "server",
+      properties: { ...properties, $lib: "trustbridge-server" },
+      timestamp: new Date().toISOString(),
+    });
+
+    // Fire-and-forget — do not await, do not throw
+    fetch(`${this.host}/capture/`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body,
+    }).catch(() => {
+      // Silently ignore network errors — analytics must never affect the app
+    });
+  }
+
+  identify(): void {
+    // Server-side identify not implemented; no-op
+  }
+
+  reset(): void {
+    // No-op on the server
+  }
+}
+
+function getServerAnalyticsAdapter(): AnalyticsAdapter {
+  const posthogKey = process.env.POSTHOG_API_KEY?.trim();
+  if (posthogKey) {
+    return new ServerPostHogAdapter(
+      posthogKey,
+      process.env.POSTHOG_HOST?.trim()
+    );
+  }
+
+  if (process.env.NODE_ENV === "development") {
+    return new ConsoleAdapter();
+  }
+
+  return new NoOpAdapter();
+}
+
+// Lazily initialised — only constructed when first used in a server context.
+let _serverAdapter: AnalyticsAdapter | null = null;
+function serverAdapter(): AnalyticsAdapter {
+  if (!_serverAdapter) _serverAdapter = getServerAnalyticsAdapter();
+  return _serverAdapter;
+}
+
+/**
+ * Track a registration event from a server-side API route.
+ * No-op when POSTHOG_API_KEY is not set.
+ */
+export function trackServerRegistrationCreated(properties?: {
+  userId?: string;
+  stellarAddress?: string;
+}): void {
+  serverAdapter().track("registration_created", properties);
+}
+
+/**
+ * Track a registration update event from a server-side API route.
+ * No-op when POSTHOG_API_KEY is not set.
+ */
+export function trackServerRegistrationUpdated(properties?: {
+  userId?: string;
+  stellarAddress?: string;
+  fieldsChanged?: string[];
+}): void {
+  serverAdapter().track("registration_updated", properties);
+}
+
+/**
+ * Track a CSV export event from a server-side API route or cron job.
+ * No-op when POSTHOG_API_KEY is not set.
+ */
+export function trackServerCsvExported(properties?: {
+  rowCount?: number;
+  triggeredBy?: string;
+}): void {
+  serverAdapter().track("csv_exported", properties);
+}
+
+/**
+ * Track a batch recheck start from a server-side API route.
+ * No-op when POSTHOG_API_KEY is not set.
+ */
+export function trackServerBatchRecheckStarted(properties?: {
+  totalRegistrations?: number;
+  initiatedBy?: string;
+}): void {
+  serverAdapter().track("batch_recheck_started", properties);
 }

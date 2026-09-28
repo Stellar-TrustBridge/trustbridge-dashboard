@@ -7,6 +7,7 @@ import {
   ContributorTable,
   exportContributorsCsv,
 } from "@/components/ContributorTable";
+import { BatchRecheckLiveRegion } from "@/components/BatchRecheckLiveRegion";
 import { ContributorPager } from "@/components/ContributorPager";
 import { NetworkStatusPanel } from "@/components/NetworkStatusPanel";
 import { DisputePanel } from "@/components/DisputePanel";
@@ -21,14 +22,21 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import {
+  StaleDataBanner,
+  buildStalenessSummaryClient,
+} from "@/components/StaleDataBanner";
+import { FreezeWindowBanner } from "@/components/FreezeWindowBanner";
 import { countReadyContributors } from "@/lib/contributors";
 import { useJobProgress } from "@/lib/use-job-progress";
+// Single data-fetching strategy (#307): usePaginatedContributors drives both
+// the prev/next pager and the panels that need the full contributor list.
+// useInfiniteContributors was removed to eliminate the duplicate
+// /api/contributors/paginated traffic that existed when both hooks were mounted.
 import {
-  flattenContributorPages,
-  useInfiniteContributors,
-} from "@/lib/use-infinite-contributors";
-import { usePaginatedContributors } from "@/lib/use-paginated-contributors";
-import { useJobProgress } from "@/lib/use-job-progress";
+  usePaginatedContributors,
+  useAllContributors,
+} from "@/lib/use-paginated-contributors";
 import type {
   ContributorRow,
   NetworkConfig,
@@ -43,13 +51,21 @@ interface BatchRecheckResponse {
 
 export default function DashboardPage() {
   const queryClient = useQueryClient();
-  const contributorsQuery = useInfiniteContributors();
-  const { event, isStreaming, startProgress } = useJobProgress();
+  const {
+    event,
+    isStreaming,
+    isReconnecting,
+    reconnectAttempt,
+    maxReconnectAttempts,
+    error: streamError,
+    startProgress,
+  } = useJobProgress();
 
-  // Cursor pager — provides an accessible prev/next alternative to infinite scroll.
-  // The infinite-scroll data is still used by WaveReadinessBar, WavePrepWorkspace,
-  // and DisputePanel which all need the full contributor list.
+  // Single data-fetching strategy (#307): one paginated hook for the table/pager,
+  // one hook that fetches all contributors (no page limit) for panels that need the
+  // full list (WaveReadinessBar, WavePrepWorkspace, DisputePanel).
   const pager = usePaginatedContributors(25);
+  const allContributorsQuery = useAllContributors();
 
   const recheckMutation = useMutation({
     mutationFn: async () => {
@@ -123,6 +139,33 @@ export default function DashboardPage() {
     },
   });
 
+  const banMutation = useMutation({
+    mutationFn: async ({
+      githubUsername,
+      action,
+      reason,
+    }: {
+      githubUsername: string;
+      action: "ban" | "unban";
+      reason?: string;
+    }) => {
+      const res = await fetch("/api/maintainer/ban", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ githubUsername, action, reason }),
+      });
+      if (!res.ok) {
+        const json = await res.json();
+        throw new Error(json.error || "Failed to update ban status");
+      }
+      return res.json();
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["contributors"] });
+      void queryClient.invalidateQueries({ queryKey: ["paginated-contributors"] });
+    },
+  });
+
   const sorobanQuery = useQuery({
     queryKey: ["soroban-events"],
     queryFn: async () => {
@@ -141,19 +184,36 @@ export default function DashboardPage() {
     },
   });
 
-  const contributors = flattenContributorPages(contributorsQuery.data);
-  const readyCount = countReadyContributors(contributors);
+  const freezeQuery = useQuery({
+    queryKey: ["freeze-status"],
+    queryFn: async () => {
+      const response = await fetch("/api/freeze-status");
+      if (!response.ok) return { active: false, reason: null, start: null, end: null };
+      return (await response.json()) as {
+        active: boolean;
+        reason?: string | null;
+        start?: string | null;
+        end?: string | null;
+      };
+    },
+  });
 
-  const isRecheckRunning = recheckMutation.isPending || isStreaming;
-  const recheckStatus = event?.type === "completed"
-    ? "Completed"
-    : event?.type === "failed"
-      ? "Failed"
-      : event?.type === "processing"
-        ? "Processing..."
-        : isStreaming
-          ? "Waiting..."
-          : null;
+  const contributors = allContributorsQuery.contributors;
+  const readyCount = countReadyContributors(contributors);
+  const staleness = buildStalenessSummaryClient(contributors);
+
+  const isRecheckRunning = recheckMutation.isPending || isStreaming || isReconnecting;
+  const recheckStatus = isReconnecting
+    ? `Reconnecting (${reconnectAttempt}/${maxReconnectAttempts})...`
+    : event?.type === "completed"
+      ? "Completed"
+      : event?.type === "failed"
+        ? "Failed"
+        : event?.type === "processing"
+          ? "Processing..."
+          : isStreaming
+            ? "Waiting..."
+            : null;
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-10 sm:px-6">
@@ -209,9 +269,58 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      <p className="sr-only" role="status" aria-live="polite">
-        {recheckStatus ? `Batch re-check: ${recheckStatus}` : ""}
-      </p>
+      <BatchRecheckLiveRegion
+        event={event}
+        isStarting={recheckMutation.isPending}
+        isStreaming={isStreaming}
+        error={recheckMutation.isError ? recheckMutation.error.message : error}
+      />
+
+      {!allContributorsQuery.isLoading &&
+        !allContributorsQuery.isError &&
+        contributors.length > 0 && (
+          <StaleDataBanner
+            staleness={staleness}
+            onRecheckAll={() => recheckMutation.mutate()}
+            isRecheckRunning={isRecheckRunning}
+          />
+        )}
+
+      {freezeQuery.data?.active && (
+        <FreezeWindowBanner
+          reason={freezeQuery.data.reason ?? undefined}
+          start={freezeQuery.data.start ?? undefined}
+          end={freezeQuery.data.end ?? undefined}
+        />
+      )}
+
+      {isReconnecting && (
+        <Card
+          className="mb-4 border-amber-300 bg-amber-50 dark:border-amber-700 dark:bg-amber-950/60"
+          role="status"
+          aria-live="polite"
+          data-testid="recheck-reconnecting-banner"
+        >
+          <CardContent className="flex items-center gap-2 py-3 text-sm text-amber-800 dark:text-amber-200">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            <span>
+              Connection lost. Reconnecting to live recheck progress (attempt {reconnectAttempt}/{maxReconnectAttempts})...
+            </span>
+          </CardContent>
+        </Card>
+      )}
+
+      {streamError && !isReconnecting && (
+        <Card
+          className="mb-4 border-red-200 bg-red-50 dark:border-red-800 dark:bg-red-950"
+          role="alert"
+          data-testid="recheck-disconnect-error-banner"
+        >
+          <CardContent className="py-3 text-sm text-red-800 dark:text-red-200">
+            Batch recheck progress disconnected: {streamError}
+          </CardContent>
+        </Card>
+      )}
 
       {event?.type === "completed" && (
         <Card className="mb-4 border-green-200 bg-green-50 dark:border-green-800 dark:bg-green-950">
@@ -252,7 +361,7 @@ export default function DashboardPage() {
         </CardContent>
       </Card>
 
-      {!contributorsQuery.isLoading && !contributorsQuery.isError && (
+      {!allContributorsQuery.isLoading && !allContributorsQuery.isError && (
         <div className="mb-8">
           <WavePrepWorkspace
             contributors={contributors}
@@ -281,9 +390,9 @@ export default function DashboardPage() {
             // stacks a second, native `window.confirm()` on top of it.
             onExport={() => exportContributorsCsv(pager.contributors, true)}
             onRecheck={(id) => recheckOneMutation.mutate(id)}
-            onLoadMore={() => void contributorsQuery.fetchNextPage()}
-            hasMore={Boolean(contributorsQuery.hasNextPage)}
-            isLoadingMore={contributorsQuery.isFetchingNextPage}
+            onBanToggle={async (githubUsername, action, reason) => {
+              await banMutation.mutateAsync({ githubUsername, action, reason });
+            }}
             recheckingId={
               recheckOneMutation.isPending
                 ? (recheckOneMutation.variables ?? null)

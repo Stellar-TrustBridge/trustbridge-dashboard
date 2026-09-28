@@ -1,6 +1,11 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 
 import { requireMaintainerSession } from "@/lib/api-auth";
+import {
+  API_KEY_RATE_LIMIT,
+  buildRateLimitHeaders,
+  requireApiKeyScope,
+} from "@/lib/api-key-auth";
 import { recordAuditLog } from "@/lib/audit";
 import {
   buildWalletProofInfo,
@@ -12,10 +17,37 @@ import { buildJson, buildJsonFilename } from "@/lib/csv";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export async function GET() {
+export async function GET(request: NextRequest) {
+  // ── Auth: session (browser) OR API key (cron/automation) ──────────────
+  let actorId: string | null = null;
+  let actorLogin: string | null = null;
+
   const session = await requireMaintainerSession();
-  if (!session) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  if (session) {
+    actorId = session.user.id;
+    actorLogin = session.user.githubUsername ?? null;
+  } else {
+    const apiKeyAuth = await requireApiKeyScope(request, "export:read");
+
+    if (!apiKeyAuth) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    if ("rateLimited" in apiKeyAuth) {
+      return NextResponse.json(
+        { error: "Too many requests" },
+        {
+          status: 429,
+          headers: buildRateLimitHeaders(
+            apiKeyAuth.result,
+            API_KEY_RATE_LIMIT.maxRequests
+          ),
+        }
+      );
+    }
+
+    actorId = apiKeyAuth.createdById;
+    actorLogin = `api-key:${apiKeyAuth.name}`;
   }
 
   try {
@@ -87,8 +119,8 @@ export async function GET() {
 
     await recordAuditLog({
       action: "export.json",
-      actorId: session.user.id,
-      actorLogin: session.user.githubUsername ?? null,
+      actorId,
+      actorLogin,
       metadata: {
         contributorCount: total,
         filename,
@@ -108,8 +140,8 @@ export async function GET() {
 
     await recordAuditLog({
       action: "export.json.failed",
-      actorId: session.user.id,
-      actorLogin: session.user.githubUsername ?? null,
+      actorId,
+      actorLogin,
       metadata: { error: message },
     });
 

@@ -12,6 +12,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { SnapshotDiffPanel } from "@/components/SnapshotDiffPanel";
 import { buildStalenessSummary } from "@/lib/stale-export";
 import type { ContributorRow, ReadinessStatus } from "@/types";
 

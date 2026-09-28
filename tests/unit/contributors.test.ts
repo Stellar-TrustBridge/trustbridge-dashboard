@@ -89,6 +89,12 @@ describe("searchContributors", () => {
     expect(result[0].githubUsername).toBe("bob");
   });
 
+  it("matches small typos in GitHub usernames and addresses", () => {
+    expect(searchContributors(allRows, "alce")).toHaveLength(1);
+    expect(searchContributors(allRows, "gaddr_charl")).toHaveLength(1);
+    expect(searchContributors(allRows, "gaddr_chaarlie")).toHaveLength(1);
+  });
+
   it("returns empty array when nothing matches", () => {
     expect(searchContributors(allRows, "zzz_no_match")).toHaveLength(0);
   });

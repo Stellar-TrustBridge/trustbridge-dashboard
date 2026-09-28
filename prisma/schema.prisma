@@ -23,8 +23,27 @@ model User {
   auditLogs       TokenAuditLog[]
   addressHistory  AddressHistoryRecord[]
   invites         Invite[]
+  apiKeys         ApiKey[]
+  notifications   Notification[]
+  banned          Boolean       @default(false)
+  bannedAt        DateTime?
+  banReason       String?
+  bannedById      String?
   createdAt       DateTime      @default(now())
   updatedAt       DateTime      @updatedAt
+
+  @@index([githubUsername])
+}
+
+model BannedContributor {
+  id              String   @id @default(cuid())
+  maintainerOrgId String   @default("default")
+  githubUsername  String   @unique
+  reason          String
+  bannedById      String?
+  createdAt       DateTime @default(now())
+
+  @@index([githubUsername])
 }
 
 model TokenAuditLog {
@@ -57,13 +76,20 @@ model Registration {
   usdcBalance         String        @default("0")
   horizonLatencyMs    Int?
   lastCheckedAt       DateTime?
+  /// Opt-in public profile. Default false (private).
+  profilePublic       Boolean       @default(false)
+  /// Only relevant when profilePublic=true. Shows G-address on public profile.
+  showStellarAddress  Boolean       @default(false)
   createdAt           DateTime      @default(now())
   updatedAt           DateTime      @updatedAt
+  notes               String?
+  tags                String[]      @default([])
   disputeProof        DisputeProof?
 
   @@index([trustlineReady])
   @@index([lastCheckedAt])
   @@index([deletedAt])
+  @@index([profilePublic])
 }
 
 enum DisputeStatus {
@@ -153,6 +179,41 @@ model QueueJob {
   @@index([type, status])
 }
 
+/// Optional database source for the feature-flags module (see src/lib/feature-flags.ts).
+/// Only consulted when FEATURE_FLAGS_DB_ENABLED is truthy; env overrides always win.
+model FeatureFlag {
+  key         String   @id
+  enabled     Boolean  @default(false)
+  description String?
+  updatedById String?
+  updatedAt   DateTime @updatedAt
+  createdAt   DateTime @default(now())
+}
+
+/// Maintainer API keys for programmatic / cron access to export endpoints.
+/// The raw key is shown once at creation and never stored.
+/// Only the SHA-256 hex digest is persisted here.
+model ApiKey {
+  id              String    @id @default(cuid())
+  maintainerOrgId String    @default("default")
+  /// SHA-256 hex of the raw bearer token. Never store the raw key.
+  keyHash         String    @unique
+  /// Human-readable label chosen by the creator.
+  name            String
+  /// Allowed scopes, e.g. ["export:read"]. "*" grants everything (reserved).
+  scopes          String[]  @default([])
+  createdById     String
+  createdBy       User      @relation(fields: [createdById], references: [id], onDelete: Cascade)
+  expiresAt       DateTime?
+  lastUsedAt      DateTime?
+  revokedAt       DateTime?
+  createdAt       DateTime  @default(now())
+
+  @@index([keyHash])
+  @@index([createdById])
+  @@index([createdAt])
+}
+
 model Account {
   id                String  @id @default(cuid())
   maintainerOrgId   String  @default("default")
@@ -188,4 +249,31 @@ model VerificationToken {
   expires         DateTime
 
   @@unique([identifier, token])
+}
+
+enum NotificationType {
+  BATCH_JOB_COMPLETED
+  BATCH_JOB_FAILED
+  READINESS_CHANGED
+  DISPUTE_SUBMITTED
+  INVITE_USED
+}
+
+model Notification {
+  id              String           @id @default(cuid())
+  maintainerOrgId String           @default("default")
+  userId          String?
+  user            User?            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type            NotificationType
+  title           String
+  body            String
+  read            Boolean          @default(false)
+  metadata        Json?
+  createdAt       DateTime         @default(now())
+  readAt          DateTime?
+
+  @@index([userId])
+  @@index([maintainerOrgId])
+  @@index([read])
+  @@index([createdAt])
 }

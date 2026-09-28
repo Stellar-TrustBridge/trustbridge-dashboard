@@ -88,3 +88,39 @@ export function assertSameOrigin(request: NextRequest): NextResponse | null {
   // No Origin and no Referer → allow (non-browser client)
   return null;
 }
+
+/**
+ * Enforces CSRF protection for mutating requests by requiring a valid
+ * same-origin Origin/Referer (via {@link assertSameOrigin}) AND a matching
+ * double-submit CSRF token.
+ *
+ * Token source (matches existing mutating-route patterns):
+ * - Header: `x-csrf-token`
+ * - Cookie: `csrf_token`
+ *
+ * Safe methods (GET, HEAD, OPTIONS) bypass entirely.
+ *
+ * Returns a 403 NextResponse when rejected, or null when allowed.
+ */
+export function assertCsrf(request: NextRequest): NextResponse | null {
+  if (SAFE_METHODS.has(request.method)) {
+    return null;
+  }
+
+  const originError = assertSameOrigin(request);
+  if (originError) {
+    return originError;
+  }
+
+  const headerToken = request.headers.get("x-csrf-token");
+  const cookieToken = request.cookies.get("csrf_token")?.value;
+
+  if (!headerToken || !cookieToken || headerToken !== cookieToken) {
+    return NextResponse.json(
+      { error: "Invalid CSRF token" },
+      { status: 403 }
+    );
+  }
+
+  return null;
+}

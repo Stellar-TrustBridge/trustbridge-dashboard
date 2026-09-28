@@ -70,6 +70,8 @@ function authorized({
   return true;
 }
 
+import { extractRequestId, generateRequestId, isValidRequestId } from "@/lib/request-id";
+
 /**
  * Simulates the inner `middleware` function from src/middleware.ts.
  * Called only when `authorized` returns true.
@@ -77,17 +79,29 @@ function authorized({
 function innerMiddleware(req: {
   nextUrl: { pathname: string };
   url: string;
+  method?: string;
+  headers?: Headers;
   nextauth: { token: JwtToken | null };
 }): NextResponse {
+  const requestId = extractRequestId(req.headers ?? new Headers()) ?? generateRequestId();
+  const requestHeaders = new Headers(req.headers);
+  requestHeaders.set("x-request-id", requestId);
+
   const isMaintainer = req.nextauth.token?.isMaintainer;
 
   if (req.nextUrl.pathname.startsWith("/dashboard") && !isMaintainer) {
-    return NextResponse.redirect(
+    const res = NextResponse.redirect(
       new URL("/register?error=maintainer", req.url)
     );
+    res.headers.set("x-request-id", requestId);
+    return res;
   }
 
-  return NextResponse.next();
+  const res = NextResponse.next({
+    request: { headers: requestHeaders },
+  });
+  res.headers.set("x-request-id", requestId);
+  return res;
 }
 
 // ---------------------------------------------------------------------------
@@ -258,6 +272,36 @@ describe("middleware inner function", () => {
     const req = makeReq("/api/stats", null);
     const res = innerMiddleware(req);
     expect(res.status).toBe(200);
+  });
+
+  // ── request-id propagation ────────────────────────────────────────────────
+  it("generates a valid x-request-id on response when none is provided", () => {
+    const req = makeReq("/dashboard", maintainerToken);
+    const res = innerMiddleware(req);
+    const reqId = res.headers.get("x-request-id");
+    expect(reqId).not.toBeNull();
+    expect(isValidRequestId(reqId!)).toBe(true);
+  });
+
+  it("extracts and preserves incoming x-request-id header on response", () => {
+    const customId = "123e4567-e89b-42d3-a456-426614174000";
+    const headers = new Headers();
+    headers.set("x-request-id", customId);
+    const req = {
+      ...makeReq("/dashboard", maintainerToken),
+      headers,
+    };
+    const res = innerMiddleware(req);
+    expect(res.headers.get("x-request-id")).toBe(customId);
+  });
+
+  it("sets x-request-id on redirect response", () => {
+    const req = makeReq("/dashboard", contributorToken);
+    const res = innerMiddleware(req);
+    expect(res.status).toBe(307);
+    const reqId = res.headers.get("x-request-id");
+    expect(reqId).not.toBeNull();
+    expect(isValidRequestId(reqId!)).toBe(true);
   });
 });
 

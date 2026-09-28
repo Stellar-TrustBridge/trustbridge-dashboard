@@ -16,6 +16,13 @@ import { computeReadiness } from "@/lib/readiness";
 import { captureException } from "@/lib/sentry";
 import { mirrorRegistrationToSoroban } from "@/lib/soroban-register";
 import { recordInitialAddress, recordAddressChange } from "@/lib/address-history";
+import { enforceFreezeWindowGuard } from "@/lib/freeze-window";
+import { evaluateAndAuditAddressChangeAnomaly } from "@/lib/address-anomaly";
+import { isUserBanned } from "@/lib/ban-service";
+import {
+  trackServerRegistrationCreated,
+  trackServerRegistrationUpdated,
+} from "@/lib/analytics";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -81,6 +88,21 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  // Check if contributor is banned
+  const banStatus = await isUserBanned(
+    session.user.id,
+    session.user.githubUsername ?? null
+  );
+  if (banStatus.banned) {
+    return NextResponse.json(
+      {
+        error: `Account is suspended from registration: ${banStatus.reason}`,
+        code: "USER_BANNED",
+      },
+      { status: 403 }
+    );
+  }
+
   try {
     const body = (await request.json()) as { stellarAddress?: string };
 
@@ -112,6 +134,29 @@ export async function POST(request: NextRequest) {
         : null;
 
     if (existing && existing.userId !== session.user.id) {
+      if (prisma.registrationConflict?.create) {
+        await prisma.registrationConflict
+          .create({
+            data: {
+              attemptedAddress: stellarAddress,
+              attemptedUserId: session.user.id,
+              existingUserId: existing.userId,
+            },
+          })
+          .catch((err) =>
+            console.error("Failed to record RegistrationConflict:", err)
+          );
+      }
+
+      await recordAuditLog({
+        action: "registration.conflict",
+        actorId: session.user.id,
+        actorLogin: session.user.githubUsername ?? null,
+        targetId: existing.id,
+        targetLabel: stellarAddress,
+        metadata: { attemptedAddress: stellarAddress },
+      });
+
       return NextResponse.json(
         {
           error: "This Stellar address is already registered to another user",
@@ -126,11 +171,33 @@ export async function POST(request: NextRequest) {
       activeUserRegistration &&
       activeUserRegistration.stellarAddress !== stellarAddress;
 
+    if (isAddressChange) {
+      const freezeGuard = await enforceFreezeWindowGuard({
+        request,
+        isMaintainer: Boolean(session.user.isMaintainer),
+        userId: session.user.id,
+        userLogin: session.user.githubUsername ?? null,
+        actionLabel: "address_change",
+      });
+      if (freezeGuard.blocked && freezeGuard.response) {
+        return freezeGuard.response;
+      }
+    }
+
     const horizonResult = await checkStellarAddress(
       stellarAddress,
       DEFAULT_ASSET.code,
       DEFAULT_ASSET.issuer
     );
+
+    // Merge existing checklist state if available
+    const existingChecklist =
+      (userRegistration?.checklistCompleted as Record<string, boolean> | null) ??
+      {};
+    const updatedChecklist = {
+      ...existingChecklist,
+      register_address: true,
+    };
 
     const registration = await prisma.registration.upsert({
       where: { userId: session.user.id },
@@ -142,6 +209,7 @@ export async function POST(request: NextRequest) {
         trustlineAuthorized: horizonResult.trustline_authorized,
         xlmBalance: horizonResult.xlm_balance,
         spendableXlmBalance: horizonResult.spendable_xlm_balance,
+        checklistCompleted: updatedChecklist,
         lastCheckedAt: new Date(),
       },
       update: {
@@ -152,9 +220,20 @@ export async function POST(request: NextRequest) {
         trustlineAuthorized: horizonResult.trustline_authorized,
         xlmBalance: horizonResult.xlm_balance,
         spendableXlmBalance: horizonResult.spendable_xlm_balance,
+        checklistCompleted: updatedChecklist,
         lastCheckedAt: new Date(),
       },
     });
+
+    // Also update User record's checklist cache if user model is available
+    if (prisma.user?.update) {
+      await prisma.user
+        .update({
+          where: { id: session.user.id },
+          data: { checklistCompleted: updatedChecklist },
+        })
+        .catch(() => {});
+    }
 
     // Record address history
     if (!activeUserRegistration) {
@@ -167,6 +246,11 @@ export async function POST(request: NextRequest) {
         activeUserRegistration.stellarAddress,
         stellarAddress
       );
+      // Check for sudden mass address change anomaly (non-blocking)
+      void evaluateAndAuditAddressChangeAnomaly(
+        session.user.id,
+        session.user.githubUsername ?? null
+      ).catch((err) => console.error("Anomaly evaluation error:", err));
     }
 
     // Mirror registration to Soroban contract (best-effort, non-blocking).
@@ -194,6 +278,20 @@ export async function POST(request: NextRequest) {
       metadata: { readiness: horizonResult.readiness },
     });
 
+    // Track analytics event (fire-and-forget, no-op when key is absent)
+    if (activeUserRegistration) {
+      trackServerRegistrationUpdated({
+        userId: session.user.id,
+        stellarAddress: registration.stellarAddress,
+        fieldsChanged: isAddressChange ? ["stellarAddress"] : [],
+      });
+    } else {
+      trackServerRegistrationCreated({
+        userId: session.user.id,
+        stellarAddress: registration.stellarAddress,
+      });
+    }
+
     return NextResponse.json({
       success: true,
       registration: {
@@ -206,6 +304,7 @@ export async function POST(request: NextRequest) {
         verified: horizonResult.verified,
         xlm_balance: registration.xlmBalance,
         spendable_xlm_balance: registration.spendableXlmBalance,
+        checklistCompleted: updatedChecklist,
         walletProof: buildWalletProofInfo(
           registration.stellarAddress,
           session.user.githubUsername ?? null
@@ -220,6 +319,7 @@ export async function POST(request: NextRequest) {
           lastCheckedAt: registration.lastCheckedAt?.toISOString() ?? null,
         }),
       },
+      checklistCompleted: updatedChecklist,
     });
   } catch (error) {
     // The response stays deliberately vague — the caller learns nothing about
@@ -265,7 +365,20 @@ export async function GET() {
   });
 
   if (!registration || registration.deletedAt) {
-    return NextResponse.json({ registration: null });
+    let checklistCompleted: Record<string, boolean> = {};
+    if (prisma.user?.findUnique) {
+      const user = await prisma.user.findUnique({
+        where: { id: session.user.id },
+        select: { checklistCompleted: true },
+      });
+      checklistCompleted =
+        (user?.checklistCompleted as Record<string, boolean> | null) ?? {};
+    }
+
+    return NextResponse.json({
+      registration: null,
+      checklistCompleted,
+    });
   }
 
   const readiness = computeReadiness(
@@ -278,10 +391,14 @@ export async function GET() {
     }
   );
 
+  const checklistCompleted =
+    (registration.checklistCompleted as Record<string, boolean> | null) ?? {};
+
   return NextResponse.json({
     registration: {
       ...registration,
       readiness,
+      checklistCompleted,
       walletProof: buildWalletProofInfo(
         registration.stellarAddress,
         session.user.githubUsername ?? null
@@ -296,5 +413,6 @@ export async function GET() {
         lastCheckedAt: registration.lastCheckedAt?.toISOString() ?? null,
       }),
     },
+    checklistCompleted,
   });
 }

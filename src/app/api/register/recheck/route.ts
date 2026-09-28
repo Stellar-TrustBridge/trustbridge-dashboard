@@ -16,6 +16,9 @@ export const dynamic = "force-dynamic";
  * Stellar address readiness. Applies retries, caching, and circuit breaker
  * protection via checkStellarAddress.
  */
+import { enforceFreezeWindowGuard } from "@/lib/freeze-window";
+import { isUserBanned } from "@/lib/ban-service";
+
 export async function POST(request: NextRequest) {
   const csrf = assertSameOrigin(request);
   if (csrf) return csrf;
@@ -24,6 +27,33 @@ export async function POST(request: NextRequest) {
 
   if (!session?.user?.id) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  // Check if contributor is banned
+  const banStatus = await isUserBanned(
+    session.user.id,
+    session.user.githubUsername ?? null
+  );
+  if (banStatus.banned) {
+    return NextResponse.json(
+      {
+        error: `Account is suspended from recheck: ${banStatus.reason}`,
+        code: "USER_BANNED",
+      },
+      { status: 403 }
+    );
+  }
+
+  // Check wave freeze window
+  const freezeGuard = await enforceFreezeWindowGuard({
+    request,
+    isMaintainer: Boolean(session.user.isMaintainer),
+    userId: session.user.id,
+    userLogin: session.user.githubUsername ?? null,
+    actionLabel: "recheck",
+  });
+  if (freezeGuard.blocked && freezeGuard.response) {
+    return freezeGuard.response;
   }
 
   try {

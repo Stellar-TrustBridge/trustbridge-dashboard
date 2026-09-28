@@ -52,6 +52,7 @@ interface ContributorTableProps {
   onExport?: () => void;
   onRecheck?: (id: string) => void;
   recheckingId?: string | null;
+  onBanToggle?: (githubUsername: string, action: "ban" | "unban", reason?: string) => Promise<void>;
   onLoadMore?: () => void;
   hasMore?: boolean;
   isLoading?: boolean;
@@ -269,12 +270,12 @@ function MobileContributorCard({
     </article>
   );
 }
-
 export function ContributorTable({
   contributors,
   onExport,
   onRecheck,
-  recheckingId,
+  recheckingId = null,
+  onBanToggle,
   onLoadMore,
   hasMore = false,
   isLoading = false,
@@ -283,9 +284,15 @@ export function ContributorTable({
   registerUrl = "/register",
   className,
 }: ContributorTableProps) {
+  const headingId = useId();
   const columnPickerId = useId();
   const searchInputId = useId();
   const paletteTitleId = useId();
+  const headingId = useId();
+  const columnPickerRef = useRef<HTMLFieldSetElement | null>(null);
+  const columnPickerToggleRef = useRef<HTMLButtonElement | null>(null);
+  const csvExportRef = useRef<HTMLButtonElement | null>(null);
+  const jsonExportRef = useRef<HTMLButtonElement | null>(null);
   const [filter, setFilter] = useState<FilterOption>("all");
   const [sortKey, setSortKey] = useState<SortKey>("githubUsername");
   const [sortAsc, setSortAsc] = useState(true);
@@ -297,8 +304,16 @@ export function ContributorTable({
   // Which export the confirmation dialog is standing in front of, or null when
   // it is closed. Both formats share one dialog.
   const [pendingExport, setPendingExport] = useState<"csv" | "json" | null>(null);
+  const [banDialogRow, setBanDialogRow] = useState<ContributorRow | null>(null);
+  const [banDialogAction, setBanDialogAction] = useState<"ban" | "unban">("ban");
+  const [banReasonInput, setBanReasonInput] = useState("");
+  const [isSubmittingBan, setIsSubmittingBan] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const csvExportRef = useRef<HTMLButtonElement | null>(null);
+  const jsonExportRef = useRef<HTMLButtonElement | null>(null);
+  const columnPickerToggleRef = useRef<HTMLButtonElement | null>(null);
+  const columnPickerRef = useRef<HTMLFieldSetElement | null>(null);
   const paletteRef = useRef<HTMLDivElement | null>(null);
   const paletteOpenerRef = useRef<HTMLElement | null>(null);
 
@@ -828,7 +843,16 @@ export function ContributorTable({
                 >
                   {isVisible("githubUsername") && (
                     <th className="px-4 py-3 font-medium" scope="row">
-                      {formatGithubHandle(row.githubUsername)}
+                      <span>{formatGithubHandle(row.githubUsername)}</span>
+                      {row.banned && (
+                        <span
+                          className="ml-2 inline-flex items-center rounded-full bg-red-100 px-2 py-0.5 text-xs font-semibold text-red-800 dark:bg-red-950/80 dark:text-red-300"
+                          title={row.banReason ? `Banned: ${row.banReason}` : "Banned"}
+                          data-testid={`banned-badge-${row.githubUsername}`}
+                        >
+                          🚫 Banned
+                        </span>
+                      )}
                     </th>
                   )}
                   {isVisible("stellarAddress") && (
@@ -862,22 +886,41 @@ export function ContributorTable({
                   <td className="min-w-[280px] px-4 py-3">
                     <ContributorDebugPanel row={row} />
                   </td>
-                  {onRecheck && (
+                  {(onRecheck || onBanToggle) && (
                     <td className="px-4 py-3 text-right">
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => onRecheck(row.id)}
-                        disabled={recheckingId === row.id}
-                        aria-label={`Re-check ${row.githubUsername} via Horizon`}
-                      >
-                        {recheckingId === row.id ? (
-                          <Loader2 className="h-4 w-4 animate-spin" />
-                        ) : (
-                          <RefreshCw className="h-4 w-4" />
+                      <div className="flex items-center justify-end gap-2">
+                        {onRecheck && (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => onRecheck(row.id)}
+                            disabled={recheckingId === row.id}
+                            aria-label={`Re-check ${row.githubUsername} via Horizon`}
+                          >
+                            {recheckingId === row.id ? (
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                            ) : (
+                              <RefreshCw className="h-4 w-4" />
+                            )}
+                            Re-check
+                          </Button>
                         )}
-                        Re-check
-                      </Button>
+                        {onBanToggle && (
+                          <Button
+                            size="sm"
+                            variant={row.banned ? "outline" : "destructive"}
+                            onClick={() => {
+                              setBanDialogAction(row.banned ? "unban" : "ban");
+                              setBanReasonInput("");
+                              setBanDialogRow(row);
+                            }}
+                            aria-label={`${row.banned ? "Unban" : "Ban"} ${row.githubUsername}`}
+                            data-testid={`ban-toggle-${row.githubUsername}`}
+                          >
+                            {row.banned ? "Unban" : "Ban"}
+                          </Button>
+                        )}
+                      </div>
                     </td>
                   )}
                 </tr>
@@ -932,18 +975,89 @@ export function ContributorTable({
         }
         cancelLabel="Cancel"
         destructive={staleSummary.stale}
-        onCancel={() => setPendingExport(null)}
+        onCancel={() => {
+          const format = pendingExport;
+          const ref = format === "json" ? jsonExportRef : csvExportRef;
+          setPendingExport(null);
+          ref.current?.focus();
+        }}
         onConfirm={() => {
           const format = pendingExport;
+          const ref = format === "json" ? jsonExportRef : csvExportRef;
           setPendingExport(null);
-          if (format === "json") {
-            exportContributorsJson(contributors, true);
-          } else {
-            onExport?.();
+          runExport(() => {
+            if (format === "json") {
+              exportContributorsJson(contributors, true);
+            } else {
+              onExport?.();
+            }
+          }, ref);
+        }}
+      />
+
+      <ConfirmDialog
+        open={banDialogRow !== null}
+        title={`${banDialogAction === "ban" ? "Ban" : "Unban"} Contributor @${banDialogRow?.githubUsername}?`}
+        description={
+          banDialogAction === "ban" ? (
+            <div className="space-y-3 pt-2">
+              <p>
+                Banning this contributor will reject all current and future registration or recheck attempts for this GitHub account.
+              </p>
+              <div>
+                <label htmlFor="ban-reason-input" className="block text-xs font-semibold text-foreground mb-1">
+                  Reason for ban <span className="text-red-500">*</span>
+                </label>
+                <Input
+                  id="ban-reason-input"
+                  type="text"
+                  placeholder="e.g. Abusive behavior, stolen wallet, TOS violation"
+                  value={banReasonInput}
+                  onChange={(e) => setBanReasonInput(e.target.value)}
+                  data-testid="ban-reason-input"
+                />
+              </div>
+            </div>
+          ) : (
+            <p>
+              Unbanning removes this GitHub account from the ban list and allows future registration and re-check attempts.
+            </p>
+          )
+        }
+        confirmLabel={
+          isSubmittingBan
+            ? banDialogAction === "ban"
+              ? "Banning..."
+              : "Unbanning..."
+            : banDialogAction === "ban"
+              ? "Confirm Ban"
+              : "Confirm Unban"
+        }
+        cancelLabel="Cancel"
+        destructive={banDialogAction === "ban"}
+        onCancel={() => {
+          setBanDialogRow(null);
+          setBanReasonInput("");
+        }}
+        onConfirm={async () => {
+          if (!banDialogRow || isSubmittingBan || !onBanToggle) return;
+          const reason = banReasonInput.trim();
+          if (banDialogAction === "ban" && !reason) return;
+          try {
+            setIsSubmittingBan(true);
+            await onBanToggle(
+              banDialogRow.githubUsername,
+              banDialogAction,
+              banDialogAction === "ban" ? reason : undefined
+            );
+            setBanDialogRow(null);
+            setBanReasonInput("");
+          } finally {
+            setIsSubmittingBan(false);
           }
         }}
       />
-    </div>
+    </section>
   );
 }
 

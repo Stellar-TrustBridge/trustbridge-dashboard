@@ -193,9 +193,6 @@ describe("ContributorTable — column picker focus", () => {
 describe("ContributorTable — export focus restoration", () => {
   it("returns focus to the CSV button after the export dialog closes", async () => {
     const user = userEvent.setup();
-    // window.confirm is a modal dialog; browsers do not reliably hand focus
-    // back to the trigger when it closes.
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
     const onExport = vi.fn();
 
     render(<ContributorTable contributors={contributors} onExport={onExport} />);
@@ -203,32 +200,30 @@ describe("ContributorTable — export focus restoration", () => {
     const csvButton = screen.getByRole("button", { name: /Export CSV/i });
     await user.click(csvButton);
 
+    const confirmBtn = screen.getByTestId("confirm-dialog-confirm");
+    await user.click(confirmBtn);
+
     expect(onExport).toHaveBeenCalledTimes(1);
     expect(csvButton).toHaveFocus();
-    confirmSpy.mockRestore();
   });
 
   it("returns focus to the JSON button after the export dialog closes", async () => {
     const user = userEvent.setup();
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
 
     render(<ContributorTable contributors={contributors} onExport={vi.fn()} />);
 
     const jsonButton = screen.getByRole("button", { name: /Export JSON/i });
     await user.click(jsonButton);
 
+    const confirmBtn = screen.getByTestId("confirm-dialog-confirm");
+    await user.click(confirmBtn);
+
     expect(jsonButton).toHaveFocus();
-    confirmSpy.mockRestore();
   });
 
   it("restores focus when the stale-data confirm is declined", async () => {
     const user = userEvent.setup();
-    // The real dashboard wiring: `onExport` runs `exportContributorsCsv`,
-    // which prompts before exporting rows nobody has re-checked. Declining is
-    // the path where the user most needs to be left where they were, because
-    // nothing else on screen changes to reorient them.
     const stale = contributors.map((row) => ({ ...row, lastCheckedAt: null }));
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
 
     render(
       <ContributorTable
@@ -240,16 +235,15 @@ describe("ContributorTable — export focus restoration", () => {
     const csvButton = screen.getByRole("button", { name: /Export CSV/i });
     await user.click(csvButton);
 
-    expect(confirmSpy).toHaveBeenCalled();
+    const cancelBtn = screen.getByTestId("confirm-dialog-cancel");
+    await user.click(cancelBtn);
+
     expect(downloadCsv).not.toHaveBeenCalled();
     expect(csvButton).toHaveFocus();
-    confirmSpy.mockRestore();
   });
 
   it("restores focus even when the export handler throws", async () => {
     const user = userEvent.setup();
-    // React re-throws handler errors as an uncaught window error in jsdom;
-    // swallow it so the assertion below is what the test reports on.
     const swallow = (event: ErrorEvent) => event.preventDefault();
     window.addEventListener("error", swallow);
     const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -263,8 +257,9 @@ describe("ContributorTable — export focus restoration", () => {
     const csvButton = screen.getByRole("button", { name: /Export CSV/i });
     await user.click(csvButton);
 
-    // `runExport` restores focus in a `finally`: a failed export must not also
-    // cost the user their place in the page.
+    const confirmBtn = screen.getByTestId("confirm-dialog-confirm");
+    await user.click(confirmBtn);
+
     expect(onExport).toHaveBeenCalled();
     expect(csvButton).toHaveFocus();
 

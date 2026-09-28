@@ -1,9 +1,19 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { Loader2, RefreshCw, ShieldCheck, Users, Zap } from "lucide-react";
+import {
+  AlertTriangle,
+  CheckCircle2,
+  Loader2,
+  RefreshCw,
+  ShieldCheck,
+  TimerReset,
+  Users,
+  Zap,
+} from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import {
   Card,
   CardContent,
@@ -12,8 +22,16 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { WaveReadinessBar } from "@/components/WaveReadinessBar";
+import { HorizonLatencyChart } from "@/components/HorizonLatencyChart";
+import { AddressAnomalyBanner } from "@/components/AddressAnomalyBanner";
+import type { HorizonLatencyStats } from "@/lib/stats";
+import type { AnomalyStatus } from "@/lib/address-anomaly";
 
-// ── API response types ────────────────────────────────────────────────────
+interface CircuitBreakerTripEvent {
+  trippedAt: number;
+  failureCountAtTrip: number;
+  recoveredAt: number | null;
+}
 
 interface MetricsResponse {
   contributors: {
@@ -26,23 +44,39 @@ interface MetricsResponse {
       not_ready: number;
     };
   };
+  horizonLatency?: HorizonLatencyStats;
+  addressAnomaly?: AnomalyStatus;
   audit: {
     recentEntries: number;
     byAction: Record<string, number>;
     latestAt: string | null;
   };
+  circuitBreaker: {
+    state: "CLOSED" | "OPEN" | "HALF_OPEN";
+    failureCount: number;
+    successCount: number;
+    lastFailureTime: number | null;
+    totalTrips: number;
+    recentTrips: CircuitBreakerTripEvent[];
+    processLocal: boolean;
+  };
+  rateLimit: {
+    activeIdentifiers: number;
+    totalAllowed: number;
+    totalBlocked: number;
+    processLocal: boolean;
+  };
   config: {
     rateLimitWindowMs: number;
     rateLimitMaxRequests: number;
     circuitBreakerFailureThreshold: number;
+    circuitBreakerSuccessThreshold: number;
     circuitBreakerRecoveryMs: number;
     staleCsvMaxAgeMs: number;
     horizonUrl: string;
     sorobanContractConfigured: boolean;
   };
 }
-
-// ── Helpers ───────────────────────────────────────────────────────────────
 
 function msToSeconds(ms: number) {
   return (ms / 1000).toFixed(0);
@@ -52,7 +86,44 @@ function msToHours(ms: number) {
   return (ms / 3_600_000).toFixed(1);
 }
 
-// ── Page ──────────────────────────────────────────────────────────────────
+function formatTimestamp(ts: number | null): string {
+  if (!ts) return "Never";
+  return new Date(ts).toLocaleString();
+}
+
+function CircuitBreakerStateBadge({ state }: { state: MetricsResponse["circuitBreaker"]["state"] }) {
+  switch (state) {
+    case "CLOSED":
+      return (
+        <Badge className="bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300">
+          <CheckCircle2 className="mr-1 h-3 w-3" />
+          Closed — Healthy
+        </Badge>
+      );
+    case "OPEN":
+      return (
+        <Badge className="bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300">
+          <AlertTriangle className="mr-1 h-3 w-3" />
+          Open — Tripped
+        </Badge>
+      );
+    case "HALF_OPEN":
+      return (
+        <Badge className="bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300">
+          <TimerReset className="mr-1 h-3 w-3" />
+          Half-open — Recovering
+        </Badge>
+      );
+  }
+}
+
+function ProcessLocalNote() {
+  return (
+    <p className="mt-2 text-xs text-muted-foreground">
+      ⚠️ Process-local data only — each server instance reports its own state until Redis is deployed.
+    </p>
+  );
+}
 
 export default function MetricsPage() {
   const metricsQuery = useQuery<MetricsResponse>({
@@ -60,6 +131,21 @@ export default function MetricsPage() {
     queryFn: async () => {
       const res = await fetch("/api/metrics");
       if (!res.ok) throw new Error("Failed to load metrics");
+      return res.json();
+    },
+    refetchInterval: 15000,
+  });
+
+  const queueHealthQuery = useQuery<{
+    depth: number;
+    failedCount: number;
+    oldestPendingJobCreatedAt: string | null;
+    serverlessNotice: string;
+  }>({
+    queryKey: ["admin-queue-health"],
+    queryFn: async () => {
+      const res = await fetch("/api/contributors/queue/health");
+      if (!res.ok) return { depth: 0, failedCount: 0, oldestPendingJobCreatedAt: null, serverlessNotice: "" };
       return res.json();
     },
   });
@@ -85,7 +171,7 @@ export default function MetricsPage() {
   }
 
   const data = metricsQuery.data!;
-  const { contributors, audit, config } = data;
+  const { contributors, audit, circuitBreaker, rateLimit, config } = data;
   const auditEntries = Object.entries(audit.byAction).sort((a, b) => b[1] - a[1]);
 
   return (
@@ -93,12 +179,12 @@ export default function MetricsPage() {
       className="mx-auto max-w-5xl px-4 py-8 sm:px-6 sm:py-10"
       data-testid="metrics-page"
     >
-      {/* Header */}
       <div className="mb-6 flex flex-col gap-4 sm:mb-8 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 className="text-2xl font-bold sm:text-3xl">Admin metrics</h1>
           <p className="mt-2 text-sm text-muted-foreground sm:text-base">
             Real-time operational snapshot for the TrustBridge maintainer team.
+            Auto-refreshes every 15s.
           </p>
         </div>
         <Button
@@ -117,6 +203,9 @@ export default function MetricsPage() {
         </Button>
       </div>
 
+      {/* ── Security Anomaly Alert ────────────────────────────── */}
+      <AddressAnomalyBanner status={data.addressAnomaly} />
+
       {/* ── Contributor readiness ─────────────────────────────── */}
       <Card className="mb-6">
         <CardHeader>
@@ -134,16 +223,13 @@ export default function MetricsPage() {
             readyCount={contributors.ready}
             totalCount={contributors.total}
           />
-          {/* Dark mode: -300 heading + -200 sub-label on dark:bg-*-950/40 gives
-              ≥ 7:1 contrast against the page background (WCAG AAA).
-              Light mode: -700 on white/tinted bg gives ≥ 6.5:1 (WCAG AA). */}
           <div className="grid grid-cols-1 gap-3 text-center sm:grid-cols-3 sm:gap-4">
             <div className="min-h-11 rounded-lg border border-emerald-300 bg-emerald-50 px-4 py-4 dark:border-emerald-600 dark:bg-emerald-950/40">
               <p className="text-2xl font-bold text-emerald-700 dark:text-emerald-300">
                 {contributors.byStatus.ready}
               </p>
               <p className="mt-1 text-xs text-emerald-700 dark:text-emerald-200">
-                ✅ Ready
+                Ready
               </p>
             </div>
             <div className="min-h-11 rounded-lg border border-amber-300 bg-amber-50 px-4 py-4 dark:border-amber-600 dark:bg-amber-950/40">
@@ -151,7 +237,7 @@ export default function MetricsPage() {
                 {contributors.byStatus.low_reserve}
               </p>
               <p className="mt-1 text-xs text-amber-700 dark:text-amber-200">
-                ⚠️ Low reserve
+                Low reserve
               </p>
             </div>
             <div className="min-h-11 rounded-lg border border-red-300 bg-red-50 px-4 py-4 dark:border-red-600 dark:bg-red-950/40">
@@ -159,12 +245,15 @@ export default function MetricsPage() {
                 {contributors.byStatus.not_ready}
               </p>
               <p className="mt-1 text-xs text-red-700 dark:text-red-200">
-                ❌ Not ready
+                Not ready
               </p>
             </div>
           </div>
         </CardContent>
       </Card>
+
+      {/* ── Horizon API Latency ─────────────────────────────────── */}
+      <HorizonLatencyChart stats={data.horizonLatency} />
 
       {/* ── Recent audit activity ─────────────────────────────── */}
       <Card className="mb-6">
@@ -272,12 +361,17 @@ export default function MetricsPage() {
               hint="RATE_LIMIT_MAX_REQUESTS"
             />
             <ConfigRow
-              label="Circuit breaker threshold"
+              label="CB failure threshold"
               value={`${config.circuitBreakerFailureThreshold} failures`}
               hint="HORIZON_CB_FAILURE_THRESHOLD"
             />
             <ConfigRow
-              label="Circuit breaker recovery"
+              label="CB success threshold"
+              value={`${config.circuitBreakerSuccessThreshold} successes`}
+              hint="HORIZON_CB_SUCCESS_THRESHOLD"
+            />
+            <ConfigRow
+              label="CB recovery timeout"
               value={`${msToSeconds(config.circuitBreakerRecoveryMs)}s`}
               hint="HORIZON_CB_RECOVERY_MS"
             />
@@ -293,7 +387,7 @@ export default function MetricsPage() {
             />
             <ConfigRow
               label="Soroban contract"
-              value={config.sorobanContractConfigured ? "Configured ✅" : "Not set ⚠️"}
+              value={config.sorobanContractConfigured ? "Configured" : "Not set"}
               hint="SOROBAN_CONTRACT_ID"
             />
           </dl>
@@ -316,8 +410,6 @@ function ConfigRow({
     <div className="min-h-11 rounded-md border border-border-strong px-3 py-3 sm:py-2">
       <dt className="text-xs text-muted-foreground">{label}</dt>
       <dd className="mt-0.5 font-medium">{value}</dd>
-      {/* Full-strength muted foreground: the env-var name is the part a
-          maintainer copies, so it should not be the faintest thing on screen. */}
       <dd className="mt-0.5 font-mono text-xs text-muted-foreground">{hint}</dd>
     </div>
   );

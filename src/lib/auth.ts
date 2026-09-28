@@ -58,36 +58,49 @@ async function isTeamMember(
   }
 }
 
+export function getAllowedMaintainerOrgs(): string[] {
+  const envOrgs = process.env.ALLOWED_MAINTAINER_ORGS || process.env.GITHUB_MAINTAINER_ORG || "";
+  return envOrgs
+    .split(",")
+    .map((o) => o.trim())
+    .filter((o) => o.length > 0);
+}
+
+export function verifyTenantAccess(targetOrgId: string, currentOrgId: string): boolean {
+  if (!targetOrgId || !currentOrgId) return false;
+  return targetOrgId.toLowerCase() === currentOrgId.toLowerCase();
+}
+
 /**
- * Resolve a user's RBAC role from GitHub team membership.
- *
- * Priority:
- * 1. GITHUB_ADMIN_TEAM  -> "admin"
- * 2. GITHUB_OPERATOR_TEAM -> "operator"
- * 3. Org member (GITHUB_MAINTAINER_ORG) -> "viewer"
- * 4. Non-org member -> null (denied)
- *
- * Existing maintainers (isMaintainer=true) always get at least "viewer".
+ * Resolve a user's RBAC role from GitHub team membership across allowed orgs.
  */
 async function resolveRole(
   accessToken: string,
   username: string
 ): Promise<AppRole | null> {
-  const org = process.env.GITHUB_MAINTAINER_ORG?.trim();
-  if (!org || !accessToken) return null;
+  const allowedOrgs = getAllowedMaintainerOrgs();
+  if (allowedOrgs.length === 0 || !accessToken) return null;
 
-  const isMember = await isOrgMember(accessToken, org);
-  if (!isMember) return null;
+  let matchedOrg: string | null = null;
+  for (const org of allowedOrgs) {
+    const isMember = await isOrgMember(accessToken, org);
+    if (isMember) {
+      matchedOrg = org;
+      break;
+    }
+  }
+
+  if (!matchedOrg) return null;
 
   const adminTeam = process.env.GITHUB_ADMIN_TEAM?.trim();
   if (adminTeam) {
-    const isAdmin = await isTeamMember(accessToken, org, adminTeam, username);
+    const isAdmin = await isTeamMember(accessToken, matchedOrg, adminTeam, username);
     if (isAdmin) return "admin";
   }
 
   const operatorTeam = process.env.GITHUB_OPERATOR_TEAM?.trim();
   if (operatorTeam) {
-    const isOperator = await isTeamMember(accessToken, org, operatorTeam, username);
+    const isOperator = await isTeamMember(accessToken, matchedOrg, operatorTeam, username);
     if (isOperator) return "operator";
   }
 

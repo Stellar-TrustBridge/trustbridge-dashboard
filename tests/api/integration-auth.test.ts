@@ -12,6 +12,7 @@ vi.mock("@/lib/horizon", () => ({ checkStellarAddress: vi.fn() }));
 vi.mock("@/lib/prisma", () => ({
   prisma: {
     registration: { findUnique: vi.fn(), findFirst: vi.fn(), upsert: vi.fn() },
+    registrationConflict: { create: vi.fn().mockResolvedValue({}) },
   },
 }));
 vi.mock("@/lib/stellar", () => ({ isValidStellarAddress: vi.fn() }));

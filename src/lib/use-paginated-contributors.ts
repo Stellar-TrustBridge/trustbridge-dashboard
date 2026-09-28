@@ -1,8 +1,46 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 import type { ContributorRow } from "@/types";
+
+export interface PaginatedContributorsPage {
+  contributors: ContributorRow[];
+  total: number;
+  hasMore: boolean;
+  nextCursor?: string;
+}
+
+const ITEMS_PER_PAGE = 25;
+
+/**
+ * Fetches every contributor in one shot (limit=1000) for panels that need the
+ * full list — WaveReadinessBar, WavePrepWorkspace, DisputePanel.
+ *
+ * Uses the same query-key prefix ("contributors") as usePaginatedContributors
+ * so invalidateQueries({ queryKey: ["contributors"] }) refreshes both.
+ *
+ * Part of the #307 fix: replaces useInfiniteContributors which was causing a
+ * duplicate /api/contributors/paginated request on every dashboard mount.
+ */
+export function useAllContributors() {
+  const query = useQuery<PaginatedContributorsPage>({
+    queryKey: ["contributors", "all"],
+    queryFn: async () => {
+      const response = await fetch("/api/contributors/paginated?limit=1000");
+      if (!response.ok) throw new Error("Failed to load contributors");
+      return (await response.json()) as PaginatedContributorsPage;
+    },
+    staleTime: 30_000,
+  });
+
+  return {
+    contributors: query.data?.contributors ?? [],
+    isLoading: query.isLoading,
+    isError: query.isError,
+  };
+}
 
 export interface PaginatedContributorsPage {
   contributors: ContributorRow[];
@@ -27,13 +65,53 @@ const ITEMS_PER_PAGE = 25;
  * @param pageSize Number of contributors per page (default 25, max 100).
  */
 export function usePaginatedContributors(pageSize: number = ITEMS_PER_PAGE) {
-  // Stack of cursors — entry[0] is always null (first page), subsequent
-  // entries are the nextCursor values returned by each page.
-  const [cursorStack, setCursorStack] = useState<(string | null)[]>([null]);
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+
+  // Read initial cursor from URL on mount
+  const initialCursor = searchParams?.get("cursor") || null;
+
+  // Stack of cursors — entry[0] is initialCursor (or null for first page),
+  // subsequent entries are the nextCursor values returned by each page.
+  const [cursorStack, setCursorStack] = useState<(string | null)[]>([initialCursor]);
+
+  // Sync cursor stack if the URL cursor changes externally (e.g. browser back/forward or direct navigation)
+  useEffect(() => {
+    const urlCursor = searchParams?.get("cursor") || null;
+    setCursorStack((prev) => {
+      const activeCursor = prev[prev.length - 1];
+      if (activeCursor !== urlCursor) {
+        // If the URL cursor is already in the stack, slice back to it; otherwise reset stack to urlCursor
+        const existingIndex = prev.indexOf(urlCursor);
+        if (existingIndex !== -1) {
+          return prev.slice(0, existingIndex + 1);
+        }
+        return [urlCursor];
+      }
+      return prev;
+    });
+  }, [searchParams]);
 
   // currentCursor is always the last entry in the stack.
   const currentCursor = cursorStack[cursorStack.length - 1];
   const pageIndex = cursorStack.length - 1; // 0-based page index
+
+  // Helper to push updated cursor query param to URL
+  const updateUrlCursor = useCallback(
+    (newCursor: string | null) => {
+      const params = new URLSearchParams(searchParams ? searchParams.toString() : "");
+      if (newCursor) {
+        params.set("cursor", newCursor);
+      } else {
+        params.delete("cursor");
+      }
+      const qs = params.toString();
+      const newUrl = qs ? `${pathname}?${qs}` : pathname;
+      router.push(newUrl);
+    },
+    [pathname, router, searchParams]
+  );
 
   const query = useQuery<PaginatedContributorsPage>({
     queryKey: ["contributors", "paged", currentCursor, pageSize],
@@ -57,23 +135,34 @@ export function usePaginatedContributors(pageSize: number = ITEMS_PER_PAGE) {
     const nextCursor = query.data?.nextCursor;
     if (nextCursor) {
       setCursorStack((prev) => [...prev, nextCursor]);
+      updateUrlCursor(nextCursor);
     }
-  }, [query.data?.nextCursor]);
+  }, [query.data?.nextCursor, updateUrlCursor]);
 
   const goToPrev = useCallback(() => {
-    setCursorStack((prev) => (prev.length > 1 ? prev.slice(0, -1) : prev));
-  }, []);
+    setCursorStack((prev) => {
+      if (prev.length > 1) {
+        const nextStack = prev.slice(0, -1);
+        const prevCursor = nextStack[nextStack.length - 1];
+        updateUrlCursor(prevCursor);
+        return nextStack;
+      }
+      return prev;
+    });
+  }, [updateUrlCursor]);
 
   const reset = useCallback(() => {
     setCursorStack([null]);
-  }, []);
+    updateUrlCursor(null);
+  }, [updateUrlCursor]);
 
   return {
     contributors: query.data?.contributors ?? [],
     total: query.data?.total ?? 0,
     hasMore: query.data?.hasMore ?? false,
-    hasPrev: pageIndex > 0,
+    hasPrev: pageIndex > 0 || (currentCursor !== null && cursorStack.length > 1),
     pageIndex,
+    currentCursor,
     isLoading: query.isLoading,
     isError: query.isError,
     goToNext,
@@ -81,3 +170,4 @@ export function usePaginatedContributors(pageSize: number = ITEMS_PER_PAGE) {
     reset,
   };
 }
+

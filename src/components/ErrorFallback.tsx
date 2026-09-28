@@ -12,6 +12,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { classifyError, globalErrorLogger } from "@/lib/error-handling";
+import { captureException } from "@/lib/sentry";
 
 interface ErrorFallbackProps {
   error: Error & { digest?: string };
@@ -35,7 +36,12 @@ export function ErrorFallback({
   const displayId = requestId ?? error.digest ?? null;
 
   useEffect(() => {
+    // Log to local error tracking and Sentry
     globalErrorLogger.log(error, title);
+    captureException(error, {
+      component: title,
+      digest: error.digest,
+    });
   }, [error, title]);
 
   return (

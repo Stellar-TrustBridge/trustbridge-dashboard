@@ -1,5 +1,5 @@
 import React from "react";
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -305,6 +305,82 @@ describe("ContributorTable", () => {
       expect(
         screen.queryByRole("button", { name: /Download CSV/i })
       ).not.toBeInTheDocument();
+    });
+  });
+
+  describe("ban and unban confirmation dialog", () => {
+    const bannedContributor: ContributorRow = {
+      ...contributors[0],
+      banned: true,
+      banReason: "Policy violation",
+    };
+
+    it("requires confirmation to ban and leaves the contributor unchanged when cancelled", async () => {
+      const user = userEvent.setup();
+      const onBanToggle = vi.fn().mockResolvedValue(undefined);
+      render(
+        <ContributorTable
+          contributors={contributors}
+          onBanToggle={onBanToggle}
+        />
+      );
+
+      const banButton = screen.getByRole("button", { name: "Ban alice" });
+      await user.click(banButton);
+
+      let dialog = screen.getByRole("alertdialog");
+      expect(dialog).toHaveTextContent(/reject all current and future registration or recheck attempts/i);
+      expect(onBanToggle).not.toHaveBeenCalled();
+      await user.type(screen.getByTestId("ban-reason-input"), "Policy violation");
+      await user.click(screen.getByRole("button", { name: "Cancel" }));
+
+      expect(onBanToggle).not.toHaveBeenCalled();
+      expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+      expect(banButton).toHaveTextContent("Ban");
+      expect(screen.queryByTestId("banned-badge-alice")).not.toBeInTheDocument();
+
+      await user.click(banButton);
+      await user.type(screen.getByTestId("ban-reason-input"), "Policy violation");
+      await user.click(screen.getByRole("button", { name: "Confirm Ban" }));
+
+      await waitFor(() =>
+        expect(onBanToggle).toHaveBeenCalledWith(
+          "alice",
+          "ban",
+          "Policy violation"
+        )
+      );
+    });
+
+    it("requires confirmation to unban and leaves the contributor banned when cancelled", async () => {
+      const user = userEvent.setup();
+      const onBanToggle = vi.fn().mockResolvedValue(undefined);
+      render(
+        <ContributorTable
+          contributors={[bannedContributor]}
+          onBanToggle={onBanToggle}
+        />
+      );
+
+      const unbanButton = screen.getByRole("button", { name: "Unban alice" });
+      await user.click(unbanButton);
+
+      const dialog = screen.getByRole("alertdialog");
+      expect(dialog).toHaveTextContent(/removes this GitHub account from the ban list/i);
+      expect(dialog).toHaveTextContent(/allows future registration and re-check attempts/i);
+      expect(onBanToggle).not.toHaveBeenCalled();
+      await user.click(screen.getByRole("button", { name: "Cancel" }));
+
+      expect(onBanToggle).not.toHaveBeenCalled();
+      expect(screen.getByTestId("banned-badge-alice")).toBeInTheDocument();
+      expect(unbanButton).toHaveTextContent("Unban");
+
+      await user.click(unbanButton);
+      await user.click(screen.getByRole("button", { name: "Confirm Unban" }));
+
+      await waitFor(() =>
+        expect(onBanToggle).toHaveBeenCalledWith("alice", "unban", undefined)
+      );
     });
   });
 });

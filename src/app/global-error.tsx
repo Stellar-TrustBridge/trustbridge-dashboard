@@ -3,6 +3,7 @@
 import { useEffect } from "react";
 
 import { classifyError, globalErrorLogger } from "@/lib/error-handling";
+import { captureException } from "@/lib/sentry";
 
 import "./globals.css";
 
@@ -28,6 +29,11 @@ export default function GlobalError({
 
   useEffect(() => {
     globalErrorLogger.log(error, "root-layout");
+    // Capture to Sentry with root-layout context
+    captureException(error, {
+      context: "root-layout-error-boundary",
+      digest: error.digest,
+    });
   }, [error]);
 
   return (

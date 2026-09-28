@@ -1,7 +1,10 @@
 import "server-only";
 
 import type { Registration } from "@prisma/client";
+import type { Prisma } from "@prisma/client";
 import { rpc, Keypair, TransactionBuilder, Networks, Contract, Address, nativeToScVal } from "stellar-sdk";
+
+import { logger } from "./logger";
 
 /**
  * Result of attempting to mirror a registration to a Soroban contract.
@@ -57,9 +60,14 @@ export async function mirrorRegistrationToSoroban(
 
   // Missing secret key — log and skip without failing
   if (!secretKey) {
+    const message = "SOROBAN_SECRET_KEY is not configured — write-through skipped";
+    logger.warn("Soroban write-through skipped: missing secret key", {
+      registrationId: registration.id,
+      contractId,
+    });
     return {
       success: false,
-      errors: ["SOROBAN_SECRET_KEY is not configured — write-through skipped"],
+      errors: [message],
     };
   }
 
@@ -104,12 +112,22 @@ export async function mirrorRegistrationToSoroban(
       // Handle specific error cases
       if (errorType === "txFailed") {
         // Transaction failed on-chain (e.g. already registered)
+        logger.error("Soroban contract call failed on-chain", {
+          registrationId: registration.id,
+          contractId,
+          errorType,
+        });
         return {
           success: false,
           errors: [`Contract call failed: ${errorType}`],
         };
       }
 
+      logger.error("Soroban RPC returned an error", {
+        registrationId: registration.id,
+        contractId,
+        errorType: errorType || "unknown",
+      });
       return {
         success: false,
         errors: [`Soroban RPC error: ${errorType || "unknown"}`],
@@ -127,10 +145,41 @@ export async function mirrorRegistrationToSoroban(
     const message =
       error instanceof Error ? error.message : "Unknown error writing to Soroban";
 
+    logger.error("Soroban write-through failed", {
+      registrationId: registration.id,
+      contractId,
+      error: error instanceof Error ? error : new Error(message),
+    });
+
     // Don't fail the HTTP request — this is best-effort
     return {
       success: false,
       errors: [`Soroban write-through failed: ${message}`],
     };
   }
+}
+
+/**
+ * Enqueue a registration write-through task into the Soroban outbox table.
+ * Designed to be executed inside a Prisma $transaction alongside registration creation.
+ *
+ * @param db - Prisma transaction client (passed from a $transaction context)
+ * @param action - Action type (e.g., 'register')
+ * @param payload - Payload containing stellarAddress, githubUsername, registrationId
+ * @param maintainerOrgId - Organization ID for the maintainer context
+ */
+export async function enqueueSorobanOutbox(
+  db: Prisma.TransactionClient,
+  action: string,
+  payload: { stellarAddress: string; githubUsername: string; registrationId: string },
+  maintainerOrgId = "default"
+) {
+  return db.sorobanOutbox.create({
+    data: {
+      maintainerOrgId,
+      action,
+      payload,
+      status: "PENDING",
+    },
+  });
 }

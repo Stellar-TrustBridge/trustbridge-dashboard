@@ -311,3 +311,28 @@ export function invalidateContributorCaches(): void {
   verificationCache.invalidatePattern(/^verification:/);
   statsCache.invalidatePattern(/^stats:/);
 }
+
+/**
+ * Parse the RECHECK_IDEMPOTENCY_TTL_MS environment variable.
+ * Controls the idempotency window for batch and contributor rechecks (default 15 seconds).
+ */
+export function parseRecheckIdempotencyTtl(): number {
+  const raw = process.env.RECHECK_IDEMPOTENCY_TTL_MS;
+  if (!raw) return 15_000; // 15 seconds
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 15_000;
+}
+
+export interface RecheckLockEntry {
+  jobId: string;
+  createdAt: number;
+}
+
+/**
+ * Dedicated cache for recheck idempotency locks to prevent double-click Horizon stampedes.
+ */
+export const recheckLockCache = new CacheStore<RecheckLockEntry>(parseRecheckIdempotencyTtl());
+
+export function buildRecheckLockKey(scope: "batch" | "single", id: string = "all"): string {
+  return `recheck:lock:${scope}:${id}`;
+}

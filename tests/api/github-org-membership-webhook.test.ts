@@ -1,7 +1,13 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import crypto from "crypto";
 import { NextRequest } from "next/server";
-import { POST } from "@/app/api/webhooks/github-org-membership/route";
+import { POST, verifyWebhookSignature } from "@/app/api/webhooks/github-org-membership/route";
+import { POST as ReplayPOST } from "@/app/api/webhooks/github-org-membership/replay/route";
+import { requireAdmin } from "@/lib/api-auth";
+
+vi.mock("@/lib/api-auth", () => ({
+  requireAdmin: vi.fn(),
+}));
 
 vi.mock("@/lib/prisma", () => ({
   prisma: {
@@ -47,8 +53,54 @@ function createWebhookRequest(
 describe("POST /api/webhooks/github-org-membership", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(requireAdmin).mockResolvedValue(null);
     process.env.GITHUB_WEBHOOK_SECRET = WEBHOOK_SECRET;
     process.env.GITHUB_MAINTAINER_ORG = "test-org";
+  });
+
+  describe("verifyWebhookSignature", () => {
+    it("logs error and returns false when GITHUB_WEBHOOK_SECRET is not configured", () => {
+      const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      delete process.env.GITHUB_WEBHOOK_SECRET;
+
+      const payload = Buffer.from(JSON.stringify({ test: true }));
+      const result = verifyWebhookSignature(payload, "sha256=abcdef");
+
+      expect(result).toBe(false);
+      expect(consoleErrorSpy).toHaveBeenCalledWith(
+        "GITHUB_WEBHOOK_SECRET not configured — rejecting webhook request"
+      );
+
+      consoleErrorSpy.mockRestore();
+    });
+
+    it("logs error and returns false when GITHUB_WEBHOOK_SECRET is whitespace only", () => {
+      const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      process.env.GITHUB_WEBHOOK_SECRET = "   ";
+
+      const payload = Buffer.from(JSON.stringify({ test: true }));
+      const result = verifyWebhookSignature(payload, "sha256=abcdef");
+
+      expect(result).toBe(false);
+      expect(consoleErrorSpy).toHaveBeenCalledWith(
+        "GITHUB_WEBHOOK_SECRET not configured — rejecting webhook request"
+      );
+
+      consoleErrorSpy.mockRestore();
+    });
+
+    it("logs warning and returns false when X-Hub-Signature-256 is missing", () => {
+      const consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      process.env.GITHUB_WEBHOOK_SECRET = WEBHOOK_SECRET;
+
+      const payload = Buffer.from(JSON.stringify({ test: true }));
+      const result = verifyWebhookSignature(payload, undefined);
+
+      expect(result).toBe(false);
+      expect(consoleWarnSpy).toHaveBeenCalledWith("Missing X-Hub-Signature-256 header");
+
+      consoleWarnSpy.mockRestore();
+    });
   });
 
   it("rejects invalid signature", async () => {
@@ -66,7 +118,8 @@ describe("POST /api/webhooks/github-org-membership", () => {
     expect(json.error).toBe("Unauthorized");
   });
 
-  it("rejects request when webhook secret not configured", async () => {
+  it("rejects request and logs error when webhook secret not configured", async () => {
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     delete process.env.GITHUB_WEBHOOK_SECRET;
 
     const event = {
@@ -91,6 +144,15 @@ describe("POST /api/webhooks/github-org-membership", () => {
 
     const res = await POST(req);
     expect(res.status).toBe(403);
+    const json = await res.json();
+    expect(json.error).toBe("Unauthorized");
+
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      "GITHUB_WEBHOOK_SECRET not configured — rejecting webhook request"
+    );
+    expect(recordAuditLog).not.toHaveBeenCalled();
+
+    consoleErrorSpy.mockRestore();
   });
 
   it("ignores events from different org", async () => {
@@ -244,5 +306,25 @@ describe("POST /api/webhooks/github-org-membership", () => {
     const req = createWebhookRequest(event);
     const res = await POST(req);
     expect(res.status).toBe(202);
+  });
+
+  it("requires admin access for replay requests", async () => {
+    vi.mocked(requireAdmin).mockResolvedValue(null);
+
+    const req = new NextRequest("http://localhost:3000/api/webhooks/github-org-membership/replay", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        action: "added",
+        member: { login: "testuser", id: 123 },
+        organization: { login: "test-org" },
+        sender: { login: "admin" },
+      }),
+    });
+
+    const res = await ReplayPOST(req);
+    expect(res.status).toBe(403);
   });
 });

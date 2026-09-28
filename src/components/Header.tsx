@@ -15,7 +15,9 @@ import {
 import { useTheme } from "next-themes";
 
 import { GitHubIcon } from "@/components/icons/GitHubIcon";
+import { NotificationBell } from "@/components/NotificationBell";
 import { SignInButton } from "@/components/SignInButton";
+import { useI18n } from "@/lib/i18n-context";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -39,7 +41,53 @@ const FOCUSABLE_SELECTOR = [
 const navLinkClass =
   "text-muted-foreground transition-colors hover:text-foreground";
 
-export function Header() {
+/** Minimal locale switcher — cycles through supported locales. */
+const LOCALES = ["en", "es", "pt"] as const;
+type Locale = (typeof LOCALES)[number];
+const LOCALE_LABELS: Record<Locale, string> = { en: "EN", es: "ES", pt: "PT" };
+
+function LocaleSwitcher() {
+  const { locale, setLocale } = useI18n();
+
+  const cycleLocale = React.useCallback(() => {
+    const idx = LOCALES.indexOf(locale as Locale);
+    const next = LOCALES[(idx + 1) % LOCALES.length];
+    setLocale(next);
+  }, [locale, setLocale]);
+
+  return (
+    <Button
+      variant="ghost"
+      size="sm"
+      aria-label={`Switch language, current: ${LOCALE_LABELS[locale as Locale] ?? locale}`}
+      onClick={cycleLocale}
+      className="hidden w-10 px-0 text-xs font-semibold sm:inline-flex"
+    >
+      {LOCALE_LABELS[locale as Locale] ?? locale.toUpperCase()}
+    </Button>
+  );
+}
+
+function LocaleSwitcherMobile() {
+  const { locale, setLocale } = useI18n();
+
+  return (
+    <div className="flex gap-1">
+      {LOCALES.map((l) => (
+        <Button
+          key={l}
+          variant={locale === l ? "stellar" : "outline"}
+          size="sm"
+          className="flex-1 text-xs font-semibold"
+          aria-pressed={locale === l}
+          onClick={() => setLocale(l)}
+        >
+          {LOCALE_LABELS[l]}
+        </Button>
+      ))}
+    </div>
+  );
+}export function Header() {
   const { data: session } = useSession();
   const { theme, setTheme } = useTheme();
   const [menuOpen, setMenuOpen] = React.useState(false);
@@ -151,6 +199,11 @@ export function Header() {
             </Link>
           )}
           {session?.user?.isMaintainer && (
+            <Link href="/dashboard/queue" className={navLinkClass}>
+              Failed jobs
+            </Link>
+          )}
+          {session?.user?.isMaintainer && (
             <Link href="/dashboard/settings" className={navLinkClass}>
               Settings
             </Link>
@@ -176,6 +229,8 @@ export function Header() {
             )}
           </Button>
 
+          <LocaleSwitcher />
+
           <Button
             variant="ghost"
             size="icon"
@@ -185,6 +240,8 @@ export function Header() {
             <Sun className="h-4 w-4 rotate-0 scale-100 transition-all dark:-rotate-90 dark:scale-0" />
             <Moon className="absolute h-4 w-4 rotate-90 scale-0 transition-all dark:rotate-0 dark:scale-100" />
           </Button>
+
+          {session && <NotificationBell />}
 
           {session ? (
             <div className="flex items-center gap-1.5">
@@ -328,6 +385,15 @@ export function Header() {
               )}
               {session?.user?.isMaintainer && (
                 <Link
+                  href="/dashboard/queue"
+                  className={cn(navLinkClass, "rounded-md px-3 py-2")}
+                  onClick={closeMenu}
+                >
+                  Failed jobs
+                </Link>
+              )}
+              {session?.user?.isMaintainer && (
+                <Link
                   href="/dashboard/settings"
                   className={cn(navLinkClass, "rounded-md px-3 py-2")}
                   onClick={closeMenu}
@@ -349,6 +415,8 @@ export function Header() {
                   <Moon className="mr-2 hidden h-4 w-4 dark:block" aria-hidden="true" />
                   Toggle theme
                 </Button>
+
+                <LocaleSwitcherMobile />
 
                 {session ? (
                   <Button

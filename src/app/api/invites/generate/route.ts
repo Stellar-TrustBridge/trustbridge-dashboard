@@ -1,9 +1,9 @@
-import { getServerSession } from "next-auth";
 import { NextRequest, NextResponse } from "next/server";
 
-import { authOptions } from "@/lib/auth";
 import { recordAuditLog } from "@/lib/audit";
+import { requireAdmin } from "@/lib/api-auth";
 import { assertSameOrigin } from "@/lib/csrf";
+import { isFeatureEnabled } from "@/lib/feature-flags";
 import {
   createInvite,
   generateInviteCode,
@@ -28,10 +28,18 @@ export async function POST(request: NextRequest) {
   const csrf = assertSameOrigin(request);
   if (csrf) return csrf;
 
-  const session = await getServerSession(authOptions);
-
-  if (!session?.user?.id || !session.user.isMaintainer) {
+  const session = await requireAdmin("invites.generate");
+  if (!session) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+
+  // Gated behind the `invite_generation` feature flag (issue #201) so invite
+  // issuance can be frozen during a Wave. Risky write → fails closed.
+  if (!(await isFeatureEnabled("invite_generation"))) {
+    return NextResponse.json(
+      { error: "Invite generation is currently disabled" },
+      { status: 403 }
+    );
   }
 
   const body = (await request.json()) as GenerateBulkInvitesRequest;
@@ -89,9 +97,8 @@ export async function POST(request: NextRequest) {
 }
 
 export async function GET(request: NextRequest) {
-  const session = await getServerSession(authOptions);
-
-  if (!session?.user?.id || !session.user.isMaintainer) {
+  const session = await requireAdmin("invites.list");
+  if (!session) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
@@ -121,9 +128,8 @@ export async function DELETE(request: NextRequest) {
   const csrf = assertSameOrigin(request);
   if (csrf) return csrf;
 
-  const session = await getServerSession(authOptions);
-
-  if (!session?.user?.id || !session.user.isMaintainer) {
+  const session = await requireAdmin("invites.delete");
+  if (!session) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 

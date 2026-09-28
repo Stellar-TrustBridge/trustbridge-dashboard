@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { requireMaintainerSession } from "@/lib/api-auth";
+import { isAuthorizedScheduler, requireMaintainerSession } from "@/lib/api-auth";
 import {
   getContractSyncHealth,
   syncContractToPostgres,
@@ -10,17 +10,6 @@ import { publicOptionsResponse, withPublicCors } from "@/lib/public-cors";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
-/**
- * Authorizes scheduler-triggered requests (e.g. Vercel Cron) that carry no
- * maintainer session. Requires `CRON_SECRET` to be configured — with it
- * unset, only maintainers can trigger a sync.
- */
-function isAuthorizedScheduler(request: NextRequest): boolean {
-  const secret = process.env.CRON_SECRET?.trim();
-  if (!secret) return false;
-  return request.headers.get("authorization") === `Bearer ${secret}`;
-}
 
 /**
  * POST /api/contract-sync

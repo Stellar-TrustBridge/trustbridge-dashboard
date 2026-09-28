@@ -22,9 +22,27 @@ function hasMinimumRole(userRole: AppRole | undefined, minimum: AppRole): boolea
 }
 
 /**
+ * Authorizes scheduler-triggered requests (e.g. Vercel Cron) that carry no
+ * maintainer session. Requires `CRON_SECRET` to be configured — with it
+ * unset, only maintainers can trigger the action.
+ */
+export function isAuthorizedScheduler(
+  request: Request | { headers: Headers | { get(name: string): string | null } }
+): boolean {
+  const secret = process.env.CRON_SECRET?.trim();
+  if (!secret) return false;
+  const authHeader =
+    request.headers instanceof Headers
+      ? request.headers.get("authorization")
+      : typeof request.headers.get === "function"
+      ? request.headers.get("authorization")
+      : null;
+  return authHeader === `Bearer ${secret}`;
+}
+
+/**
  * Return the current session only when the user is a maintainer, otherwise
- * 
-ull. Shared by every maintainer-only API route.
+ * null. Shared by every maintainer-only API route.
  */
 export async function requireMaintainerSession(): Promise<Session | null> {
   const session = await getServerSession(authOptions);

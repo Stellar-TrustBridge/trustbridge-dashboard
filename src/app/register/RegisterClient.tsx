@@ -8,6 +8,7 @@ import { CheckCircle2, Loader2 } from "lucide-react";
 
 import { AddressHistoryPanel } from "@/components/AddressHistoryPanel";
 import { AddressInput } from "@/components/AddressInput";
+import { ProfilePrivacyPanel } from "@/components/ProfilePrivacyPanel";
 import { AddressQr } from "@/components/AddressQr";
 import { FreighterProofCard } from "@/components/FreighterProofCard";
 import { OutreachTemplateGenerator } from "@/components/OutreachTemplateGenerator";
@@ -23,11 +24,13 @@ import {
 } from "@/components/ui/card";
 import { isValidGAddress } from "@/lib/stellar-address";
 import { buildWalletProofInfo } from "@/lib/registration-insights";
+import { mapRegisterError, type RegisterFailure } from "@/lib/register-error";
 import type { HorizonDebugInfo, WalletProofInfo } from "@/types";
 
 interface RegistrationRecord {
   stellarAddress: string;
   readiness: "ready" | "low_reserve" | "not_ready";
+  checklistCompleted?: OnboardingChecklistState | null;
   walletProof?: WalletProofInfo;
   horizonDebug?: HorizonDebugInfo;
   /**
@@ -39,6 +42,7 @@ interface RegistrationRecord {
 
 interface RegistrationResponse {
   registration?: RegistrationRecord | null;
+  checklistCompleted?: OnboardingChecklistState | null;
 }
 
 const REGISTRATION_QUERY_KEY = ["registration"] as const;
@@ -141,7 +145,7 @@ export function RegisterClient() {
 
       const mapped =
         error && typeof error === "object" && "kind" in error
-          ? (error as RegisterFailure)
+          ? (error as unknown as RegisterFailure)
           : mapRegisterError(500, null);
 
       setFailure(mapped);
@@ -167,6 +171,74 @@ export function RegisterClient() {
     },
   });
 
+  const checklistMutation = useMutation({
+    mutationFn: async ({
+      stepId,
+      completed,
+    }: {
+      stepId: string;
+      completed: boolean;
+    }) => {
+      const response = await fetch("/api/register/checklist", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({ stepId, completed }),
+      });
+
+      if (!response.ok) {
+        throw new Error("Failed to save checklist step");
+      }
+
+      return (await response.json()) as {
+        success: boolean;
+        checklistCompleted: OnboardingChecklistState;
+      };
+    },
+
+    onMutate: async ({ stepId, completed }) => {
+      await queryClient.cancelQueries({ queryKey: REGISTRATION_QUERY_KEY });
+      const previous = queryClient.getQueryData<RegistrationResponse>(
+        REGISTRATION_QUERY_KEY
+      );
+
+      queryClient.setQueryData<RegistrationResponse>(
+        REGISTRATION_QUERY_KEY,
+        (current) => {
+          const currentChecklist =
+            current?.checklistCompleted ??
+            current?.registration?.checklistCompleted ??
+            {};
+          const updatedChecklist = {
+            ...currentChecklist,
+            [stepId]: completed,
+          };
+
+          return {
+            ...current,
+            checklistCompleted: updatedChecklist,
+            registration: current?.registration
+              ? {
+                  ...current.registration,
+                  checklistCompleted: updatedChecklist,
+                }
+              : null,
+          };
+        }
+      );
+
+      return { previous };
+    },
+
+    onError: (_error, _vars, context) => {
+      queryClient.setQueryData(REGISTRATION_QUERY_KEY, context?.previous);
+    },
+
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: REGISTRATION_QUERY_KEY });
+    },
+  });
+
   const currentRegistration = existingQuery.data?.registration ?? null;
   const existingAddress = currentRegistration?.stellarAddress ?? "";
   const isPendingSave = Boolean(currentRegistration?.pending);
@@ -174,6 +246,15 @@ export function RegisterClient() {
   const proof =
     existingQuery.data?.registration?.walletProof ??
     buildWalletProofInfo(proofAddress, session?.user?.githubUsername ?? null);
+
+  const rawChecklist =
+    existingQuery.data?.checklistCompleted ??
+    currentRegistration?.checklistCompleted ??
+    {};
+  const checklistCompleted: OnboardingChecklistState = {
+    ...rawChecklist,
+    ...(existingAddress ? { register_address: true } : {}),
+  };
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-10 sm:px-6" data-testid="register-page">
@@ -204,6 +285,7 @@ export function RegisterClient() {
             <Card
               className="border-emerald-500/30 bg-emerald-500/5"
               data-testid="current-registration"
+              aria-busy={isPendingSave ? "true" : "false"}
             >
               <CardHeader className="pb-3">
                 <CardTitle className="flex items-center gap-2 text-lg">
@@ -228,11 +310,17 @@ export function RegisterClient() {
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
-                {existingQuery.data?.registration?.readiness && (
-                  <TrustlineStatusBadge
-                    status={existingQuery.data.registration.readiness}
-                    showDescription
-                  />
+                {isPendingSave ? (
+                  <p className="text-sm text-muted-foreground">
+                    Confirming with the Stellar network…
+                  </p>
+                ) : (
+                  existingQuery.data?.registration?.readiness && (
+                    <TrustlineStatusBadge
+                      status={existingQuery.data.registration.readiness}
+                      showDescription
+                    />
+                  )
                 )}
                 {isValidGAddress(existingAddress) && (
                   <div data-testid="current-registration-qr">
@@ -265,14 +353,15 @@ export function RegisterClient() {
                 disabled={saveMutation.isPending}
               />
 
-              {saveMutation.isError && (
+              {failure && (
                 <p
                   className="text-sm text-destructive"
                   aria-live="polite"
                   role="alert"
                   data-testid="registration-error"
+                  data-failure-kind={failure.kind}
                 >
-                  {(saveMutation.error as Error).message}
+                  {failure.message}
                 </p>
               )}
 
@@ -309,6 +398,7 @@ export function RegisterClient() {
         <div className="space-y-6 lg:col-span-2">
           <FreighterProofCard proof={proof} addressReady={Boolean(proofAddress)} />
           <TrustlineGuidancePanel />
+          {existingAddress && <ProfilePrivacyPanel />}
         </div>
       </div>
 

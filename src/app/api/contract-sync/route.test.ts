@@ -3,6 +3,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@/lib/api-auth", () => ({
   requireMaintainerSession: vi.fn(),
+  isAuthorizedScheduler: vi.fn((req: NextRequest) => {
+    const secret = process.env.CRON_SECRET?.trim();
+    if (!secret) return false;
+    return req.headers.get("authorization") === `Bearer ${secret}`;
+  }),
 }));
 
 vi.mock("@/lib/contract-sync", () => ({

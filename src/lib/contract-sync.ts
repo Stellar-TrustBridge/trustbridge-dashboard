@@ -99,7 +99,7 @@ async function fetchContractRegistrations(): Promise<{
 async function syncContractRegistrations(
   contractRegistrations: ContractRegistration[]
 ): Promise<{ created: number; updated: number; unchanged: number }> {
-  const created = 0;
+  let created = 0;
   let updated = 0;
   let unchanged = 0;
 
@@ -109,6 +109,7 @@ async function syncContractRegistrations(
     select: {
       id: true,
       stellarAddress: true,
+      userId: true,
       user: {
         select: { githubUsername: true },
       },
@@ -130,6 +131,7 @@ async function syncContractRegistrations(
         stellarAddress: contractReg.stellarAddress,
         githubUsername: contractReg.githubUsername,
       });
+      created++;
       continue;
     }
 
@@ -138,13 +140,30 @@ async function syncContractRegistrations(
       contractReg.githubUsername &&
       existing.user.githubUsername !== contractReg.githubUsername
     ) {
-      // Update the GitHub username
-      await prisma.registration.update({
-        where: { id: existing.id },
-        data: {
-          // Note: We can't update the user's githubUsername here directly
-          // because it's in the User table. For now, just log the change.
+      // Guard against conflicts: only update the linked User when the new
+      // username isn't already claimed by a different user.
+      const conflictingUser = await prisma.user.findFirst({
+        where: {
+          githubUsername: contractReg.githubUsername,
+          id: { not: existing.userId },
         },
+        select: { id: true },
+      });
+
+      if (conflictingUser) {
+        logger.warn("contract_sync_username_conflict", {
+          stellarAddress: contractReg.stellarAddress,
+          oldUsername: existing.user.githubUsername,
+          newUsername: contractReg.githubUsername,
+          conflictingUserId: conflictingUser.id,
+        });
+        unchanged++;
+        continue;
+      }
+
+      await prisma.user.update({
+        where: { id: existing.userId },
+        data: { githubUsername: contractReg.githubUsername },
       });
       logger.info("contract_sync_username_changed", {
         stellarAddress: contractReg.stellarAddress,

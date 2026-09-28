@@ -173,6 +173,79 @@ Deployments that override any of these in their environment keep their override 
 
 ## Optional variables
 
+### `FREEZE_WINDOW_ENABLED`
+
+Master switch for the Wave freeze window. When set to `false` the freeze is
+always inactive regardless of `FREEZE_WINDOW_START` / `FREEZE_WINDOW_END`.
+
+| Value | Behaviour |
+|-------|-----------|
+| Unset | Freeze is determined by `FREEZE_WINDOW_START` and `FREEZE_WINDOW_END` |
+| `false` | Freeze is always **off** (explicit override) |
+| `true` / any truthy value | Freeze is governed by the time-range variables |
+
+### `FREEZE_WINDOW_START`
+
+ISO-8601 datetime string marking the **start** of the active freeze window.
+
+```
+FREEZE_WINDOW_START=2026-09-25T00:00:00.000Z
+```
+
+- Parsed with `new Date()`. Invalid values are silently ignored (freeze inactive).
+- Must be set alongside `FREEZE_WINDOW_END`; either variable alone has no effect.
+- Setting `FREEZE_WINDOW_ENABLED=false` overrides both time variables.
+
+### `FREEZE_WINDOW_END`
+
+ISO-8601 datetime string marking the **end** of the freeze window.
+
+```
+FREEZE_WINDOW_END=2026-09-25T08:00:00.000Z
+```
+
+- Same parsing rules as `FREEZE_WINDOW_START`.
+- Once the current time passes this value the freeze deactivates automatically;
+  no deploy or restart is required.
+
+#### Freeze-window behaviour
+
+While a freeze window is active:
+
+- **`POST /api/contributors`** (batch recheck) returns `423 WAVE_FREEZE_ACTIVE`.
+- **`POST /api/contributors/[id]`** (single recheck) returns `423 WAVE_FREEZE_ACTIVE`.
+- **`POST /api/register`** (address change) returns `423 WAVE_FREEZE_ACTIVE`.
+- **`GET /api/freeze-status`** returns `{ "active": true, ... }` — the maintainer
+  dashboard polls this every 30 s and shows a **FreezeWindowBanner** automatically.
+- The banner disappears as soon as `active` flips back to `false` (i.e. the window
+  ends or `FREEZE_WINDOW_ENABLED` is changed to `false` and the 30 s poll fires).
+
+Maintainers can bypass a freeze by sending `x-freeze-override: true` (header) or
+`?overrideFreeze=true` (query parameter). Every override is written to the audit
+log.
+
+#### Example — schedule a freeze
+
+```bash
+FREEZE_WINDOW_ENABLED=true
+FREEZE_WINDOW_START=2026-09-25T00:00:00.000Z
+FREEZE_WINDOW_END=2026-09-25T08:00:00.000Z
+```
+
+#### Example — disable entirely
+
+```bash
+FREEZE_WINDOW_ENABLED=false
+```
+
+> **See also:** [`src/lib/freeze-window.ts`](../src/lib/freeze-window.ts) —
+> `isFreezeWindowActive()` and `enforceFreezeWindowGuard()` for implementation
+> details. [`docs/DEPLOYMENT.md`](./DEPLOYMENT.md) for Wave operations runbook.
+> [`docs/FEATURE_FLAGS.md`](./FEATURE_FLAGS.md) for the complementary
+> `maintenance_mode` feature flag.
+
+---
+
 ### `REGISTRY_MODE`
 
 Reported by the contributor REST endpoints (`/api/contributors`, `/api/contributors/paginated`) as `registryMode` in their response body, via `src/lib/registry-mode.ts`.
@@ -263,10 +336,22 @@ Soroban RPC endpoint used to fetch contract events for the timeline panel. Defau
 
 ### `CRON_SECRET`
 
-Bearer token that authorizes a scheduler (e.g. Vercel Cron) to trigger `POST /api/contract-sync` without a maintainer session. Send as `Authorization: Bearer $CRON_SECRET`.
+Bearer token that authorizes a scheduler (e.g. Vercel Cron) to trigger `POST /api/contract-sync` and `POST /api/cron/export` without a maintainer session. Send as `Authorization: Bearer $CRON_SECRET`.
 
-- **Optional.** With it unset, only maintainer sessions can trigger a sync — the endpoint never falls back to an open/unauthenticated trigger.
+- **Optional.** With it unset, only maintainer sessions can trigger automated syncs or exports — the endpoints never fall back to open/unauthenticated triggers.
 - Generate the same way as `NEXTAUTH_SECRET`: `openssl rand -base64 32`
+
+### `TREASURY_EXPORT_EMAIL`
+
+Destination email address for automated nightly treasury CSV exports (`POST /api/cron/export`).
+
+- **Optional.** When set (e.g., `treasury@yourorg.com`), scheduled runs generate the full contributor CSV dump and email it as an attachment along with operational metrics (total contributors, ready count, stale count).
+- **Fork-safe & Privacy:** If unset, exports are generated and audited without sending emails to unconfigured destinations. The email notification body only contains aggregate metrics and warnings; contributor records are contained within the attached CSV file.
+- **Service:** Uses Resend when `RESEND_API_KEY` is configured, or logs to console in development.
+
+### `CRON_EXPORT_MIN_INTERVAL_MS`
+
+Minimum time between `/api/cron/export` runs; repeated triggers within this window return `{ status: "skipped" }` to prevent duplicate emails and scheduler retry storms. Defaults to `60000` (1 minute).
 
 ### `NEXT_PUBLIC_POSTHOG_API_KEY`
 
@@ -287,6 +372,62 @@ Minimum time between `/api/contract-sync` runs; a trigger inside this window ret
 
 ---
 
+## Prometheus metrics (optional)
+
+### `PROMETHEUS_SCRAPE_TOKENS`
+
+Comma-separated list of bearer tokens that authorize `/api/metrics/prometheus`
+scrapes without requiring a maintainer browser session. Intended for
+Prometheus / VictoriaMetrics / Grafana Agent.
+
+```
+PROMETHEUS_SCRAPE_TOKENS=prod-scrape-token-abc,staging-scrape-token-xyz
+```
+
+- Each token should be ≥ 32 chars of high entropy; generate with `openssl rand -base64 32`
+- **Server-only** — never commit tokens or expose them in `NEXT_PUBLIC_*`
+- When unset, the endpoint falls back to requiring a maintainer session (cookie auth)
+- Session auth and token auth are OR'd: either succeeds, both are never required
+
+#### Example Prometheus `scrape_configs`
+
+```yaml
+scrape_configs:
+  - job_name: trustbridge-dashboard
+    scrape_interval: 30s
+    metrics_path: /api/metrics/prometheus
+    static_configs:
+      - targets: ["trustbridge.example.com"]
+    scheme: https
+    authorization:
+      type: Bearer
+      credentials: "prod-scrape-token-abc"
+```
+
+#### Exported metrics (all maintainer-scoped, no PII in labels)
+
+| Metric | Type | Labels | Notes |
+| --- | --- | --- | --- |
+| `trustbridge_contributors_total` | gauge | — | |
+| `trustbridge_contributors_ready` | gauge | — | |
+| `trustbridge_contributors_low_reserve` | gauge | — | |
+| `trustbridge_contributors_not_ready` | gauge | — | |
+| `trustbridge_circuit_breaker_state` | gauge | — | 0=CLOSED, 1=HALF_OPEN, 2=OPEN |
+| `trustbridge_circuit_breaker_total_trips` | counter | — | Process-local since start |
+| `trustbridge_circuit_breaker_failure_count` | gauge | — | Current consecutive failures |
+| `trustbridge_circuit_breaker_last_failure_timestamp_seconds` | gauge | — | 0 if none, else Unix seconds |
+| `trustbridge_rate_limit_active_identifiers` | gauge | — | Count inside current window (process-local) |
+| `trustbridge_rate_limit_requests_allowed_total` | counter | — | Process-local since start |
+| `trustbridge_rate_limit_requests_blocked_total` | counter | — | Process-local since start |
+| `trustbridge_process_local_info` | gauge | `scope="process"` | Always 1 — honest marker that counters are per-process, not globally aggregated, until Redis-backed state ships. |
+
+⚠️ **Cardinality / PII policy:** the route never emits dynamic labels (no per-user,
+per-IP, per-address). All label sets are static. Addresses / GitHub handles / IPs
+are never serialized into the metrics body. If you add new metrics, keep this
+contract.
+
+---
+
 ## Vercel configuration
 
 1. Project → **Settings** → **Environment Variables**
@@ -297,7 +438,224 @@ For preview deployments, set `NEXTAUTH_URL` to the preview URL or use Vercel's a
 
 ---
 
+## Rate limiting
+
+### `RATE_LIMIT_WINDOW_MS`
+
+Sliding-window duration in milliseconds for the `POST /api/check` per-IP rate
+limiter.
+
+| Value | Behaviour |
+|-------|-----------|
+| Unset / invalid | Falls back to **60 000 ms (1 minute)** |
+| Any positive integer | Window resets after this many ms |
+
+### `RATE_LIMIT_MAX_REQUESTS`
+
+Maximum number of requests a single IP may make within one `RATE_LIMIT_WINDOW_MS`
+window.
+
+| Value | Behaviour |
+|-------|-----------|
+| Unset / invalid | Falls back to **10 requests per window** |
+| Any positive integer | Requests beyond this threshold receive `429 Too Many Requests` with a `Retry-After` header |
+
+### ⚠️ Process-local caveat (important for multi-instance deployments)
+
+The rate-limit store (`store` in `src/lib/rate-limit.ts`) is a plain in-process
+`Map`. **It is not shared across Node.js processes, server instances, or
+serverless function invocations.** This means:
+
+- On a horizontally scaled deployment (e.g. multiple Vercel Edge or Lambda
+  containers, a PM2 cluster, or a Kubernetes replica set) each instance
+  enforces limits independently.
+- A client that lands on a different instance for each request effectively gets
+  `RATE_LIMIT_MAX_REQUESTS × <instance count>` requests before any single
+  process throttles it.
+- Serverless cold-starts reset the in-process state — a burst of cold invocations
+  each start with a clean counter.
+
+The limit therefore provides a **best-effort, single-process guardrail** rather
+than a hard cluster-wide cap.
+
+#### Recommended mitigations
+
+Choose the approach that best fits your deployment topology:
+
+| Approach | When to use | Notes |
+|----------|-------------|-------|
+| **Edge / CDN rate limiting** | All multi-instance deployments | Vercel WAF, Cloudflare Rate Limiting, or AWS WAF can enforce a true global cap in front of the origin. This is the recommended first line of defense at scale. |
+| **Sticky sessions (IP affinity)** | Load-balanced multi-instance setups | Routes the same IP to the same origin instance, so the in-process store sees all requests from that IP. Does not help with serverless cold-starts. |
+| **Shared external store (Redis / Upstash)** | When strict per-IP enforcement is required | Replace the `Map` in `src/lib/rate-limit.ts` with a Redis-backed sliding window (e.g. [`@upstash/ratelimit`](https://github.com/upstash/ratelimit)). Provides exact counts across all instances at the cost of an additional network hop per request. |
+| **Lower `RATE_LIMIT_MAX_REQUESTS`** | Single-instance or low-traffic deployments | A stricter per-process limit reduces the worst-case over-allowance on small clusters. |
+
+> **Single-instance note:** If your deployment runs exactly one server process
+> (e.g. a single Vercel Serverless Function container with no concurrency, or a
+> single Node.js server), the process-local limit is effectively cluster-wide and
+> no further action is required.
+
+#### How to adopt a Redis-backed store (example)
+
+```typescript
+// src/lib/rate-limit.ts — optional Redis upgrade
+import { Ratelimit } from "@upstash/ratelimit";
+import { Redis } from "@upstash/redis";
+
+const ratelimit = new Ratelimit({
+  redis: Redis.fromEnv(),
+  limiter: Ratelimit.slidingWindow(
+    Number(process.env.RATE_LIMIT_MAX_REQUESTS ?? "10"),
+    `${Number(process.env.RATE_LIMIT_WINDOW_MS ?? "60000")}ms`,
+  ),
+});
+
+export async function checkRateLimitRedis(identifier: string) {
+  const { success, remaining, reset } = await ratelimit.limit(identifier);
+  const retryAfter = success ? 0 : Math.max(1, Math.ceil((reset - Date.now()) / 1000));
+  return { allowed: success, retryAfter, remaining };
+}
+```
+
+Add `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` to your environment
+and replace calls to `checkRateLimit()` with `checkRateLimitRedis()` in
+`src/app/api/check/route.ts`.
+
+---
+
 ## Security checklist
+## Rate-Limit Headers
+
+Public API endpoints (`/api/check`, `/api/actions/lookup`, `/api/stats`) emit standard rate-limit response headers on every response:
+
+| Header | Description |
+|--------|-------------|
+| `RateLimit-Limit` | Max requests allowed per window (default: 10 for `/api/check`, 60 for lookup, 120 for stats) |
+| `RateLimit-Remaining` | Requests remaining in the current window |
+| `RateLimit-Reset` | Seconds until the window resets |
+| `Retry-After` | Seconds to wait before retrying (only on 429 responses) |
+
+These follow the [IETF RateLimit Headers draft](https://datatracker.ietf.org/doc/draft-ietf-httpapi-ratelimit-headers-07/) standard.
+
+**Multi-instance note:** The rate limiter uses an in-memory sliding window. When running behind a load balancer with N instances, the effective limit is approximately `N × maxRequests`. For strict per-client limits, consider a shared store (Redis, etc.) — but the current approach is sufficient for abuse prevention.
+
+---
+
+## API keys (maintainer export automation)
+
+Maintainer API keys let cron jobs and CI pipelines authenticate against the contributor export endpoints **without a browser session or GitHub OAuth cookie**. They are scoped to the minimum required permission and are hashed at rest — the raw secret is shown exactly once at creation time and never stored.
+
+### No new environment variables required
+
+API keys are self-contained in the database. The only prerequisite is that `DATABASE_URL` and `TOKEN_ENCRYPTION_KEY` are already configured. See [docs/API_KEYS.md](./API_KEYS.md) for the full workflow.
+
+### `API_KEY_RATE_LIMIT_WINDOW_MS` _(optional, reserved)_
+
+Currently the per-IP rate limit for API key–authenticated export requests is hardcoded to **60 requests per 60 seconds**. A future release will read `API_KEY_RATE_LIMIT_WINDOW_MS` and `API_KEY_RATE_LIMIT_MAX_REQUESTS` from the environment to allow operators to tune the window. For now, use the existing `RATE_LIMIT_WINDOW_MS` / `RATE_LIMIT_MAX_REQUESTS` env vars to tune the process-wide default, which also affects `/api/check` and other guarded endpoints.
+
+### Security properties
+
+| Property | Implementation |
+|---|---|
+| Raw key storage | Never — only SHA-256 hex digest is persisted |
+| Key format | `tb_<43 url-safe base64 chars>` (~258 bits entropy) |
+| Scope enforcement | `export:read` required; checked on every request |
+| Expiry | Optional per-key ISO-8601 datetime |
+| Revocation | Soft-delete (`revokedAt` timestamp); effective immediately |
+| Rate limiting | 60 requests / 60 s per IP (in-process sliding window) |
+| Audit trail | Every create / revoke / rejected use written to `AuditLog` |
+| Max active keys | 10 per user (prevents credential sprawl) |
+
+---
+
+## Digest emails (daily/weekly not-ready contributor digest)
+
+The digest cron job emails maintainers a readiness summary on a schedule —
+counts of ready / low-reserve / not-ready contributors plus a direct link to
+the dashboard. No contributor PII (usernames, addresses) is sent by default;
+the full list is opt-in.
+
+### `DIGEST_EMAIL`
+
+Destination email address for digest emails.
+
+- **Optional.** Falls back to `TREASURY_EXPORT_EMAIL`, then `CRON_EXPORT_EMAIL`
+  when unset, so teams with a single ops address only need to set one variable.
+- When all three are unset the digest still runs and writes an audit log entry,
+  but no email is sent.
+
+### `DIGEST_CADENCE`
+
+Controls the label in the digest subject line (`Daily` or `Weekly`). Does not
+affect when the cron fires — that is controlled by your Vercel Cron schedule or
+equivalent. Default: `daily`.
+
+| Value | Subject prefix |
+|-------|---------------|
+| `daily` (default) | `[TrustBridge] Daily Not-Ready Contributor Digest` |
+| `weekly` | `[TrustBridge] Weekly Not-Ready Contributor Digest` |
+
+### `DIGEST_INCLUDE_FULL_LIST`
+
+Privacy control. When unset (the default) the digest body contains only
+aggregate counts and a dashboard link — no contributor usernames or reasons.
+
+Set to `true` / `1` / `yes` to include a per-contributor table of GitHub
+usernames and block reasons in the email body.
+
+> **Privacy note:** the full list contains GitHub usernames (not emails or
+> Stellar addresses). Restrict access to the destination mailbox accordingly,
+> and review your data-handling obligations before enabling this.
+
+| Value | Behaviour |
+|-------|-----------|
+| unset / `false` / `0` | Counts + link only (default) |
+| `true` / `1` / `yes` | Usernames + reasons included |
+
+### `DIGEST_CRON_MIN_INTERVAL_MS`
+
+Minimum milliseconds between digest runs. Prevents a misconfigured cron
+schedule from spamming the inbox. Default: `3600000` (1 hour).
+
+```bash
+DIGEST_CRON_MIN_INTERVAL_MS=3600000   # 1 hour (default)
+DIGEST_CRON_MIN_INTERVAL_MS=86400000  # 24 hours
+```
+
+**Multi-instance note:** like the export rate gate, this is in-process state.
+Each Vercel instance has its own counter. In practice this is fine — a
+misconfigured per-minute schedule fires once per instance per hour, not
+unboundedly.
+
+### Vercel Cron configuration
+
+Add entries to `vercel.json` to trigger the digest automatically:
+
+```json
+{
+  "crons": [
+    {
+      "path": "/api/cron/digest",
+      "schedule": "0 8 * * *"
+    }
+  ]
+}
+```
+
+This fires at 08:00 UTC daily. For weekly, use `"0 8 * * 1"` (Monday 08:00 UTC)
+and set `DIGEST_CADENCE=weekly`. Vercel Cron sends `Authorization: Bearer $CRON_SECRET`
+automatically when `CRON_SECRET` is set in the project environment variables.
+
+### Digest audit trail
+
+Every digest run writes a `digest.cron` entry to `AuditLog` (visible in
+`/dashboard/settings → Recent activity`):
+
+| `action` | When |
+|---|---|
+| `digest.cron` | Run completed (including no-destination runs). `metadata` includes `cadence`, `totalContributors`, `readyCount`, `notReadyCount`, `lowReserveCount`, `emailSent`, `destination`. |
+| `digest.cron.failed` | DB or unexpected error. `metadata.error` contains the message. |
+
+---
 
 - [ ] Never commit `.env.local` or secrets
 - [ ] Rotate `GITHUB_CLIENT_SECRET` if exposed
@@ -310,7 +668,10 @@ For preview deployments, set `NEXTAUTH_URL` to the preview URL or use Vercel's a
 
 - [Setup guide](./SETUP.md)
 - [Deployment](./DEPLOYMENT.md)
+- [Feature flags](./FEATURE_FLAGS.md)
 - [Architecture](./ARCHITECTURE.md)
+- [API keys](./API_KEYS.md)
+- [Digest emails](./DIGEST.md)
 
 - // src/lib/notifications/webhook.ts
 

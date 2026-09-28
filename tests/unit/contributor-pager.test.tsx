@@ -5,6 +5,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import React from "react";
 
 // ── ContributorPager component tests ────────────────────────────────────────
@@ -245,5 +246,70 @@ describe("ContributorPager", () => {
     fireEvent.click(nextBtn);
     // Button is disabled — onClick should not fire
     expect(onNext).not.toHaveBeenCalled();
+  });
+
+  it("announces the visible range in a polite live region", () => {
+    render(
+      <ContributorPager
+        pageIndex={1}
+        total={142}
+        pageSize={25}
+        hasMore={true}
+        hasPrev={true}
+        onNext={noop}
+        onPrev={noop}
+      />
+    );
+
+    const liveRegion = document.querySelector("[aria-live='polite']");
+    expect(liveRegion).not.toBeNull();
+    expect(liveRegion).toHaveAttribute("aria-atomic", "true");
+    expect(liveRegion).toHaveTextContent("Showing contributors 26–50 of 142");
+  });
+
+  it("announces the loading state in the live region", () => {
+    render(
+      <ContributorPager
+        pageIndex={0}
+        total={0}
+        pageSize={25}
+        hasMore={false}
+        hasPrev={false}
+        isLoading={true}
+        onNext={noop}
+        onPrev={noop}
+      />
+    );
+
+    expect(document.querySelector("[aria-live='polite']")).toHaveTextContent(
+      "Loading contributors…"
+    );
+  });
+
+  it("supports keyboard activation for Previous and Next", async () => {
+    const onNext = vi.fn();
+    const onPrev = vi.fn();
+    render(
+      <ContributorPager
+        pageIndex={1}
+        total={100}
+        pageSize={25}
+        hasMore={true}
+        hasPrev={true}
+        onNext={onNext}
+        onPrev={onPrev}
+      />
+    );
+
+    const user = userEvent.setup();
+    await user.tab();
+    expect(screen.getByRole("button", { name: /previous page/i })).toHaveFocus();
+    await user.keyboard("{Enter}");
+    expect(onPrev).toHaveBeenCalledOnce();
+
+    await user.tab();
+    expect(screen.getByRole("button", { name: /next page/i })).toHaveFocus();
+    await user.keyboard("{Enter}");
+    expect(onNext).toHaveBeenCalledOnce();
   });
 });
