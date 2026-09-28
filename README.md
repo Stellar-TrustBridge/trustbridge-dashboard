@@ -837,3 +837,8 @@ Implement immediate access revocation when a GitHub organization member is remov
 [ ] PR description explains the revocation strategy.
 
 [ ] PR is ready for maintainer review.
+
+## Handsoff notes
+
+<!-- handsoff-issue-404 -->
+- #404: Add E2E test for signed `/api/badge/[username]` SVG endpoint
