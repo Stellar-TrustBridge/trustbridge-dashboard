@@ -26,7 +26,8 @@
     "db:studio": "prisma studio",
     "prisma:generate": "node scripts/prisma-generate.mjs",
     "test:mock": "vitest run tests/integration/horizon-mock.test.ts",
-    "test:k6": "BASE_URL=${BASE_URL:-http://localhost:3000} TEST_ADDRESS=${TEST_ADDRESS:-GAS4JQ3KQH84GJ5VJ3M9S6D6A8Y8E5D7Q7XQ5K7ZJ5QZ2NR4Q6X7K4X} VUS=${VUS:-5} DURATION=${DURATION:-30s} k6 run scripts/k6/contributors-check-load.js"
+    "test:k6": "BASE_URL=${BASE_URL:-http://localhost:3000} TEST_ADDRESS=${TEST_ADDRESS:-GAS4JQ3KQH84GJ5VJ3M9S6D6A8Y8E5D7Q7XQ5K7ZJ5QZ2NR4Q6X7K4X} VUS=${VUS:-5} DURATION=${DURATION:-30s} k6 run scripts/k6/contributors-check-load.js",
+    "generate:openapi": "node scripts/generate-openapi-client.mjs"
   },
   "dependencies": {
     "@auth/prisma-adapter": "^2.11.2",
