@@ -1,6 +1,6 @@
 import "server-only";
 
-import { rpc, scValToNative, Contract } from "stellar-sdk";
+import { rpc, scValToNative, Contract, TransactionBuilder, Account, Networks, nativeToScVal, xdr } from "stellar-sdk";
 
 import { recordAuditLog } from "@/lib/audit";
 import { StructuredLogger } from "@/lib/logger";
@@ -36,9 +36,59 @@ function getSorobanRpcUrl(): string {
   return process.env.SOROBAN_RPC_URL?.trim() || "https://soroban-testnet.stellar.org";
 }
 
+function getNetworkPassphrase(): string {
+  return process.env.SOROBAN_NETWORK_PASSPHRASE?.trim() || Networks.TESTNET;
+}
+
 interface ContractRegistration {
   stellarAddress: string;
   githubUsername?: string;
+}
+
+/**
+ * Read a Soroban contract function via RPC `simulateTransaction`.
+ *
+ * Soroban contract reads are not plain RPC calls — they must be simulated
+ * against a recent ledger so the host can execute the contract and return
+ * the result. We build a read-only transaction from a throwaway source
+ * account, simulate it, and decode the returned ScVal.
+ */
+async function simulateContractRead(
+  contractId: string,
+  method: string,
+  args: xdr.ScVal[] = []
+): Promise<unknown> {
+  const server = new rpc.Server(getSorobanRpcUrl());
+  const contract = new Contract(contractId);
+
+  // A read-only simulation does not need a funded account; any valid
+  // account id works as the transaction source.
+  const source = new Account(
+    "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+    "0"
+  );
+
+  const tx = new TransactionBuilder(source, {
+    fee: "100",
+    networkPassphrase: getNetworkPassphrase(),
+  })
+    .addOperation(contract.call(method, ...args))
+    .setTimeout(30)
+    .build();
+
+  const simulation = await server.simulateTransaction(tx);
+
+  if (rpc.Api.isSimulationError(simulation)) {
+    throw new Error(simulation.error);
+  }
+
+  const result = (simulation as rpc.Api.SimulateTransactionSuccessResponse)
+    .result;
+  if (!result) {
+    return undefined;
+  }
+
+  return scValToNative(result.retval);
 }
 
 /**
@@ -55,28 +105,26 @@ async function fetchContractRegistrations(): Promise<{
   }
 
   try {
-    void new rpc.Server(getSorobanRpcUrl());
-    const contract = new Contract(contractId);
-
-    // Fetch all registrations using get_registered_paginated
-    // The contract should return a list of (stellarAddress, githubUsername) tuples
-    const result = await contract.call("get_registered_paginated");
+    // Fetch all registrations using get_registered_paginated via RPC simulate.
+    // The contract should return a list of (stellarAddress, githubUsername) tuples.
+    const native = await simulateContractRead(
+      contractId,
+      "get_registered_paginated",
+      [nativeToScVal(0, { type: "u32" }), nativeToScVal(100, { type: "u32" })]
+    );
 
     const registrations: ContractRegistration[] = [];
 
     // Parse the result — assume it returns a Vec of structs or tuples
-    if (result && typeof result === "object") {
-      const native = scValToNative(result as never);
-      if (Array.isArray(native)) {
-        for (const item of native) {
-          if (Array.isArray(item) && item.length >= 1) {
-            registrations.push({
-              stellarAddress: item[0] as string,
-              githubUsername: item.length > 1 ? (item[1] as string) : undefined,
-            });
-          } else if (typeof item === "string") {
-            registrations.push({ stellarAddress: item });
-          }
+    if (Array.isArray(native)) {
+      for (const item of native) {
+        if (Array.isArray(item) && item.length >= 1) {
+          registrations.push({
+            stellarAddress: item[0] as string,
+            githubUsername: item.length > 1 ? (item[1] as string) : undefined,
+          });
+        } else if (typeof item === "string") {
+          registrations.push({ stellarAddress: item });
         }
       }
     }
@@ -267,7 +315,7 @@ export async function syncContractToPostgres(): Promise<ContractSyncResult> {
 
     await recordAuditLog({
       action: "contract.sync",
-      metadata: { error: message },
+      metadata: { error: message, durationMs },
     });
 
     lastResult = {
@@ -280,13 +328,6 @@ export async function syncContractToPostgres(): Promise<ContractSyncResult> {
   }
 }
 
-/** Last sync outcome, for the health endpoint. Never triggers a new run. */
-export function getContractSyncHealth(): ContractSyncResult | null {
+export function getLastContractSyncResult(): ContractSyncResult | null {
   return lastResult;
-}
-
-/** Test-only: reset in-memory rate-limit/health state between test runs. */
-export function resetContractSyncState(): void {
-  lastRunAt = null;
-  lastResult = null;
 }
