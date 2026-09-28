@@ -146,6 +146,133 @@ describe("GET /api/disputes", () => {
       })
     );
   });
+
+  it("returns pagination metadata with hasMore and nextCursor", async () => {
+    vi.mocked(getServerSession).mockResolvedValue({
+      user: { id: "user-1", isMaintainer: true },
+    } as any);
+    const mockDisputes = [
+      {
+        id: "d-1",
+        registrationId: "r-1",
+        reason: "Invalid address",
+        proofCid: null,
+        status: "OPEN",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        resolvedAt: null,
+      },
+    ];
+    vi.mocked(prisma.disputeProof.findMany).mockResolvedValue(mockDisputes);
+
+    const res = await GET(request("GET"));
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.disputes).toEqual(mockDisputes);
+    expect(json.hasMore).toBe(false);
+    expect(json.nextCursor).toBeUndefined();
+  });
+
+  it("supports limit parameter", async () => {
+    vi.mocked(getServerSession).mockResolvedValue({
+      user: { id: "user-1", isMaintainer: true },
+    } as any);
+    vi.mocked(prisma.disputeProof.findMany).mockResolvedValue([]);
+
+    const url = new NextRequest("http://localhost:3000/api/disputes?limit=50", {
+      method: "GET",
+      headers: sameOriginHeaders,
+    });
+
+    const res = await GET(url);
+    expect(res.status).toBe(200);
+    expect(prisma.disputeProof.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        take: 51,
+      })
+    );
+  });
+
+  it("caps limit at 100", async () => {
+    vi.mocked(getServerSession).mockResolvedValue({
+      user: { id: "user-1", isMaintainer: true },
+    } as any);
+    vi.mocked(prisma.disputeProof.findMany).mockResolvedValue([]);
+
+    const url = new NextRequest("http://localhost:3000/api/disputes?limit=500", {
+      method: "GET",
+      headers: sameOriginHeaders,
+    });
+
+    const res = await GET(url);
+    expect(res.status).toBe(200);
+    expect(prisma.disputeProof.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        take: 101,
+      })
+    );
+  });
+
+  it("uses default limit of 25 when not specified", async () => {
+    vi.mocked(getServerSession).mockResolvedValue({
+      user: { id: "user-1", isMaintainer: true },
+    } as any);
+    vi.mocked(prisma.disputeProof.findMany).mockResolvedValue([]);
+
+    const res = await GET(request("GET"));
+    expect(res.status).toBe(200);
+    expect(prisma.disputeProof.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        take: 26,
+      })
+    );
+  });
+
+  it("supports cursor-based pagination", async () => {
+    vi.mocked(getServerSession).mockResolvedValue({
+      user: { id: "user-1", isMaintainer: true },
+    } as any);
+    vi.mocked(prisma.disputeProof.findMany).mockResolvedValue([]);
+
+    const cursor = Buffer.from("d-1").toString("base64");
+    const url = new NextRequest(`http://localhost:3000/api/disputes?cursor=${cursor}`, {
+      method: "GET",
+      headers: sameOriginHeaders,
+    });
+
+    const res = await GET(url);
+    expect(res.status).toBe(200);
+    expect(prisma.disputeProof.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cursor: { id: "d-1" },
+        skip: 1,
+      })
+    );
+  });
+
+  it("returns hasMore and nextCursor when more results exist", async () => {
+    vi.mocked(getServerSession).mockResolvedValue({
+      user: { id: "user-1", isMaintainer: true },
+    } as any);
+    const manyResults = Array.from({ length: 26 }, (_, i) => ({
+      id: `d-${i}`,
+      registrationId: `r-${i}`,
+      reason: `Reason ${i}`,
+      proofCid: null,
+      status: "OPEN" as const,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      resolvedAt: null,
+    }));
+    vi.mocked(prisma.disputeProof.findMany).mockResolvedValue(manyResults);
+
+    const res = await GET(request("GET"));
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.hasMore).toBe(true);
+    expect(json.nextCursor).toBeDefined();
+    expect(json.disputes).toHaveLength(25);
+  });
 });
 
 describe("POST /api/disputes", () => {

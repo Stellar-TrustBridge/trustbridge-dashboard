@@ -37,6 +37,7 @@ beforeEach(() => {
   delete process.env.FEATURE_FLAG_BATCH_RECHECK;
   delete process.env.FEATURE_FLAG_OTEL_TRACES;
   delete process.env.FEATURE_FLAG_DLQ_RETRY;
+  delete process.env.FEATURE_FLAG_FREEZE_WINDOW;
   clearFeatureFlagCache();
   vi.clearAllMocks();
   findMany.mockResolvedValue([]);
@@ -128,6 +129,7 @@ describe("fail closed", () => {
     expect(await isFeatureEnabled("batch_recheck")).toBe(false);
     expect(await isFeatureEnabled("dlq_retry")).toBe(false);
     expect(await isFeatureEnabled("maintenance_mode")).toBe(false);
+    expect(await isFeatureEnabled("freeze_window")).toBe(false);
   });
 
   it("resolves a non-risky flag to its default when the DB is unreadable", async () => {
@@ -137,6 +139,8 @@ describe("fail closed", () => {
   it("still honours an env override even when the DB is down", async () => {
     process.env.FEATURE_FLAG_BATCH_RECHECK = "on";
     expect(await isFeatureEnabled("batch_recheck")).toBe(true);
+    process.env.FEATURE_FLAG_FREEZE_WINDOW = "on";
+    expect(await isFeatureEnabled("freeze_window")).toBe(true);
   });
 });
 
@@ -149,6 +153,7 @@ describe("getAllFeatureFlags", () => {
       [
         "batch_recheck",
         "dlq_retry",
+        "freeze_window",
         "invite_generation",
         "maintenance_mode",
         "otel_traces",
@@ -156,6 +161,7 @@ describe("getAllFeatureFlags", () => {
     );
     expect(all.find((f) => f.key === "otel_traces")?.source).toBe("env");
     expect(all.find((f) => f.key === "batch_recheck")?.source).toBe("default");
+    expect(all.find((f) => f.key === "freeze_window")?.source).toBe("default");
   });
 });
 

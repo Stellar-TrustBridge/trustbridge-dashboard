@@ -25,7 +25,8 @@ export type FeatureFlagKey =
   | "invite_generation"
   | "dlq_retry"
   | "maintenance_mode"
-  | "otel_traces";
+  | "otel_traces"
+  | "freeze_window";
 
 interface FlagDefinition {
   description: string;
@@ -67,6 +68,12 @@ export const FEATURE_FLAGS: Record<FeatureFlagKey, FlagDefinition> = {
       "Emit OpenTelemetry-style spans for API routes, Prisma and Horizon calls. Also toggled by OTEL_TRACES_ENABLED.",
     default: false,
     risky: false,
+  },
+  freeze_window: {
+    description:
+      "Enforce wave freeze-window blocking on mutating APIs. When OFF, freeze-window helpers never block requests regardless of FREEZE_WINDOW_* env vars.",
+    default: true,
+    risky: true,
   },
 };
 

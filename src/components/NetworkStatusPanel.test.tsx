@@ -92,4 +92,77 @@ describe("NetworkStatusPanel", () => {
       screen.queryByTestId("network-paused-empty")
     ).not.toBeInTheDocument();
   });
+
+  it("renders healthy state with accessible status when networks match and no warnings exist", () => {
+    render(
+      <NetworkStatusPanel
+        config={buildConfig({
+          sorobanUrl: "https://mainnet.sorobanrpc.com",
+          sorobanNetwork: "mainnet",
+          mismatched: false,
+          warnings: [],
+        })}
+      />
+    );
+
+    expect(
+      screen.getByRole("heading", { name: /Network configuration/i })
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("alert")
+    ).not.toBeInTheDocument();
+    expect(screen.getAllByText(/^Mainnet$/)).toHaveLength(2);
+  });
+
+  it("renders degraded state with accessible warning when networks match but warnings exist", () => {
+    render(
+      <NetworkStatusPanel
+        config={buildConfig({
+          sorobanUrl: "https://mainnet.sorobanrpc.com",
+          sorobanNetwork: "mainnet",
+          mismatched: false,
+          warnings: ["SOROBAN_CONTRACT_ID is not configured — the Soroban event timeline is disabled."],
+        })}
+      />
+    );
+
+    expect(
+      screen.getByRole("heading", { name: /Network configuration/i })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/SOROBAN_CONTRACT_ID is not configured/i)
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("alert")
+    ).not.toBeInTheDocument();
+  });
+
+  it("renders mismatch state with accessible alert role and status text", () => {
+    render(<NetworkStatusPanel config={buildConfig()} />);
+
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent(/Network paused/i);
+    expect(alert).toHaveTextContent(/Horizon and Soroban RPC disagree/i);
+    expect(
+      screen.getByRole("heading", { name: /Network paused/i })
+    ).toBeInTheDocument();
+  });
+
+  it("renders error state with accessible alert when mismatch warnings are present", () => {
+    render(
+      <NetworkStatusPanel
+        config={buildConfig({
+          warnings: [
+            "Horizon is configured for mainnet (https://horizon.stellar.org) but Soroban RPC is configured for testnet (https://soroban-testnet.stellar.org). Contributor funding and Soroban events are being read from different networks.",
+            "Additional configuration issue detected.",
+          ],
+        })}
+      />
+    );
+
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent(/Network paused/i);
+    expect(alert).toHaveTextContent(/Horizon and Soroban RPC disagree/i);
+    expect(alert).toHaveTextContent(/Additional configuration issue detected/i);
+  });
 });
