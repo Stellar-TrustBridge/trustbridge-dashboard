@@ -6,6 +6,7 @@ import { assertSameOrigin } from "@/lib/csrf";
 import { prisma } from "@/lib/prisma";
 import { computeReadiness } from "@/lib/readiness";
 import { recordAuditLog } from "@/lib/audit";
+import { assertFreshExport } from "@/lib/stale-export";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -116,13 +117,35 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  const body = (await request.json()) as { format?: string };
+  const body = (await request.json()) as {
+    format?: string;
+    snapshotAt?: string;
+  };
   const format = body.format ?? "json";
 
   if (format !== "json" && format !== "csv") {
     return NextResponse.json(
       { error: "Unsupported export format" },
       { status: 400 }
+    );
+  }
+
+  const stale = assertFreshExport(body.snapshotAt);
+  if (stale) {
+    await recordAuditLog({
+      action: "treasury.export.stale",
+      actorId: session.user.id,
+      actorLogin: session.user.githubUsername ?? null,
+      metadata: {
+        format,
+        snapshotAt: body.snapshotAt ?? null,
+        reason: stale.reason,
+      },
+    });
+
+    return NextResponse.json(
+      { error: stale.error, reason: stale.reason },
+      { status: 409 }
     );
   }
 

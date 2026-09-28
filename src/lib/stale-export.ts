@@ -110,3 +110,33 @@ export function buildStalenessSummary(
     allowExport: staleCount === 0,
   };
 }
+
+/**
+ * Evaluate the stale-export guard for a treasury export request.
+ *
+ * Combines staleness detection with the caller's override intent so route
+ * handlers can decide whether to block the export. When `blockWhenStale` is
+ * true (the default), stale data is rejected; when false, the export is
+ * allowed but the staleness summary is still surfaced for confirmation.
+ */
+export function evaluateStaleExportGuard(
+  contributors: ContributorRow[],
+  options: StaleExportOptions = {}
+): {
+  stale: boolean;
+  blocked: boolean;
+  staleCount: number;
+  totalCount: number;
+  stalePercent: number;
+  warning: string;
+  allowExport: boolean;
+} {
+  const summary = buildStalenessSummary(contributors, options.maxAgeMs);
+  const blockWhenStale = options.blockWhenStale ?? true;
+
+  return {
+    ...summary,
+    blocked: summary.stale && blockWhenStale,
+    allowExport: !summary.stale || !blockWhenStale,
+  };
+}
