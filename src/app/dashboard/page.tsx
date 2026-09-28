@@ -7,6 +7,7 @@ import {
   ContributorTable,
   exportContributorsCsv,
 } from "@/components/ContributorTable";
+import { BatchRecheckLiveRegion } from "@/components/BatchRecheckLiveRegion";
 import { ContributorPager } from "@/components/ContributorPager";
 import { NetworkStatusPanel } from "@/components/NetworkStatusPanel";
 import { DisputePanel } from "@/components/DisputePanel";
@@ -50,7 +51,15 @@ interface BatchRecheckResponse {
 
 export default function DashboardPage() {
   const queryClient = useQueryClient();
-  const { event, isStreaming, startProgress } = useJobProgress();
+  const {
+    event,
+    isStreaming,
+    isReconnecting,
+    reconnectAttempt,
+    maxReconnectAttempts,
+    error: streamError,
+    startProgress,
+  } = useJobProgress();
 
   // Single data-fetching strategy (#307): one paginated hook for the table/pager,
   // one hook that fetches all contributors (no page limit) for panels that need the
@@ -175,20 +184,36 @@ export default function DashboardPage() {
     },
   });
 
+  const freezeQuery = useQuery({
+    queryKey: ["freeze-status"],
+    queryFn: async () => {
+      const response = await fetch("/api/freeze-status");
+      if (!response.ok) return { active: false, reason: null, start: null, end: null };
+      return (await response.json()) as {
+        active: boolean;
+        reason?: string | null;
+        start?: string | null;
+        end?: string | null;
+      };
+    },
+  });
+
   const contributors = allContributorsQuery.contributors;
   const readyCount = countReadyContributors(contributors);
   const staleness = buildStalenessSummaryClient(contributors);
 
-  const isRecheckRunning = recheckMutation.isPending || isStreaming;
-  const recheckStatus = event?.type === "completed"
-    ? "Completed"
-    : event?.type === "failed"
-      ? "Failed"
-      : event?.type === "processing"
-        ? "Processing..."
-        : isStreaming
-          ? "Waiting..."
-          : null;
+  const isRecheckRunning = recheckMutation.isPending || isStreaming || isReconnecting;
+  const recheckStatus = isReconnecting
+    ? `Reconnecting (${reconnectAttempt}/${maxReconnectAttempts})...`
+    : event?.type === "completed"
+      ? "Completed"
+      : event?.type === "failed"
+        ? "Failed"
+        : event?.type === "processing"
+          ? "Processing..."
+          : isStreaming
+            ? "Waiting..."
+            : null;
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-10 sm:px-6">
@@ -244,9 +269,12 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      <p className="sr-only" role="status" aria-live="polite">
-        {recheckStatus ? `Batch re-check: ${recheckStatus}` : ""}
-      </p>
+      <BatchRecheckLiveRegion
+        event={event}
+        isStarting={recheckMutation.isPending}
+        isStreaming={isStreaming}
+        error={recheckMutation.isError ? recheckMutation.error.message : error}
+      />
 
       {!allContributorsQuery.isLoading &&
         !allContributorsQuery.isError &&
@@ -264,6 +292,34 @@ export default function DashboardPage() {
           start={freezeQuery.data.start ?? undefined}
           end={freezeQuery.data.end ?? undefined}
         />
+      )}
+
+      {isReconnecting && (
+        <Card
+          className="mb-4 border-amber-300 bg-amber-50 dark:border-amber-700 dark:bg-amber-950/60"
+          role="status"
+          aria-live="polite"
+          data-testid="recheck-reconnecting-banner"
+        >
+          <CardContent className="flex items-center gap-2 py-3 text-sm text-amber-800 dark:text-amber-200">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            <span>
+              Connection lost. Reconnecting to live recheck progress (attempt {reconnectAttempt}/{maxReconnectAttempts})...
+            </span>
+          </CardContent>
+        </Card>
+      )}
+
+      {streamError && !isReconnecting && (
+        <Card
+          className="mb-4 border-red-200 bg-red-50 dark:border-red-800 dark:bg-red-950"
+          role="alert"
+          data-testid="recheck-disconnect-error-banner"
+        >
+          <CardContent className="py-3 text-sm text-red-800 dark:text-red-200">
+            Batch recheck progress disconnected: {streamError}
+          </CardContent>
+        </Card>
       )}
 
       {event?.type === "completed" && (

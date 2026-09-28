@@ -17,8 +17,12 @@ export const MAX_ERROR_LENGTH = 2000;
  *  - run it through the Sentry redactor so a contributor address / token /
  *    email in the message never lands in the DLQ
  *  - cap the length
+ *  - fallback to "Unknown error" for empty/null/invalid inputs
  */
-export function sanitizeJobError(raw: string): string {
+export function sanitizeJobError(raw?: string | null): string {
+  if (!raw || typeof raw !== "string" || !raw.trim()) {
+    return "Unknown error";
+  }
   const redacted = redactString(raw);
   return redacted.length > MAX_ERROR_LENGTH
     ? `${redacted.slice(0, MAX_ERROR_LENGTH)}…[truncated]`
@@ -155,6 +159,89 @@ export class BackgroundQueue {
   }
 
   /**
+   * Retrieves failed jobs for the dead-letter queue (issue #200).
+   */
+  async getFailedJobs(options?: {
+    limit?: number;
+    ownerId?: string;
+  }): Promise<Job[]> {
+    const limit = Math.min(Math.max(options?.limit ?? 50, 1), 200);
+
+    const where: Prisma.QueueJobWhereInput = {
+      status: "failed",
+    };
+
+    if (options?.ownerId) {
+      where.OR = [{ ownerId: options.ownerId }, { ownerId: null }];
+    }
+
+    const records = await prisma.queueJob.findMany({
+      where,
+      orderBy: { completedAt: "desc" },
+      take: limit,
+    });
+
+    return records.map((record) => ({
+      id: record.id,
+      type: record.type as JobType,
+      data: (record.data as Record<string, unknown>) ?? {},
+      status: record.status as JobStatus,
+      createdAt: record.createdAt,
+      startedAt: record.startedAt ?? undefined,
+      completedAt: record.completedAt ?? undefined,
+      error: record.error ?? undefined,
+      result: (record.result as Record<string, unknown>) ?? undefined,
+      ownerId: record.ownerId ?? undefined,
+    }));
+  }
+
+  /**
+   * Retries a failed job by resetting its status to pending (issue #200).
+   */
+  async retryJob(
+    id: string,
+    options?: { ownerId?: string }
+  ): Promise<Job | null> {
+    const existing = await prisma.queueJob.findUnique({ where: { id } });
+    if (!existing || existing.status !== "failed") {
+      return null;
+    }
+
+    if (options?.ownerId && existing.ownerId && existing.ownerId !== options.ownerId) {
+      return null;
+    }
+
+    const existingData = (existing.data as Record<string, unknown>) ?? {};
+    const retries =
+      typeof existingData.__retries === "number" ? existingData.__retries : 0;
+    const nextData = { ...existingData, __retries: retries + 1 };
+
+    const updated = await prisma.queueJob.update({
+      where: { id },
+      data: {
+        status: "pending",
+        error: null,
+        startedAt: null,
+        completedAt: null,
+        data: nextData as never,
+      },
+    });
+
+    return {
+      id: updated.id,
+      type: updated.type as JobType,
+      data: (updated.data as Record<string, unknown>) ?? {},
+      status: updated.status as JobStatus,
+      createdAt: updated.createdAt,
+      startedAt: updated.startedAt ?? undefined,
+      completedAt: updated.completedAt ?? undefined,
+      error: updated.error ?? undefined,
+      result: (updated.result as Record<string, unknown>) ?? undefined,
+      ownerId: updated.ownerId ?? undefined,
+    };
+  }
+
+  /**
    * Atomically claims the next pending job from PostgreSQL to prevent double processing.
    */
   async claimNextPendingJob(): Promise<Job | null> {
@@ -215,7 +302,7 @@ export class BackgroundQueue {
         data: {
           status: "failed",
           completedAt: new Date(),
-          error: errorMsg,
+          error: sanitizeJobError(errorMsg),
         },
       });
       return;
@@ -239,7 +326,7 @@ export class BackgroundQueue {
         data: {
           status: "failed",
           completedAt: new Date(),
-          error: errorMsg,
+          error: sanitizeJobError(errorMsg),
         },
       });
       console.error(`[QueueWorker] Job ${job.id} failed:`, errorMsg);

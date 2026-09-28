@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { requireMaintainerSession } from "@/lib/api-auth";
+import { requireOperator } from "@/lib/api-auth";
 import { getHorizonCircuitBreakerMetrics } from "@/lib/horizon";
 import { getRateLimitMetrics } from "@/lib/rate-limit";
 import { getContributors } from "@/lib/registrations";
@@ -68,7 +68,7 @@ export async function GET(request: NextRequest) {
   const allowlisted = isScraperAllowlisted(bearerToken);
 
   if (!allowlisted) {
-    const session = await requireMaintainerSession();
+    const session = await requireOperator("metrics.prometheus.read");
     if (!session) {
       return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     }

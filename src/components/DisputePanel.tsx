@@ -103,7 +103,7 @@ export function DisputePanel({ contributors }: DisputePanelProps) {
           <input className="h-10 rounded-md border bg-background px-3 text-sm" value={proofCid} onChange={(event) => setProofCid(event.target.value)} placeholder="IPFS CID (optional)" maxLength={200} aria-label="IPFS proof CID" />
           <Button type="submit" disabled={!registrationId || createMutation.isPending}>{createMutation.isPending ? "Filing..." : "File dispute"}</Button>
         </form>
-        {createMutation.isError && <p className="text-sm text-destructive">{createMutation.error.message}</p>}
+        {createMutation.isError && <p role="alert" className="text-sm text-destructive">{createMutation.error.message}</p>}
         <ul className="space-y-2 text-sm" aria-live="polite">
           {(allDisputes ?? []).map((dispute) => <li key={dispute.id} className="rounded-md border px-3 py-2">
             <div className="flex items-start justify-between gap-2 mb-2">
@@ -150,6 +150,7 @@ export function DisputePanel({ contributors }: DisputePanelProps) {
           </div>
         )}
         {resolveMutation.isError && <p className="text-sm text-destructive">{resolveMutation.error.message}</p>}
+        {resolveMutation.isError && <p role="alert" className="text-sm text-destructive">{resolveMutation.error.message}</p>}
       </CardContent>
     </Card>
   );

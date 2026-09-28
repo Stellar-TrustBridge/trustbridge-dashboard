@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { requireMaintainerSession } from "@/lib/api-auth";
+import { requireOperator } from "@/lib/api-auth";
 import { getRecentAuditLog } from "@/lib/audit";
 import { getHorizonCircuitBreakerMetrics } from "@/lib/horizon";
 import { getRateLimitMetrics } from "@/lib/rate-limit";
@@ -25,7 +25,7 @@ export const dynamic = "force-dynamic";
  * Requires an authenticated maintainer session.
  */
 export async function GET() {
-  const session = await requireMaintainerSession();
+  const session = await requireOperator("metrics.read");
   if (!session) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }

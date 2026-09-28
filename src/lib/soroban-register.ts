@@ -4,6 +4,8 @@ import type { Registration } from "@prisma/client";
 import type { Prisma } from "@prisma/client";
 import { rpc, Keypair, TransactionBuilder, Networks, Contract, Address, nativeToScVal } from "stellar-sdk";
 
+import { logger } from "./logger";
+
 /**
  * Result of attempting to mirror a registration to a Soroban contract.
  * Never throws — returns errors array instead for best-effort operation.
@@ -58,9 +60,14 @@ export async function mirrorRegistrationToSoroban(
 
   // Missing secret key — log and skip without failing
   if (!secretKey) {
+    const message = "SOROBAN_SECRET_KEY is not configured — write-through skipped";
+    logger.warn("Soroban write-through skipped: missing secret key", {
+      registrationId: registration.id,
+      contractId,
+    });
     return {
       success: false,
-      errors: ["SOROBAN_SECRET_KEY is not configured — write-through skipped"],
+      errors: [message],
     };
   }
 
@@ -105,12 +112,22 @@ export async function mirrorRegistrationToSoroban(
       // Handle specific error cases
       if (errorType === "txFailed") {
         // Transaction failed on-chain (e.g. already registered)
+        logger.error("Soroban contract call failed on-chain", {
+          registrationId: registration.id,
+          contractId,
+          errorType,
+        });
         return {
           success: false,
           errors: [`Contract call failed: ${errorType}`],
         };
       }
 
+      logger.error("Soroban RPC returned an error", {
+        registrationId: registration.id,
+        contractId,
+        errorType: errorType || "unknown",
+      });
       return {
         success: false,
         errors: [`Soroban RPC error: ${errorType || "unknown"}`],
@@ -127,6 +144,12 @@ export async function mirrorRegistrationToSoroban(
     // Catch and log the error without blocking the registration flow.
     const message =
       error instanceof Error ? error.message : "Unknown error writing to Soroban";
+
+    logger.error("Soroban write-through failed", {
+      registrationId: registration.id,
+      contractId,
+      error: error instanceof Error ? error : new Error(message),
+    });
 
     // Don't fail the HTTP request — this is best-effort
     return {

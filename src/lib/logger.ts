@@ -80,6 +80,21 @@ export class StructuredLogger {
 }
 
 /**
+ * Serialize an unknown thrown value into a plain, log-friendly shape so that
+ * structured log entries never lose the underlying error information.
+ */
+export function serializeError(error: unknown): Record<string, unknown> {
+  if (error instanceof Error) {
+    return {
+      name: error.name,
+      message: error.message,
+      stack: error.stack,
+    };
+  }
+  return { message: String(error) };
+}
+
+/**
  * Middleware for logging incoming requests with structured format.
  * Logs method, path, origin, and user agent.
  */

@@ -299,9 +299,184 @@ export function generateOpenAPISpec(
           },
         },
       },
+      "/api/maintainer/ban": {
+        post: {
+          operationId: "manageContributorBan",
+          summary: "Ban or unban a contributor by GitHub username",
+          tags: ["Maintainer"],
+          security: [{ bearerAuth: [] }],
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: {
+                  $ref: "#/components/schemas/BanRequest",
+                },
+              },
+            },
+          },
+          responses: {
+            "200": {
+              description: "Contributor ban status updated successfully",
+              content: {
+                "application/json": {
+                  schema: {
+                    $ref: "#/components/schemas/BanResponse",
+                  },
+                },
+              },
+            },
+            "400": {
+              description: "Invalid request (missing githubUsername, invalid action, or missing reason for ban)",
+              content: {
+                "application/json": {
+                  schema: {
+                    $ref: "#/components/schemas/ErrorResponse",
+                  },
+                },
+              },
+            },
+            "403": {
+              description: "Forbidden. Maintainer access required.",
+              content: {
+                "application/json": {
+                  schema: {
+                    $ref: "#/components/schemas/ErrorResponse",
+                  },
+                },
+              },
+            },
+            "500": {
+              description: "Internal server error executing ban action",
+              content: {
+                "application/json": {
+                  schema: {
+                    $ref: "#/components/schemas/ErrorResponse",
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      "/api/registrations/{id}/restore": {
+        post: {
+          operationId: "restoreRegistration",
+          summary: "Restore a soft-deleted contributor registration",
+          tags: ["Registration", "Maintainer"],
+          security: [{ bearerAuth: [] }],
+          parameters: [
+            {
+              name: "id",
+              in: "path",
+              required: true,
+              schema: { type: "string" },
+              description: "ID of the soft-deleted registration to restore",
+            },
+          ],
+          responses: {
+            "200": {
+              description: "Registration restored successfully",
+              content: {
+                "application/json": {
+                  schema: {
+                    $ref: "#/components/schemas/RestoreRegistrationResponse",
+                  },
+                },
+              },
+            },
+            "403": {
+              description: "Forbidden. Maintainer session required.",
+              content: {
+                "application/json": {
+                  schema: {
+                    $ref: "#/components/schemas/ErrorResponse",
+                  },
+                },
+              },
+            },
+            "404": {
+              description: "Deleted registration not found",
+              content: {
+                "application/json": {
+                  schema: {
+                    $ref: "#/components/schemas/ErrorResponse",
+                  },
+                },
+              },
+            },
+            "409": {
+              description: "Conflict. Stellar address is already actively registered.",
+              content: {
+                "application/json": {
+                  schema: {
+                    $ref: "#/components/schemas/ErrorResponse",
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
     },
     components: {
       schemas: {
+        BanRequest: {
+          type: "object",
+          required: ["githubUsername"],
+          properties: {
+            action: {
+              type: "string",
+              enum: ["ban", "unban"],
+              default: "ban",
+              description: "Action to perform: ban or unban",
+            },
+            githubUsername: {
+              type: "string",
+              description: "GitHub handle of the contributor",
+            },
+            reason: {
+              type: "string",
+              description: "Mandatory reason for ban; optional for unban",
+            },
+          },
+        },
+        BanResponse: {
+          type: "object",
+          required: ["success", "message", "details"],
+          properties: {
+            success: { type: "boolean" },
+            message: { type: "string" },
+            details: {
+              type: "object",
+              required: ["githubUsername", "banned"],
+              properties: {
+                githubUsername: { type: "string" },
+                banned: { type: "boolean" },
+                bannedAt: { type: "string", format: "date-time", nullable: true },
+                bannedReason: { type: "string", nullable: true },
+                bannedBy: { type: "string", nullable: true },
+              },
+            },
+          },
+        },
+        RestoreRegistrationResponse: {
+          type: "object",
+          required: ["success", "registration"],
+          properties: {
+            success: { type: "boolean" },
+            registration: {
+              $ref: "#/components/schemas/Registration",
+            },
+          },
+        },
+        ErrorResponse: {
+          type: "object",
+          required: ["error"],
+          properties: {
+            error: { type: "string" },
+          },
+        },
         Registration: {
           type: "object",
           properties: {

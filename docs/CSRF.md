@@ -12,6 +12,7 @@ Without CSRF protection, a malicious page could trick an authenticated maintaine
 
 - An attacker site submits a hidden `<form>` to `POST /api/register`, overwriting the contributor's payout address to an attacker-controlled G-address
 - An attacker triggers `POST /api/contributors` (batch re-check), exhausting Horizon API quota at 100+ contributor scale
+- An attacker triggers `POST /api/contributors/[id]` (single-contributor recheck), forcing an unwanted re-check of a contributor's account
 
 Because the application uses **cookie-based session authentication** (NextAuth JWT cookie), these requests would otherwise inherit the victim's session automatically.
 
@@ -24,9 +25,11 @@ Because the application uses **cookie-based session authentication** (NextAuth J
 | `/api/check` | POST | Yes |
 | `/api/register` | POST | Yes |
 | `/api/contributors` | POST | Yes |
+| `/api/contributors/[id]` | POST | Yes |
 | `/api/auth/[...nextauth]` | GET/POST | No (handled by NextAuth internal CSRF) |
 | `/api/stats` | GET | No (read-only, safe method) |
 | `/api/contributors` | GET | No (read-only, auth already enforced) |
+| `/api/contributors/[id]` | GET | No (read-only, auth already enforced) |
 | `/api/register` | GET | No (read-only, auth already enforced) |
 | `/api/address-history` | GET | No (read-only, auth already enforced) |
 

@@ -37,6 +37,29 @@ down.
 
 ---
 
+## Freeze windows
+
+A **freeze window** is a period (typically during a Wave) when risky, mutating
+paths are turned off so contributors can't accidentally ship or re-queue work.
+Freeze windows are implemented entirely with the flags below — there is no
+separate freeze subsystem. To open a freeze, flip the relevant flags off (env
+override or DB row); to close it, flip them back on.
+
+| Flag | Freeze effect when off |
+|---|---|
+| `batch_recheck` | `POST /api/contributors` returns `403` — no per-contributor Horizon fan-out |
+| `invite_generation` | `POST /api/invites/generate` returns `403` — invite issuance frozen |
+| `dlq_retry` | `POST /api/contributors/queue/dlq/[jobId]/retry` returns `403` — failed jobs stay parked |
+| `maintenance_mode` | Composes with the `MAINTENANCE` env var to take the app read-only |
+
+Because these flags are `risky`, a DB outage during a freeze keeps them **off**
+(fail closed) — see [Fail closed](#fail-closed) above. The env vars that drive
+freeze windows (`FEATURE_FLAG_*`, `FEATURE_FLAGS_DB_ENABLED`,
+`FEATURE_FLAGS_CACHE_TTL_MS`, `MAINTENANCE`) are documented in
+[ENVIRONMENT.md](./ENVIRONMENT.md#feature-flags-and-freeze-windows).
+
+---
+
 ## The flags
 
 | Key | Default | Risky | Gates | Documented at |
