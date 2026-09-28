@@ -28,10 +28,10 @@ jobs:
       - name: Type check
         run: npm run typecheck
 
-      - name: Unit & API tests
+      - name: Vitest
         run: npm test
 
-      - name: Build
+      - name: Next build
         run: npm run build
         env:
           # Provide stub values so env-validation passes at build time without
