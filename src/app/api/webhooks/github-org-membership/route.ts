@@ -24,6 +24,9 @@ export interface GitHubMembershipEvent {
 /**
  * Verifies the GitHub webhook signature to ensure the request is authentic.
  * GitHub sends X-Hub-Signature-256 with each webhook.
+ *
+ * Fails closed: if the secret is not configured, verification always fails so
+ * the request is rejected rather than processed without authentication.
  */
 export function verifyWebhookSignature(
   payload: Buffer,
@@ -31,8 +34,8 @@ export function verifyWebhookSignature(
 ): boolean {
   const secret = process.env.GITHUB_WEBHOOK_SECRET?.trim();
   if (!secret) {
-    console.warn(
-      "GITHUB_WEBHOOK_SECRET not configured — webhook signature verification skipped",
+    console.error(
+      "GITHUB_WEBHOOK_SECRET not configured — rejecting webhook (fail closed)",
     );
     return false;
   }
@@ -131,13 +134,24 @@ export async function processGithubOrgMembershipEvent(
  */
 export async function POST(request: NextRequest) {
   try {
+    const secret = process.env.GITHUB_WEBHOOK_SECRET?.trim();
+    if (!secret) {
+      console.error(
+        "GITHUB_WEBHOOK_SECRET not configured — rejecting webhook (fail closed)",
+      );
+      return NextResponse.json(
+        { error: "Webhook secret not configured" },
+        { status: 503 },
+      );
+    }
+
     const body = await request.arrayBuffer();
     const payload = Buffer.from(body);
 
     const signature = request.headers.get("X-Hub-Signature-256") || undefined;
     if (!verifyWebhookSignature(payload, signature)) {
       console.warn("Webhook signature verification failed");
-      return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     const event: GitHubMembershipEvent = JSON.parse(payload.toString("utf-8"));

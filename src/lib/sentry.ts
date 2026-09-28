@@ -212,63 +212,46 @@ const noopClient: SentryClient = {
  *
  * The dynamic `require()` is intentional: it allows the package to be an
  * optional peer dependency (not listed in `dependencies`) so that teams that
- * don't want Sentry can simply omit the DSN without an install-time error.
+ * don't want Sentry can simply omit the DSN without an install step.
  */
 function resolveClient(): SentryClient {
-  const dsn = process.env.NEXT_PUBLIC_SENTRY_DSN?.trim();
+  const dsn = process.env.NEXT_PUBLIC_SENTRY_DSN;
   if (!dsn) return noopClient;
 
   try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const Sentry = require("@sentry/nextjs") as {
-      captureException: (error: unknown, context?: Record<string, unknown>) => string | undefined;
-      captureMessage: (message: string, level?: string) => string | undefined;
-      withScope: (cb: (scope: {
-        setTag(k: string, v: string): void;
-        setUser(u: { id?: string; username?: string } | null): void;
-        setExtra(k: string, v: unknown): void;
-        setLevel(l: string): void;
-      }) => void) => void;
-      setUser: (u: { id?: string; username?: string } | null) => void;
+      captureException: (error: unknown, context?: Record<string, unknown>) => string;
+      captureMessage: (message: string, level?: SentryLevel) => string;
+      withScope: (callback: (scope: SentryScope) => void) => void;
+      setUser: (user: { id?: string; username?: string } | null) => void;
       flush: (timeout?: number) => Promise<boolean>;
     };
+
     return {
-      captureException: (error, context) => {
-        return Sentry.captureException(error, context) ?? "";
-      },
-      captureMessage: (message, level = "info") => {
-        return Sentry.captureMessage(message, level) ?? "";
-      },
-      withScope: (cb) => {
-        Sentry.withScope((scope) => {
-          cb({
-            setTag: (k, v) => scope.setTag(k, v),
-            setUser: (u) => scope.setUser(u),
-            setExtra: (k, v) => scope.setExtra(k, v),
-            setLevel: (l) => scope.setLevel(l),
-          });
-        });
-      },
-      setUser: (u) => Sentry.setUser(u),
+      captureException: (error, context) =>
+        Sentry.captureException(redactException(error), redactContext(context)),
+      captureMessage: (message, level) => Sentry.captureMessage(redactString(message), level),
+      withScope: (callback) => Sentry.withScope(callback),
+      setUser: (user) => Sentry.setUser(user),
       flush: (timeout) => Sentry.flush(timeout),
     };
   } catch {
-    // @sentry/nextjs is not installed — fall back to no-op.
+    // SDK not installed — fall back to the no-op stub rather than throwing
+    // from an error-reporting path.
     return noopClient;
   }
 }
 
-// Singleton so the DSN check and require() happen at most once per process.
-let _client: SentryClient | null = null;
+let cachedClient: SentryClient | null = null;
 
-function getClient(): SentryClient {
-  if (!_client) _client = resolveClient();
-  return _client;
-}
-
-// Exposed for tests that need to reset the singleton between runs.
-export function _resetSentryClient(): void {
-  _client = null;
+/**
+ * The active Sentry client. Resolved lazily on first use so that importing
+ * this module never has side effects and tests can stub the environment.
+ */
+export function getSentryClient(): SentryClient {
+  if (!cachedClient) cachedClient = resolveClient();
+  return cachedClient;
 }
 
 // ---------------------------------------------------------------------------
@@ -276,106 +259,68 @@ export function _resetSentryClient(): void {
 // ---------------------------------------------------------------------------
 
 /**
- * Report an unhandled exception to Sentry.
+ * Report an exception to Sentry.
  *
- * @param error   The caught value (ideally an `Error` instance).
- * @param context Optional key/value pairs attached to the event as "extra"
- *                data (e.g. `{ route: "/api/contributors", userId: "u_123" }`).
- * @returns       The Sentry event id, or an empty string when Sentry is
- *                unconfigured.
- *
- * @example
- * ```ts
- * try {
- *   await riskyOperation();
- * } catch (err) {
- *   captureException(err, { route: "/api/register" });
- *   return NextResponse.json({ error: "Internal error" }, { status: 500 });
- * }
- * ```
+ * The error and its context are redacted before they leave the process, so
+ * callers can pass request-derived data (headers, bodies, params) without
+ * worrying about leaking tokens or personal data. Never throws: a failure in
+ * the reporter must not mask the original error.
  */
 export function captureException(
   error: unknown,
   context?: Record<string, unknown>
 ): string {
-  // Redaction happens here, at the single choke point, rather than being left
-  // to each call site — a caller who forgets is exactly how a wallet address
-  // or token ends up on sentry.io.
-  return getClient().captureException(
-    redactException(error),
-    redactContext(context)
-  );
+  try {
+    return getSentryClient().captureException(error, context);
+  } catch {
+    return "";
+  }
 }
 
 /**
- * Send an informational message (not an exception) to Sentry.
- *
- * @param message Human-readable description of the event.
- * @param level   Sentry severity level. Defaults to `"info"`.
- * @returns       The Sentry event id, or an empty string when unconfigured.
+ * Report a message to Sentry at the given level (defaults to `error`).
+ * Redacted and never throws, for the same reasons as {@link captureException}.
  */
 export function captureMessage(
   message: string,
-  level: SentryLevel = "info"
-): string {
-  return getClient().captureMessage(redactString(message), level);
-}
-
-/**
- * Capture an exception with additional scope data (tags, user, level).
- *
- * Prefer `captureException` for the common case; use this only when you need
- * to attach extra metadata that shouldn't bleed into other events.
- *
- * @example
- * ```ts
- * captureExceptionWithScope(err, { id: session.user.id }, { route: "/api/check" }, "error");
- * ```
- */
-export function captureExceptionWithScope(
-  error: unknown,
-  user: { id?: string; username?: string } | null,
-  tags: Record<string, string> = {},
   level: SentryLevel = "error"
 ): string {
-  let eventId = "";
-  const safeError = redactException(error);
-  getClient().withScope((scope) => {
-    // `user.id` and `user.username` are the two identifiers Sentry is designed
-    // to carry, so they are passed through as-is; everything else is scrubbed.
-    scope.setUser(user);
-    scope.setLevel(level);
-    for (const [k, v] of Object.entries(tags)) {
-      scope.setTag(k, redactString(v));
-    }
-    eventId = getClient().captureException(safeError);
-  });
-  return eventId;
+  try {
+    return getSentryClient().captureMessage(message, level);
+  } catch {
+    return "";
+  }
 }
 
 /**
- * Associate a user with subsequent Sentry events for the current hub/scope.
- * Call this on sign-in; pass `null` to clear on sign-out.
+ * Run `callback` with a configured Sentry scope. Never throws.
  */
-export function setSentryUser(
-  user: { id?: string; username?: string } | null
-): void {
-  getClient().setUser(user);
+export function withScope(callback: (scope: SentryScope) => void): void {
+  try {
+    getSentryClient().withScope(callback);
+  } catch {
+    // Swallow — scope configuration is best-effort.
+  }
 }
 
 /**
- * Flush pending Sentry events before a serverless function terminates.
- * Call this at the end of long-running background tasks or in `onRequestEnd`
- * middleware hooks.
+ * Associate subsequent events with a user. Never throws.
  */
-export async function flushSentry(timeoutMs = 2000): Promise<boolean> {
-  return getClient().flush(timeoutMs);
+export function setUser(user: { id?: string; username?: string } | null): void {
+  try {
+    getSentryClient().setUser(user);
+  } catch {
+    // Swallow — user association is best-effort.
+  }
 }
 
 /**
- * `true` when a real Sentry DSN is configured and events will actually be
- * sent to sentry.io. Useful for conditional log messages in development.
+ * Flush buffered events. Useful in serverless handlers and tests. Never throws.
  */
-export function isSentryEnabled(): boolean {
-  return Boolean(process.env.NEXT_PUBLIC_SENTRY_DSN?.trim());
+export async function flush(timeout = 2000): Promise<boolean> {
+  try {
+    return await getSentryClient().flush(timeout);
+  } catch {
+    return false;
+  }
 }

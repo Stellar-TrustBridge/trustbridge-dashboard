@@ -490,6 +490,23 @@ const settingsAuditFixture = {
   ],
 };
 
+async function setupSettingsPage(page: Parameters<typeof interceptApi>[0]) {
+  await mockMaintainerSession(page);
+  await interceptApi(page, "**/api/settings/network", networkFixtureForRegister);
+  await interceptApi(page, "**/api/audit*", settingsAuditFixture);
+  await interceptApi(page, "**/api/auth/session-info", {
+    session: {
+      issuedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 86400000).toISOString(),
+      expiresInSeconds: 86400,
+      maxAgeSeconds: 86400,
+      strategy: "jwt",
+    },
+  });
+  await interceptApi(page, "**/api/settings/api-keys", { keys: [] });
+  await interceptApi(page, "**/api/registrations/deleted", { registrations: [] });
+}
+
 test.describe("Settings page", () => {
   test("non-maintainer cannot access /dashboard/settings", async ({ page }) => {
     await mockContributorSession(page);
@@ -498,9 +515,7 @@ test.describe("Settings page", () => {
   });
 
   test("maintainer can load settings page", async ({ page }) => {
-    await mockMaintainerSession(page);
-    await interceptApi(page, "**/api/settings/network", networkFixtureForRegister);
-    await interceptApi(page, "**/api/audit", settingsAuditFixture);
+    await setupSettingsPage(page);
 
     await page.goto("/dashboard/settings");
     await expect(
@@ -509,18 +524,14 @@ test.describe("Settings page", () => {
   });
 
   test("settings page displays network configuration", async ({ page }) => {
-    await mockMaintainerSession(page);
-    await interceptApi(page, "**/api/settings/network", networkFixtureForRegister);
-    await interceptApi(page, "**/api/audit", settingsAuditFixture);
+    await setupSettingsPage(page);
 
     await page.goto("/dashboard/settings");
     await expect(page.getByText(/horizon|network|testnet/i)).toBeVisible();
   });
 
   test("settings page shows audit log entries", async ({ page }) => {
-    await mockMaintainerSession(page);
-    await interceptApi(page, "**/api/settings/network", networkFixtureForRegister);
-    await interceptApi(page, "**/api/audit", settingsAuditFixture);
+    await setupSettingsPage(page);
 
     await page.goto("/dashboard/settings");
     // Should show audit entries (action names or timestamps)
@@ -531,10 +542,159 @@ test.describe("Settings page", () => {
   test("settings page handles network error gracefully", async ({ page }) => {
     await mockMaintainerSession(page);
     await interceptApi(page, "**/api/settings/network", { error: "Network error" }, 500);
-    await interceptApi(page, "**/api/audit", { error: "Network error" }, 500);
+    await interceptApi(page, "**/api/audit*", { error: "Network error" }, 500);
+    await interceptApi(page, "**/api/auth/session-info", { error: "Network error" }, 500);
+    await interceptApi(page, "**/api/settings/api-keys", { error: "Network error" }, 500);
+    await interceptApi(page, "**/api/registrations/deleted", { error: "Network error" }, 500);
 
     await page.goto("/dashboard/settings");
     // Page should show but may display error state
     await expect(page).toHaveURL(/dashboard\/settings/);
+  });
+});
+
+// ── Webhook replay form (/dashboard/settings) ─────────────────────────
+
+test.describe("Settings page — GitHub org webhook replay form", () => {
+  test.beforeEach(async ({ page }) => {
+    await setupSettingsPage(page);
+  });
+
+  test("renders webhook replay form with default payload and input controls", async ({
+    page,
+  }) => {
+    await page.goto("/dashboard/settings");
+
+    await expect(
+      page.getByRole("heading", { name: /github org webhook replay/i })
+    ).toBeVisible();
+
+    const payloadTextarea = page.getByLabel(/event payload/i);
+    await expect(payloadTextarea).toBeVisible();
+    await expect(payloadTextarea).toHaveValue(/octocat/);
+
+    const signatureInput = page.getByLabel(/optional signature/i);
+    await expect(signatureInput).toBeVisible();
+
+    const replayButton = page.getByRole("button", { name: /replay event/i });
+    await expect(replayButton).toBeVisible();
+    await expect(replayButton).toBeEnabled();
+  });
+
+  test("submits valid replay and displays success feedback", async ({ page }) => {
+    let capturedBody = "";
+    let capturedSignature: string | null = null;
+
+    await page.route("**/api/webhooks/github-org-membership/replay", async (route) => {
+      const request = route.request();
+      capturedBody = request.postData() ?? "";
+      capturedSignature = request.headers()["x-hub-signature-256"] ?? null;
+
+      await route.fulfill({
+        status: 202,
+        contentType: "application/json",
+        body: JSON.stringify({
+          status: "processed",
+          event: "member_added",
+        }),
+      });
+    });
+
+    await page.goto("/dashboard/settings");
+
+    const signatureInput = page.getByLabel(/optional signature/i);
+    await signatureInput.fill("sha256=abcdef1234567890");
+
+    const replayButton = page.getByRole("button", { name: /replay event/i });
+    await replayButton.click();
+
+    // Verify success feedback appears
+    const statusFeedback = page.getByTestId("webhook-replay-status");
+    await expect(statusFeedback).toBeVisible();
+    await expect(statusFeedback).toHaveText(/replay accepted for processed\./i);
+
+    // Verify sent payload and header
+    expect(capturedBody).toContain("octocat");
+    expect(capturedSignature).toBe("sha256=abcdef1234567890");
+  });
+
+  test("displays validation error when submit fails with 400 Bad Request", async ({
+    page,
+  }) => {
+    await page.route("**/api/webhooks/github-org-membership/replay", async (route) => {
+      await route.fulfill({
+        status: 400,
+        contentType: "application/json",
+        body: JSON.stringify({
+          error: "Invalid payload JSON: unexpected token",
+        }),
+      });
+    });
+
+    await page.goto("/dashboard/settings");
+
+    const payloadTextarea = page.getByLabel(/event payload/i);
+    await payloadTextarea.fill('{ "invalid": json }');
+
+    const replayButton = page.getByRole("button", { name: /replay event/i });
+    await replayButton.click();
+
+    // Verify error feedback appears without crashing
+    const statusFeedback = page.getByTestId("webhook-replay-status");
+    await expect(statusFeedback).toBeVisible();
+    await expect(statusFeedback).toHaveText(/invalid payload json: unexpected token/i);
+
+    // Button should be re-enabled after request finishes
+    await expect(replayButton).toBeEnabled();
+  });
+
+  test("displays error feedback when replay is rejected as unauthorized (403)", async ({
+    page,
+  }) => {
+    await page.route("**/api/webhooks/github-org-membership/replay", async (route) => {
+      await route.fulfill({
+        status: 403,
+        contentType: "application/json",
+        body: JSON.stringify({
+          error: "Unauthorized",
+        }),
+      });
+    });
+
+    await page.goto("/dashboard/settings");
+
+    const signatureInput = page.getByLabel(/optional signature/i);
+    await signatureInput.fill("sha256=invalid_signature");
+
+    const replayButton = page.getByRole("button", { name: /replay event/i });
+    await replayButton.click();
+
+    const statusFeedback = page.getByTestId("webhook-replay-status");
+    await expect(statusFeedback).toBeVisible();
+    await expect(statusFeedback).toHaveText(/unauthorized/i);
+  });
+
+  test("handles server failure (500) gracefully without crashing UI", async ({
+    page,
+  }) => {
+    await page.route("**/api/webhooks/github-org-membership/replay", async (route) => {
+      await route.fulfill({
+        status: 500,
+        contentType: "application/json",
+        body: JSON.stringify({
+          error: "Internal Server Error",
+        }),
+      });
+    });
+
+    await page.goto("/dashboard/settings");
+
+    const replayButton = page.getByRole("button", { name: /replay event/i });
+    await replayButton.click();
+
+    const statusFeedback = page.getByTestId("webhook-replay-status");
+    await expect(statusFeedback).toBeVisible();
+    await expect(statusFeedback).toHaveText(/internal server error/i);
+    await expect(replayButton).toBeEnabled();
   });
 });

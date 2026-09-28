@@ -36,6 +36,47 @@ describe("/api/openapi.json", () => {
     expect(spec.paths["/api/check"]).toBeDefined();
     expect(spec.paths["/api/contributors"]).toBeDefined();
     expect(spec.paths["/api/stats"]).toBeDefined();
+    expect(spec.paths["/api/maintainer/ban"]).toBeDefined();
+    expect(spec.paths["/api/registrations/{id}/restore"]).toBeDefined();
+  });
+
+  it("documents maintainer ban endpoint with request body and error codes", async () => {
+    const request = new Request("http://localhost:3000/api/openapi.json");
+    const response = await GET(request);
+    const spec = await response.json();
+
+    const banPath = spec.paths["/api/maintainer/ban"]?.post;
+    expect(banPath).toBeDefined();
+    expect(banPath.operationId).toBe("manageContributorBan");
+    expect(banPath.security).toEqual([{ bearerAuth: [] }]);
+    expect(banPath.requestBody?.content["application/json"]?.schema?.$ref).toBe(
+      "#/components/schemas/BanRequest"
+    );
+    expect(banPath.responses["200"]).toBeDefined();
+    expect(banPath.responses["400"]).toBeDefined();
+    expect(banPath.responses["403"]).toBeDefined();
+    expect(banPath.responses["500"]).toBeDefined();
+  });
+
+  it("documents registration restore endpoint with path param and error codes", async () => {
+    const request = new Request("http://localhost:3000/api/openapi.json");
+    const response = await GET(request);
+    const spec = await response.json();
+
+    const restorePath = spec.paths["/api/registrations/{id}/restore"]?.post;
+    expect(restorePath).toBeDefined();
+    expect(restorePath.operationId).toBe("restoreRegistration");
+    expect(restorePath.security).toEqual([{ bearerAuth: [] }]);
+
+    const idParam = restorePath.parameters?.find((p: any) => p.name === "id");
+    expect(idParam).toBeDefined();
+    expect(idParam.in).toBe("path");
+    expect(idParam.required).toBe(true);
+
+    expect(restorePath.responses["200"]).toBeDefined();
+    expect(restorePath.responses["403"]).toBeDefined();
+    expect(restorePath.responses["404"]).toBeDefined();
+    expect(restorePath.responses["409"]).toBeDefined();
   });
 
   it("generates correct server URL from request", async () => {
@@ -74,6 +115,10 @@ describe("/api/openapi.json", () => {
     expect(spec.components.schemas).toBeDefined();
     expect(spec.components.schemas.Registration).toBeDefined();
     expect(spec.components.schemas.DashboardStats).toBeDefined();
+    expect(spec.components.schemas.BanRequest).toBeDefined();
+    expect(spec.components.schemas.BanResponse).toBeDefined();
+    expect(spec.components.schemas.RestoreRegistrationResponse).toBeDefined();
+    expect(spec.components.schemas.ErrorResponse).toBeDefined();
   });
 
   it("documents endpoint parameters for pagination", async () => {

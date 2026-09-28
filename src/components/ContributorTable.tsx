@@ -305,6 +305,7 @@ export function ContributorTable({
   // it is closed. Both formats share one dialog.
   const [pendingExport, setPendingExport] = useState<"csv" | "json" | null>(null);
   const [banDialogRow, setBanDialogRow] = useState<ContributorRow | null>(null);
+  const [banDialogAction, setBanDialogAction] = useState<"ban" | "unban">("ban");
   const [banReasonInput, setBanReasonInput] = useState("");
   const [isSubmittingBan, setIsSubmittingBan] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -909,12 +910,9 @@ export function ContributorTable({
                             size="sm"
                             variant={row.banned ? "outline" : "destructive"}
                             onClick={() => {
-                              if (row.banned) {
-                                void onBanToggle(row.githubUsername, "unban");
-                              } else {
-                                setBanReasonInput("");
-                                setBanDialogRow(row);
-                              }
+                              setBanDialogAction(row.banned ? "unban" : "ban");
+                              setBanReasonInput("");
+                              setBanDialogRow(row);
                             }}
                             aria-label={`${row.banned ? "Unban" : "Ban"} ${row.githubUsername}`}
                             data-testid={`ban-toggle-${row.githubUsername}`}
@@ -999,39 +997,59 @@ export function ContributorTable({
 
       <ConfirmDialog
         open={banDialogRow !== null}
-        title={`Ban Contributor @${banDialogRow?.githubUsername}?`}
+        title={`${banDialogAction === "ban" ? "Ban" : "Unban"} Contributor @${banDialogRow?.githubUsername}?`}
         description={
-          <div className="space-y-3 pt-2">
-            <p>
-              Banning this contributor will reject all current and future registration or recheck attempts for this GitHub account.
-            </p>
-            <div>
-              <label htmlFor="ban-reason-input" className="block text-xs font-semibold text-foreground mb-1">
-                Reason for ban <span className="text-red-500">*</span>
-              </label>
-              <Input
-                id="ban-reason-input"
-                type="text"
-                placeholder="e.g. Abusive behavior, stolen wallet, TOS violation"
-                value={banReasonInput}
-                onChange={(e) => setBanReasonInput(e.target.value)}
-                data-testid="ban-reason-input"
-              />
+          banDialogAction === "ban" ? (
+            <div className="space-y-3 pt-2">
+              <p>
+                Banning this contributor will reject all current and future registration or recheck attempts for this GitHub account.
+              </p>
+              <div>
+                <label htmlFor="ban-reason-input" className="block text-xs font-semibold text-foreground mb-1">
+                  Reason for ban <span className="text-red-500">*</span>
+                </label>
+                <Input
+                  id="ban-reason-input"
+                  type="text"
+                  placeholder="e.g. Abusive behavior, stolen wallet, TOS violation"
+                  value={banReasonInput}
+                  onChange={(e) => setBanReasonInput(e.target.value)}
+                  data-testid="ban-reason-input"
+                />
+              </div>
             </div>
-          </div>
+          ) : (
+            <p>
+              Unbanning removes this GitHub account from the ban list and allows future registration and re-check attempts.
+            </p>
+          )
         }
-        confirmLabel={isSubmittingBan ? "Banning..." : "Confirm Ban"}
+        confirmLabel={
+          isSubmittingBan
+            ? banDialogAction === "ban"
+              ? "Banning..."
+              : "Unbanning..."
+            : banDialogAction === "ban"
+              ? "Confirm Ban"
+              : "Confirm Unban"
+        }
         cancelLabel="Cancel"
-        destructive={true}
+        destructive={banDialogAction === "ban"}
         onCancel={() => {
           setBanDialogRow(null);
           setBanReasonInput("");
         }}
         onConfirm={async () => {
-          if (!banDialogRow || !banReasonInput.trim() || isSubmittingBan || !onBanToggle) return;
+          if (!banDialogRow || isSubmittingBan || !onBanToggle) return;
+          const reason = banReasonInput.trim();
+          if (banDialogAction === "ban" && !reason) return;
           try {
             setIsSubmittingBan(true);
-            await onBanToggle(banDialogRow.githubUsername, "ban", banReasonInput.trim());
+            await onBanToggle(
+              banDialogRow.githubUsername,
+              banDialogAction,
+              banDialogAction === "ban" ? reason : undefined
+            );
             setBanDialogRow(null);
             setBanReasonInput("");
           } finally {
