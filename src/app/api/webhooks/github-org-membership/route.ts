@@ -151,7 +151,7 @@ export async function POST(request: NextRequest) {
     const signature = request.headers.get("X-Hub-Signature-256") || undefined;
     if (!verifyWebhookSignature(payload, signature)) {
       console.warn("Webhook signature verification failed");
-      return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     const event: GitHubMembershipEvent = JSON.parse(payload.toString("utf-8"));
