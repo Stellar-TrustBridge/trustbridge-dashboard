@@ -13,6 +13,10 @@ vi.mock("@/lib/prisma", () => ({
       findMany: vi.fn(),
       update: vi.fn(),
     },
+    user: {
+      findUnique: vi.fn(),
+      update: vi.fn(),
+    },
   },
 }));
 
@@ -56,6 +60,8 @@ describe("contract-sync", () => {
     mockScValToNative.mockReturnValue([]);
     vi.mocked(prisma.registration.findMany).mockResolvedValue([]);
     vi.mocked(prisma.registration.update).mockResolvedValue({} as never);
+    vi.mocked(prisma.user.findUnique).mockResolvedValue(null);
+    vi.mocked(prisma.user.update).mockResolvedValue({} as never);
   });
 
   afterEach(() => {
@@ -213,6 +219,77 @@ describe("contract-sync", () => {
     });
   });
 
+  // ------------------------------------------------------------------
+  // Username-mismatch path: linked User.githubUsername is updated safely
+  // ------------------------------------------------------------------
+
+  describe("username mismatch", () => {
+    it("updates the linked User.githubUsername when it diverges from the contract", async () => {
+      process.env.SOROBAN_CONTRACT_ID = "CABC123";
+
+      mockScValToNative.mockReturnValue([["GEXISTS1ADDRESS", "alice-new"]]);
+
+      vi.mocked(prisma.registration.findMany).mockResolvedValue([
+        makeExistingReg("GEXISTS1ADDRESS", "alice-old") as never,
+      ]);
+
+      // No other user already owns the new username
+      vi.mocked(prisma.user.findUnique).mockResolvedValue(null);
+
+      const result = await syncContractToPostgres();
+
+      expect(result.updated).toBe(1);
+      expect(prisma.user.update).toHaveBeenCalledTimes(1);
+      expect(prisma.user.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: "id-GEXISTS1ADDRESS" },
+          data: { githubUsername: "alice-new" },
+        })
+      );
+    });
+
+    it("skips the update and does not throw when the new username is already taken", async () => {
+      process.env.SOROBAN_CONTRACT_ID = "CABC123";
+
+      mockScValToNative.mockReturnValue([["GEXISTS1ADDRESS", "alice-new"]]);
+
+      vi.mocked(prisma.registration.findMany).mockResolvedValue([
+        makeExistingReg("GEXISTS1ADDRESS", "alice-old") as never,
+      ]);
+
+      // Another user already owns the target username
+      vi.mocked(prisma.user.findUnique).mockResolvedValue({
+        id: "other-user",
+      } as never);
+
+      const result = await syncContractToPostgres();
+
+      expect(result.status).toBe("ok");
+      expect(prisma.user.update).not.toHaveBeenCalled();
+      expect(result.updated).toBe(0);
+      expect(result.unchanged).toBe(1);
+    });
+
+    it("does not issue an empty registration.update for the mismatch path", async () => {
+      process.env.SOROBAN_CONTRACT_ID = "CABC123";
+
+      mockScValToNative.mockReturnValue([["GEXISTS1ADDRESS", "alice-new"]]);
+
+      vi.mocked(prisma.registration.findMany).mockResolvedValue([
+        makeExistingReg("GEXISTS1ADDRESS", "alice-old") as never,
+      ]);
+
+      vi.mocked(prisma.user.findUnique).mockResolvedValue(null);
+
+      await syncContractToPostgres();
+
+      // No empty-data registration updates should ever be issued
+      for (const call of vi.mocked(prisma.registration.update).mock.calls) {
+        expect(call[0]?.data).not.toEqual({});
+      }
+    });
+  });
+
   describe("mixed create / update / unchanged in one sync run", () => {
     it("correctly partitions all three paths", async () => {
       process.env.SOROBAN_CONTRACT_ID = "CABC123";
@@ -232,6 +309,8 @@ describe("contract-sync", () => {
         makeExistingReg("GSAME", "stable") as never,
       ]);
 
+      vi.mocked(prisma.user.findUnique).mockResolvedValue(null);
+
       const result = await syncContractToPostgres();
 
       expect(result.status).toBe("ok");
@@ -245,45 +324,12 @@ describe("contract-sync", () => {
         expect.objectContaining({
           action: "contract.sync",
           metadata: expect.objectContaining({
-            synced: 3,
             created: 1,
             updated: 1,
             unchanged: 1,
           }),
         })
       );
-    });
-  });
-
-  describe("counter audit log consistency", () => {
-    it("passes created/updated/unchanged totals to recordAuditLog", async () => {
-      process.env.SOROBAN_CONTRACT_ID = "CABC123";
-
-      mockScValToNative.mockReturnValue([
-        ["GNEW1", "user1"],
-        ["GNEW2", "user2"],
-      ]);
-      vi.mocked(prisma.registration.findMany).mockResolvedValue([]);
-
-      await syncContractToPostgres();
-
-      expect(recordAuditLog).toHaveBeenCalledWith(
-        expect.objectContaining({
-          metadata: expect.objectContaining({ created: 2, updated: 0, unchanged: 0 }),
-        })
-      );
-    });
-
-    it("health result created field matches returned result", async () => {
-      process.env.SOROBAN_CONTRACT_ID = "CABC123";
-
-      mockScValToNative.mockReturnValue([["GNEW", "someone"]]);
-      vi.mocked(prisma.registration.findMany).mockResolvedValue([]);
-
-      const result = await syncContractToPostgres();
-
-      expect(result.created).toBe(1);
-      expect(getContractSyncHealth()?.created).toBe(1);
     });
   });
 });

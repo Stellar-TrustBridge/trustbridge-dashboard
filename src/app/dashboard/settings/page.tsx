@@ -7,6 +7,7 @@ import { useState } from "react";
 import { NetworkStatusPanel } from "@/components/NetworkStatusPanel";
 import { SessionPanel } from "@/components/SessionPanel";
 import { ApiKeyPanel } from "@/components/ApiKeyPanel";
+import { RestorePanel } from "@/components/RestorePanel";
 import {
   Card,
   CardContent,
@@ -120,7 +121,7 @@ export default function MaintainerSettingsPage() {
         <ApiKeyPanel />
       </div>
 
-      <Card className="mb-8">
+      <Card className="mb-8" data-testid="webhook-replay-panel">
         <CardHeader>
           <CardTitle>GitHub org webhook replay</CardTitle>
           <CardDescription>
@@ -131,8 +132,12 @@ export default function MaintainerSettingsPage() {
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="space-y-2">
-            <label className="text-sm font-medium">Event payload</label>
+            <label htmlFor="replay-payload" className="text-sm font-medium">
+              Event payload
+            </label>
             <textarea
+              id="replay-payload"
+              data-testid="webhook-replay-payload"
               value={replayBody}
               onChange={(event) => setReplayBody(event.target.value)}
               rows={12}
@@ -142,8 +147,12 @@ export default function MaintainerSettingsPage() {
           </div>
 
           <div className="space-y-2">
-            <label className="text-sm font-medium">Optional signature</label>
+            <label htmlFor="replay-signature" className="text-sm font-medium">
+              Optional signature
+            </label>
             <input
+              id="replay-signature"
+              data-testid="webhook-replay-signature"
               type="text"
               value={replaySignature}
               onChange={(event) => setReplaySignature(event.target.value)}
@@ -155,6 +164,7 @@ export default function MaintainerSettingsPage() {
           <div className="flex items-center gap-3">
             <button
               type="button"
+              data-testid="webhook-replay-submit"
               onClick={handleReplay}
               disabled={isReplaying}
               className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:opacity-60"
@@ -164,6 +174,8 @@ export default function MaintainerSettingsPage() {
 
             {replayStatus && (
               <span
+                role="status"
+                data-testid="webhook-replay-status"
                 className={
                   replayStatus.type === "success"
                     ? "text-sm text-emerald-600"

@@ -2,7 +2,9 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, Loader2, RefreshCw, RotateCw } from "lucide-react";
+import { useState } from "react";
 
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -31,6 +33,7 @@ interface DlqResponse {
 
 export default function DeadLetterQueuePage() {
   const queryClient = useQueryClient();
+  const [jobToRetry, setJobToRetry] = useState<FailedJob | null>(null);
 
   const dlqQuery = useQuery({
     queryKey: ["queue", "dlq"],
@@ -45,7 +48,11 @@ export default function DeadLetterQueuePage() {
     mutationFn: async (jobId: string) => {
       const response = await fetch(
         `/api/contributors/queue/dlq/${jobId}/retry`,
-        { method: "POST" },
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({}),
+        },
       );
       if (!response.ok) {
         const body = (await response.json().catch(() => null)) as
@@ -56,6 +63,7 @@ export default function DeadLetterQueuePage() {
       return (await response.json()) as { job: { id: string } };
     },
     onSuccess: () => {
+      setJobToRetry(null);
       void queryClient.invalidateQueries({ queryKey: ["queue", "dlq"] });
     },
   });
@@ -133,11 +141,13 @@ export default function DeadLetterQueuePage() {
                 </div>
                 <Button
                   size="sm"
-                  onClick={() => retryMutation.mutate(job.id)}
+                  onClick={() => setJobToRetry(job)}
                   disabled={
                     retryMutation.isPending &&
                     retryMutation.variables === job.id
                   }
+                  data-testid={`retry-job-${job.id}`}
+                  aria-label={`Retry job ${job.id}`}
                 >
                   {retryMutation.isPending &&
                   retryMutation.variables === job.id ? (
@@ -157,6 +167,34 @@ export default function DeadLetterQueuePage() {
           ))}
         </div>
       )}
+
+      <ConfirmDialog
+        open={jobToRetry !== null}
+        title="Retry failed DLQ job?"
+        description={
+          jobToRetry ? (
+            <>
+              Re-queueing job <strong className="font-mono">{jobToRetry.id}</strong> ({jobToRetry.type}) will reset its status to pending and re-execute it immediately in the background worker.
+            </>
+          ) : (
+            "Re-queueing this failed job will reset its status to pending and re-execute it in the background worker."
+          )
+        }
+        warning="Ensure the underlying issue has been resolved. Retrying a poison job may cause repeated failures, trigger duplicate notifications, or consume rate limits."
+        confirmLabel="Retry job"
+        cancelLabel="Cancel"
+        pending={retryMutation.isPending}
+        onConfirm={() => {
+          if (jobToRetry) {
+            retryMutation.mutate(jobToRetry.id);
+          }
+        }}
+        onCancel={() => {
+          if (!retryMutation.isPending) {
+            setJobToRetry(null);
+          }
+        }}
+      />
     </div>
   );
 }

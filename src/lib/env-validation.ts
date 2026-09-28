@@ -130,7 +130,7 @@ const envSchema = z.object({
     .url("SOROBAN_RPC_URL must be a valid URL")
     .optional(),
 
-  // Webhook secret (optional, but required if using org membership sync)
+  // Webhook secret (optional at boot, but required for org membership sync — requests are rejected if missing)
   GITHUB_WEBHOOK_SECRET: z.string().optional(),
 
   // trustbridge-action webhook secret (optional, but required for action sync verification)
