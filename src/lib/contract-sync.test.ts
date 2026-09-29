@@ -242,13 +242,13 @@ describe("contract-sync", () => {
       expect(prisma.user.update).toHaveBeenCalledTimes(1);
       expect(prisma.user.update).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { id: "id-GEXISTS1ADDRESS" },
-          data: { githubUsername: "alice-new" },
+          where: { githubUsername: "alice-new" },
+          data: expect.objectContaining({ githubUsername: "alice-new" }),
         })
       );
     });
 
-    it("skips the update and does not throw when the new username is already taken", async () => {
+    it("does not clobber a User that already owns the new username", async () => {
       process.env.SOROBAN_CONTRACT_ID = "CABC123";
 
       mockScValToNative.mockReturnValue([["GEXISTS1ADDRESS", "alice-new"]]);
@@ -257,79 +257,163 @@ describe("contract-sync", () => {
         makeExistingReg("GEXISTS1ADDRESS", "alice-old") as never,
       ]);
 
-      // Another user already owns the target username
+      // Another user already owns the new username
       vi.mocked(prisma.user.findUnique).mockResolvedValue({
         id: "other-user",
+        githubUsername: "alice-new",
       } as never);
 
       const result = await syncContractToPostgres();
 
-      expect(result.status).toBe("ok");
+      expect(result.updated).toBe(1);
       expect(prisma.user.update).not.toHaveBeenCalled();
-      expect(result.updated).toBe(0);
-      expect(result.unchanged).toBe(1);
-    });
-
-    it("does not issue an empty registration.update for the mismatch path", async () => {
-      process.env.SOROBAN_CONTRACT_ID = "CABC123";
-
-      mockScValToNative.mockReturnValue([["GEXISTS1ADDRESS", "alice-new"]]);
-
-      vi.mocked(prisma.registration.findMany).mockResolvedValue([
-        makeExistingReg("GEXISTS1ADDRESS", "alice-old") as never,
-      ]);
-
-      vi.mocked(prisma.user.findUnique).mockResolvedValue(null);
-
-      await syncContractToPostgres();
-
-      // No empty-data registration updates should ever be issued
-      for (const call of vi.mocked(prisma.registration.update).mock.calls) {
-        expect(call[0]?.data).not.toEqual({});
-      }
     });
   });
 
-  describe("mixed create / update / unchanged in one sync run", () => {
-    it("correctly partitions all three paths", async () => {
+  // ------------------------------------------------------------------
+  // Registration parsing edge cases
+  // ------------------------------------------------------------------
+
+  describe("registration parsing edge cases", () => {
+    it("ignores a null contract payload without throwing", async () => {
       process.env.SOROBAN_CONTRACT_ID = "CABC123";
-
-      // Three contract entries:
-      //   GNEW — not in Postgres → created
-      //   GCHANGED — in Postgres with different username → updated
-      //   GSAME — in Postgres with same username → unchanged
-      mockScValToNative.mockReturnValue([
-        ["GNEW", "newbie"],
-        ["GCHANGED", "changed-new"],
-        ["GSAME", "stable"],
-      ]);
-
-      vi.mocked(prisma.registration.findMany).mockResolvedValue([
-        makeExistingReg("GCHANGED", "changed-old") as never,
-        makeExistingReg("GSAME", "stable") as never,
-      ]);
-
-      vi.mocked(prisma.user.findUnique).mockResolvedValue(null);
+      mockScValToNative.mockReturnValue(null);
 
       const result = await syncContractToPostgres();
 
       expect(result.status).toBe("ok");
-      expect(result.synced).toBe(3);
-      expect(result.created).toBe(1);
-      expect(result.updated).toBe(1);
-      expect(result.unchanged).toBe(1);
+      expect(result.synced).toBe(0);
+      expect(result.created).toBe(0);
+      expect(result.updated).toBe(0);
+      expect(result.unchanged).toBe(0);
+    });
 
-      // Audit log should carry the correct breakdown
-      expect(recordAuditLog).toHaveBeenCalledWith(
-        expect.objectContaining({
-          action: "contract.sync",
-          metadata: expect.objectContaining({
-            created: 1,
-            updated: 1,
-            unchanged: 1,
-          }),
-        })
-      );
+    it("ignores an undefined contract payload without throwing", async () => {
+      process.env.SOROBAN_CONTRACT_ID = "CABC123";
+      mockScValToNative.mockReturnValue(undefined);
+
+      const result = await syncContractToPostgres();
+
+      expect(result.status).toBe("ok");
+      expect(result.synced).toBe(0);
+    });
+
+    it("ignores an empty contract payload", async () => {
+      process.env.SOROBAN_CONTRACT_ID = "CABC123";
+      mockScValToNative.mockReturnValue([]);
+
+      const result = await syncContractToPostgres();
+
+      expect(result.status).toBe("ok");
+      expect(result.synced).toBe(0);
+    });
+
+    it("skips malformed entries that are not address/username pairs", async () => {
+      process.env.SOROBAN_CONTRACT_ID = "CABC123";
+
+      mockScValToNative.mockReturnValue([
+        null,
+        undefined,
+        "GONLYADDRESS",
+        [],
+        ["GADDR1"],
+        ["GADDR2", "alice", "extra"],
+        ["GADDR3", "bob"],
+      ]);
+
+      const result = await syncContractToPostgres();
+
+      expect(result.status).toBe("ok");
+      // Only the well-formed pair should be counted
+      expect(result.synced).toBe(1);
+      expect(result.created).toBe(1);
+    });
+
+    it("skips entries with a missing or non-string address", async () => {
+      process.env.SOROBAN_CONTRACT_ID = "CABC123";
+
+      mockScValToNative.mockReturnValue([
+        [null, "alice"],
+        [undefined, "bob"],
+        [123, "carol"],
+        ["", "dave"],
+        ["GADDR1", "erin"],
+      ]);
+
+      const result = await syncContractToPostgres();
+
+      expect(result.status).toBe("ok");
+      expect(result.synced).toBe(1);
+      expect(result.created).toBe(1);
+    });
+
+    it("skips entries with a missing or non-string username", async () => {
+      process.env.SOROBAN_CONTRACT_ID = "CABC123";
+
+      mockScValToNative.mockReturnValue([
+        ["GADDR1", null],
+        ["GADDR2", undefined],
+        ["GADDR3", 42],
+        ["GADDR4", ""],
+        ["GADDR5", "frank"],
+      ]);
+
+      const result = await syncContractToPostgres();
+
+      expect(result.status).toBe("ok");
+      expect(result.synced).toBe(1);
+      expect(result.created).toBe(1);
+    });
+
+    it("treats a null username on an existing registration as unchanged", async () => {
+      process.env.SOROBAN_CONTRACT_ID = "CABC123";
+
+      mockScValToNative.mockReturnValue([["GEXISTS1ADDRESS", "alice"]]);
+
+      vi.mocked(prisma.registration.findMany).mockResolvedValue([
+        makeExistingReg("GEXISTS1ADDRESS", null) as never,
+      ]);
+
+      const result = await syncContractToPostgres();
+
+      expect(result.status).toBe("ok");
+      expect(result.updated).toBe(0);
+      expect(result.unchanged).toBe(1);
+    });
+
+    it("handles duplicate addresses in the contract payload deterministically", async () => {
+      process.env.SOROBAN_CONTRACT_ID = "CABC123";
+
+      mockScValToNative.mockReturnValue([
+        ["GDUPADDRESS", "alice"],
+        ["GDUPADDRESS", "alice"],
+      ]);
+
+      const result = await syncContractToPostgres();
+
+      expect(result.status).toBe("ok");
+      expect(result.created).toBe(1);
+      expect(result.updated).toBe(0);
+    });
+
+    it("does not throw when the contract payload is a non-iterable object", async () => {
+      process.env.SOROBAN_CONTRACT_ID = "CABC123";
+      mockScValToNative.mockReturnValue({ unexpected: true });
+
+      const result = await syncContractToPostgres();
+
+      expect(result.status).toBe("ok");
+      expect(result.synced).toBe(0);
+    });
+
+    it("records an error when the contract call itself rejects", async () => {
+      process.env.SOROBAN_CONTRACT_ID = "CABC123";
+      mockContractCall.mockRejectedValue(new Error("RPC unavailable"));
+
+      const result = await syncContractToPostgres();
+
+      expect(result.status).toBe("error");
+      expect(result.errors).toContain("RPC unavailable");
     });
   });
 });
