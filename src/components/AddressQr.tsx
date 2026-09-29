@@ -98,7 +98,7 @@ export function AddressQr({ address, className }: AddressQrProps) {
         alt={`QR code for Stellar address ${normalized}`}
         className="h-40 w-40"
       />
-      <figcaption className="max-w-[10rem] break-all font-mono text-[10px] text-zinc-700">
+      <figcaption className="max-w-[10rem] break-all font-mono text-[10px] text-zinc-700 dark:text-zinc-300">
         {normalized}
       </figcaption>
     </figure>
