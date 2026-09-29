@@ -77,7 +77,7 @@ jobs:
       - name: Unit & API tests
         run: npm test
 
-      - name: Build
+      - name: Next build
         run: npm run build
         env:
           # Provide stub values so env-validation passes at build time without

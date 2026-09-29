@@ -1,12 +1,11 @@
 import { notFound } from "next/navigation";
-import { CheckCircle2, Clock, XCircle, AlertTriangle } from "lucide-react";
+import { Clock } from "lucide-react";
 import type { Metadata } from "next";
 
 import { prisma } from "@/lib/prisma";
 import { computeReadiness } from "@/lib/readiness";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
-import type { ReadinessStatus } from "@/types";
+import { TrustlineStatusBadge } from "@/components/TrustlineStatusBadge";
 
 export const dynamic = "force-dynamic";
 
@@ -19,31 +18,6 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
     title: `${params.username} — TrustBridge`,
     description: `TrustBridge readiness profile for @${params.username}`,
   };
-}
-
-function ReadinessBadge({ status }: { status: ReadinessStatus }) {
-  if (status === "ready") {
-    return (
-      <Badge className="gap-1.5 bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-500/30">
-        <CheckCircle2 className="h-3.5 w-3.5" aria-hidden />
-        Ready for payout
-      </Badge>
-    );
-  }
-  if (status === "low_reserve") {
-    return (
-      <Badge className="gap-1.5 bg-amber-500/15 text-amber-600 dark:text-amber-400 border-amber-500/30">
-        <AlertTriangle className="h-3.5 w-3.5" aria-hidden />
-        Low reserve
-      </Badge>
-    );
-  }
-  return (
-    <Badge className="gap-1.5 bg-muted text-muted-foreground border-border">
-      <XCircle className="h-3.5 w-3.5" aria-hidden />
-      Not ready
-    </Badge>
-  );
 }
 
 export default async function PublicProfilePage({ params }: Props) {
@@ -104,7 +78,7 @@ export default async function PublicProfilePage({ params }: Props) {
         <CardContent className="space-y-4">
           <div className="flex items-center justify-between">
             <span className="text-sm text-muted-foreground">Readiness</span>
-            <ReadinessBadge status={readiness} />
+            <TrustlineStatusBadge status={readiness} />
           </div>
 
           {reg.showStellarAddress && (

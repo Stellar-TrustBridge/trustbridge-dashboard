@@ -23,6 +23,11 @@ vi.mock("@/lib/audit", () => ({
 
 import { prisma } from "@/lib/prisma";
 import { recordAuditLog } from "@/lib/audit";
+import { captureException } from "@/lib/sentry";
+
+vi.mock("@/lib/sentry", () => ({
+  captureException: vi.fn(),
+}));
 
 const WEBHOOK_SECRET = "test-secret-123";
 
@@ -281,6 +286,13 @@ describe("POST /api/webhooks/github-org-membership", () => {
     expect(res.status).toBe(202);
     const json = await res.json();
     expect(json.status).toBe("error");
+    expect(captureException).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({
+        route: "/api/webhooks/github-org-membership",
+        method: "POST",
+      })
+    );
   });
 
   it("valid webhook with correct signature", async () => {
