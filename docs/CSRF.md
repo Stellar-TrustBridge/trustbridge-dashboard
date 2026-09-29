@@ -20,13 +20,23 @@ Because the application uses **cookie-based session authentication** (NextAuth J
 
 ## Protected routes
 
+Every mutating route handler under `src/app/api/` calls `assertSameOrigin` from `src/lib/csrf.ts` before any downstream logic. The table below lists all mutating (non-safe) API routes and their CSRF protection status, followed by the read-only routes for completeness.
+
+### Mutating routes (CSRF-checked)
+
 | Route | Method | Protected |
 |-------|--------|-----------|
 | `/api/check` | POST | Yes |
 | `/api/register` | POST | Yes |
 | `/api/contributors` | POST | Yes |
 | `/api/contributors/[id]` | POST | Yes |
-| `/api/auth/[...nextauth]` | GET/POST | No (handled by NextAuth internal CSRF) |
+| `/api/auth/[...nextauth]` | POST | No (handled by NextAuth internal CSRF) |
+
+### Read-only routes (safe methods)
+
+| Route | Method | Protected |
+|-------|--------|-----------|
+| `/api/auth/[...nextauth]` | GET | No (handled by NextAuth internal CSRF) |
 | `/api/stats` | GET | No (read-only, safe method) |
 | `/api/contributors` | GET | No (read-only, auth already enforced) |
 | `/api/contributors/[id]` | GET | No (read-only, auth already enforced) |

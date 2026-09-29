@@ -1,6 +1,6 @@
 import "server-only";
 
-import { rpc, scValToNative, Contract } from "stellar-sdk";
+import { rpc, scValToNative, Contract, TransactionBuilder, Account, Networks, nativeToScVal, xdr } from "stellar-sdk";
 
 import { recordAuditLog } from "@/lib/audit";
 import { StructuredLogger } from "@/lib/logger";
@@ -36,9 +36,97 @@ function getSorobanRpcUrl(): string {
   return process.env.SOROBAN_RPC_URL?.trim() || "https://soroban-testnet.stellar.org";
 }
 
+function getNetworkPassphrase(): string {
+  return process.env.SOROBAN_NETWORK_PASSPHRASE?.trim() || Networks.TESTNET;
+}
+
 interface ContractRegistration {
   stellarAddress: string;
   githubUsername?: string;
+}
+
+/**
+ * Parse the native value returned by `get_registered_paginated` into a list
+ * of contract registrations.
+ *
+ * The contract may return a Vec of tuples/arrays, a Vec of plain address
+ * strings, or a mix of both. Malformed entries (null, non-string addresses,
+ * empty addresses, unexpected shapes) are skipped rather than throwing so a
+ * single bad row can't abort the whole sync.
+ */
+export function parseContractRegistrations(native: unknown): ContractRegistration[] {
+  if (!Array.isArray(native)) {
+    return [];
+  }
+
+  const registrations: ContractRegistration[] = [];
+
+  for (const item of native) {
+    if (Array.isArray(item)) {
+      const address = item[0];
+      if (typeof address !== "string" || address.length === 0) {
+        continue;
+      }
+      const username = item.length > 1 ? item[1] : undefined;
+      registrations.push({
+        stellarAddress: address,
+        githubUsername:
+          typeof username === "string" && username.length > 0
+            ? username
+            : undefined,
+      });
+    } else if (typeof item === "string" && item.length > 0) {
+      registrations.push({ stellarAddress: item });
+    }
+  }
+
+  return registrations;
+}
+
+/**
+ * Read a Soroban contract function via RPC `simulateTransaction`.
+ *
+ * Soroban contract reads are not plain RPC calls — they must be simulated
+ * against a recent ledger so the host can execute the contract and return
+ * the result. We build a read-only transaction from a throwaway source
+ * account, simulate it, and decode the returned ScVal.
+ */
+async function simulateContractRead(
+  contractId: string,
+  method: string,
+  args: xdr.ScVal[] = []
+): Promise<unknown> {
+  const server = new rpc.Server(getSorobanRpcUrl());
+  const contract = new Contract(contractId);
+
+  // A read-only simulation does not need a funded account; any valid
+  // account id works as the transaction source.
+  const source = new Account(
+    "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+    "0"
+  );
+
+  const tx = new TransactionBuilder(source, {
+    fee: "100",
+    networkPassphrase: getNetworkPassphrase(),
+  })
+    .addOperation(contract.call(method, ...args))
+    .setTimeout(30)
+    .build();
+
+  const simulation = await server.simulateTransaction(tx);
+
+  if (rpc.Api.isSimulationError(simulation)) {
+    throw new Error(simulation.error);
+  }
+
+  const result = (simulation as rpc.Api.SimulateTransactionSuccessResponse)
+    .result;
+  if (!result) {
+    return undefined;
+  }
+
+  return scValToNative(result.retval);
 }
 
 /**
@@ -55,33 +143,15 @@ async function fetchContractRegistrations(): Promise<{
   }
 
   try {
-    void new rpc.Server(getSorobanRpcUrl());
-    const contract = new Contract(contractId);
+    // Fetch all registrations using get_registered_paginated via RPC simulate.
+    // The contract should return a list of (stellarAddress, githubUsername) tuples.
+    const native = await simulateContractRead(
+      contractId,
+      "get_registered_paginated",
+      [nativeToScVal(0, { type: "u32" }), nativeToScVal(100, { type: "u32" })]
+    );
 
-    // Fetch all registrations using get_registered_paginated
-    // The contract should return a list of (stellarAddress, githubUsername) tuples
-    const result = await contract.call("get_registered_paginated");
-
-    const registrations: ContractRegistration[] = [];
-
-    // Parse the result — assume it returns a Vec of structs or tuples
-    if (result && typeof result === "object") {
-      const native = scValToNative(result as never);
-      if (Array.isArray(native)) {
-        for (const item of native) {
-          if (Array.isArray(item) && item.length >= 1) {
-            registrations.push({
-              stellarAddress: item[0] as string,
-              githubUsername: item.length > 1 ? (item[1] as string) : undefined,
-            });
-          } else if (typeof item === "string") {
-            registrations.push({ stellarAddress: item });
-          }
-        }
-      }
-    }
-
-    return { registrations, errors: [] };
+    return { registrations: parseContractRegistrations(native), errors: [] };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown Soroban error";
     return { registrations: [], errors: [`Soroban RPC error: ${message}`] };
@@ -211,82 +281,59 @@ export async function syncContractToPostgres(): Promise<ContractSyncResult> {
   logger.info("sync_started", { startedAt });
 
   try {
-    // Step 1: Fetch registrations from contract
-    const { registrations: contractRegistrations, errors: fetchErrors } =
-      await fetchContractRegistrations();
+    const { registrations, errors } = await fetchContractRegistrations();
 
-    if (fetchErrors.length > 0) {
-      logger.warn("sync_fetch_errors", { errors: fetchErrors });
+    if (errors.length > 0) {
+      const durationMs = Date.now() - now;
+      lastResult = {
+        status: "error",
+        startedAt,
+        durationMs,
+        errors,
+      };
+      logger.error("sync_failed", { errors });
+      return lastResult;
     }
 
-    // Step 2: Sync into Postgres
     const { created, updated, unchanged } = await syncContractRegistrations(
-      contractRegistrations
+      registrations
     );
 
     const durationMs = Date.now() - now;
-    const synced = contractRegistrations.length;
-
-    logger.info("sync_completed", {
-      synced,
-      created,
-      updated,
-      unchanged,
-      fetchErrors: fetchErrors.length,
-      durationMs,
-    });
-
-    await recordAuditLog({
-      action: "contract.sync",
-      metadata: {
-        synced,
-        created,
-        updated,
-        unchanged,
-        fetchErrors: fetchErrors.length,
-      },
-    });
-
     lastResult = {
-      status: fetchErrors.length > 0 ? "error" : "ok",
+      status: "ok",
       startedAt,
       durationMs,
-      synced,
+      synced: registrations.length,
       created,
       updated,
       unchanged,
-      errors: fetchErrors.length > 0 ? fetchErrors : undefined,
     };
+    logger.info("sync_completed", {
+      synced: registrations.length,
+      created,
+      updated,
+      unchanged,
+      durationMs,
+    });
     return lastResult;
   } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown sync error";
     const durationMs = Date.now() - now;
-    const message =
-      error instanceof Error ? error.message : "Unknown sync error";
-
-    logger.error("sync_failed", { error: message, durationMs });
-
-    await recordAuditLog({
-      action: "contract.sync",
-      metadata: { error: message },
-    });
-
     lastResult = {
       status: "error",
       startedAt,
       durationMs,
       errors: [message],
     };
+    logger.error("sync_failed", { error: message });
     return lastResult;
   }
 }
 
-/** Last sync outcome, for the health endpoint. Never triggers a new run. */
-export function getContractSyncHealth(): ContractSyncResult | null {
+/**
+ * Returns the most recent sync result, if any.
+ */
+export function getLastContractSyncResult(): ContractSyncResult | null {
   return lastResult;
-}
-
-/** Test-only: reset in-memory rate-limit/health state between test runs. */
-export function resetContractSyncState(): void {
-  lastRunAt = null;
-  lastResult = null;
 }

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { buildStatsCacheHeaders, parseStatsCacheTtl } from "@/lib/cache";
 import { getDashboardStats } from "@/lib/registrations";
+import { publicOptionsResponse, withPublicCors } from "@/lib/public-cors";
 import {
   checkRateLimit,
   extractClientIp,
@@ -66,6 +67,13 @@ export async function GET(request: NextRequest) {
   const stats = await getDashboardStats();
   const ttlMs = parseStatsCacheTtl();
 
+  return withPublicCors(NextResponse.json(stats, {
+    headers: buildStatsCacheHeaders(ttlMs),
+  }));
+}
+
+export function OPTIONS() {
+  return publicOptionsResponse("GET, OPTIONS");
   return NextResponse.json(stats, {
     headers: {
       ...buildStatsCacheHeaders(ttlMs),

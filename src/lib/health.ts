@@ -6,7 +6,7 @@
  * preview/production and adds an unnecessary HTTP hop). (#308)
  *
  * The API route at `src/app/api/health/route.ts` also calls `runHealthChecks`
- * so both paths stay in sync.
+ * so both paths stay in sync. (#403)
  */
 
 import { getContractSyncHealth } from "@/lib/contract-sync";
@@ -37,6 +37,14 @@ export interface HealthResponse {
     };
   };
   version: string;
+}
+
+/**
+ * HTTP status code that should accompany a given overall health status.
+ * Shared so the API route and any other consumer agree on the mapping.
+ */
+export function healthStatusCode(status: HealthStatus): number {
+  return status === "error" ? 503 : 200;
 }
 
 /** Probe Horizon by hitting /fee_stats — lightweight, no auth, always available. */

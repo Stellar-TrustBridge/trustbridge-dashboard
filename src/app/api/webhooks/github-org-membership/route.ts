@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { prisma } from "@/lib/prisma";
 import { recordAuditLog } from "@/lib/audit";
+import { captureException } from "@/lib/sentry";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -165,6 +166,10 @@ export async function POST(request: NextRequest) {
       { status: 202 },
     );
   } catch (error) {
+    captureException(error, {
+      route: "/api/webhooks/github-org-membership",
+      method: "POST",
+    });
     const message =
       error instanceof Error ? error.message : "Webhook processing failed";
     console.error("Webhook error:", message);

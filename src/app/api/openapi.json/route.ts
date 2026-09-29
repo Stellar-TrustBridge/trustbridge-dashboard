@@ -1,4 +1,5 @@
 import { generateOpenAPISpec, validateOpenAPISpec } from "@/lib/openapi-spec";
+import { publicOptionsResponse, withPublicCors } from "@/lib/public-cors";
 
 /**
  * GET /api/openapi.json
@@ -14,19 +15,23 @@ export async function GET(request: Request): Promise<Response> {
   const validation = validateOpenAPISpec(spec);
 
   if (!validation.valid) {
-    return Response.json(
+    return withPublicCors(Response.json(
       {
         error: "OpenAPI spec generation failed",
         details: validation.errors,
       },
       { status: 500 }
-    );
+    ));
   }
 
-  return Response.json(spec, {
+  return withPublicCors(Response.json(spec, {
     headers: {
       "Content-Type": "application/json",
       "Cache-Control": "public, max-age=3600",
     },
-  });
+  }));
+}
+
+export function OPTIONS() {
+  return publicOptionsResponse("GET, OPTIONS");
 }

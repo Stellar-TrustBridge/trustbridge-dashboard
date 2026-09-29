@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { isUserBanned, banContributor, unbanContributor } from "./ban-service";
+import { describe, it, expect, beforeEach, vi } from "vitest";
+import { isUserBanned, banContributor, unbanContributor } from "@/lib/ban-service";
 import { prisma } from "@/lib/prisma";
 import { recordAuditLog } from "@/lib/audit";
 
