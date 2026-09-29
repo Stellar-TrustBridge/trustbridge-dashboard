@@ -52,17 +52,45 @@ describe("VerifiedBadge", () => {
   });
 
   describe("Compact mode", () => {
-    it("renders compact badge without text", () => {
+    it("renders compact badge without visible text", () => {
       render(<VerifiedBadge verified={true} compact={true} />);
 
       expect(screen.queryByText("Verified")).not.toBeInTheDocument();
     });
 
-    it("renders icon only in compact mode", () => {
+    it("renders icon only (visually) in compact mode", () => {
       const { container } = render(<VerifiedBadge verified={true} compact={true} />);
 
       const icon = container.querySelector("svg");
       expect(icon).toBeInTheDocument();
+    });
+
+    it("exposes accessible name via aria-label when compact and verified", () => {
+      const { container } = render(<VerifiedBadge verified={true} compact={true} />);
+
+      const badge = container.firstChild as HTMLElement;
+      expect(badge.getAttribute("aria-label")).toContain("On-chain verified");
+    });
+
+    it("exposes accessible name via aria-label when compact and unverified", () => {
+      const { container } = render(<VerifiedBadge verified={false} compact={true} />);
+
+      const badge = container.firstChild as HTMLElement;
+      expect(badge.getAttribute("aria-label")).toContain("Not yet verified");
+    });
+
+    it("includes visually-hidden sr-only text when compact and verified", () => {
+      render(<VerifiedBadge verified={true} compact={true} />);
+
+      const srText = screen.getByText("On-chain verified: funded with an authorized trustline");
+      expect(srText).toHaveClass("sr-only");
+    });
+
+    it("includes visually-hidden sr-only text when compact and unverified", () => {
+      render(<VerifiedBadge verified={false} compact={true} />);
+
+      const srText = screen.getByText("Not yet verified on-chain");
+      expect(srText).toHaveClass("sr-only");
     });
   });
 
