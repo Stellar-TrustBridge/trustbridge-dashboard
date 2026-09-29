@@ -6,6 +6,7 @@ import {
   syncContractToPostgres,
 } from "@/lib/contract-sync";
 import { assertSameOrigin } from "@/lib/csrf";
+import { publicOptionsResponse, withPublicCors } from "@/lib/public-cors";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -40,5 +41,9 @@ export async function POST(request: NextRequest) {
  * Unauthenticated (no contributor PII — same posture as `/api/health`).
  */
 export async function GET() {
-  return NextResponse.json({ lastRun: getContractSyncHealth() });
+  return withPublicCors(NextResponse.json({ lastRun: getContractSyncHealth() }));
+}
+
+export function OPTIONS() {
+  return publicOptionsResponse("GET, OPTIONS");
 }

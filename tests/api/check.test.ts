@@ -147,6 +147,7 @@ describe("POST /api/check", () => {
     expect(json.funded).toBe(true);
     expect(json.readiness).toBe("ready");
     expect(checkStellarAddress).toHaveBeenCalledTimes(1);
+    expect(res.headers.get("access-control-allow-origin")).toBe("*");
   });
 
   it("returns 200 with not-ready state when circuit breaker is open", async () => {
@@ -310,3 +311,4 @@ describe("POST /api/check", () => {
     expect(res.status).toBe(500);
   });
 });
+

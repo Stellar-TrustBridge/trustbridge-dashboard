@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 
 import { requireMaintainerSession } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
@@ -6,26 +6,72 @@ import { prisma } from "@/lib/prisma";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+const DEFAULT_LIMIT = 25;
+const MAX_LIMIT = 100;
+
 /**
- * GET /api/registrations/deleted
+ * GET /api/registrations/deleted — list soft-deleted registrations (maintainers only).
  *
- * Returns the 50 most recently soft-deleted registrations so maintainers can
- * find and restore accidentally deleted rows. Maintainer session required.
+ * Query params:
+ * - limit: number of items per page (default: 25, max: 100)
+ * - cursor: opaque cursor from a previous page's `nextCursor`
+ *
+ * Returns only registrations where `deletedAt` is not null.
  */
-export async function GET() {
+export async function GET(request: NextRequest) {
   const session = await requireMaintainerSession();
   if (!session) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  const deleted = await prisma.registration.findMany({
+  const searchParams = request.nextUrl.searchParams;
+  const limitParam = searchParams.get("limit");
+  const cursor = searchParams.get("cursor") ?? undefined;
+
+  let limit = DEFAULT_LIMIT;
+  if (limitParam) {
+    const parsed = parseInt(limitParam, 10);
+    if (!isNaN(parsed) && parsed > 0 && parsed <= MAX_LIMIT) {
+      limit = parsed;
+    }
+  }
+
+  const { encodeCursor, decodeCursor } = await import("@/lib/cursor-pagination");
+
+  const decodedCursor = cursor ? decodeCursor(cursor) : null;
+
+  const registrations = await prisma.registration.findMany({
     where: { deletedAt: { not: null } },
-    orderBy: { deletedAt: "desc" },
-    take: 50,
     include: {
-      user: { select: { githubUsername: true, githubAvatarUrl: true } },
+      user: {
+        select: { githubUsername: true },
+      },
     },
+    orderBy: { deletedAt: "desc" },
+    ...(decodedCursor && {
+      skip: 1,
+      cursor: { id: decodedCursor },
+    }),
+    take: limit + 1,
   });
 
-  return NextResponse.json({ registrations: deleted });
+  const hasMore = registrations.length > limit;
+  const pageData = registrations.slice(0, limit);
+  const nextCursor = hasMore
+    ? encodeCursor(pageData[pageData.length - 1].id)
+    : null;
+
+  return NextResponse.json({
+    registrations: pageData.map((reg) => ({
+      id: reg.id,
+      stellarAddress: reg.stellarAddress,
+      userId: reg.userId,
+      githubUsername: reg.user?.githubUsername ?? null,
+      deletedAt: reg.deletedAt,
+      createdAt: reg.createdAt,
+      updatedAt: reg.updatedAt,
+    })),
+    hasMore,
+    nextCursor: nextCursor ?? undefined,
+  });
 }

@@ -1,5 +1,10 @@
 import { NextResponse } from "next/server";
 
+import { getContractSyncHealth } from "@/lib/contract-sync";
+import { prisma } from "@/lib/prisma";
+import { buildStalenessSummary } from "@/lib/stale-export";
+import { toContributorRow } from "@/lib/registrations";
+import { publicOptionsResponse, withPublicCors } from "@/lib/public-cors";
 import { runHealthChecks } from "@/lib/health";
 export type { HealthStatus, HealthResponse } from "@/lib/health";
 
@@ -35,5 +40,13 @@ export async function GET() {
     headers: {
       "Cache-Control": "public, max-age=30, stale-while-revalidate=60",
     },
+    version,
+  };
+
+  return withPublicCors(NextResponse.json(body, { status: 200 }));
+}
+
+export function OPTIONS() {
+  return publicOptionsResponse("GET, OPTIONS");
   });
 }

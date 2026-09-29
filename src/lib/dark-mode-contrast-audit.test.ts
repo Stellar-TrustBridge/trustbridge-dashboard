@@ -511,3 +511,42 @@ describe("WCAG AA: metrics operational-config rows (issue #153)", () => {
     expect(ratio).toBeGreaterThanOrEqual(NORMAL_TEXT_MIN);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #305 — AddressQr figcaption dark-mode contrast
+// ---------------------------------------------------------------------------
+
+describe("WCAG AA: AddressQr figcaption caption contrast (issue #305)", () => {
+  const NORMAL_TEXT_MIN = 4.5;
+
+  // The QR figure always has bg-white for scanner legibility.
+  // The caption sits outside the white box background (below the image),
+  // so it is rendered on whatever the surrounding surface is.
+
+  // Light mode: text-zinc-700 on white page background
+  const ZINC_700: [number, number, number] = [240, 3.7, 32.9];
+
+  it("light mode — zinc-700 caption on white background meets AA normal-text", () => {
+    const ratio = r2(contrastRatio(ZINC_700, WHITE));
+    expect(ratio).toBeGreaterThanOrEqual(NORMAL_TEXT_MIN);
+  });
+
+  // Dark mode fix: dark:text-zinc-300 on dark card background
+  const ZINC_300: [number, number, number] = [212, 12, 76];
+
+  it("dark mode — zinc-300 caption on dark card background meets AA normal-text", () => {
+    const ratio = r2(contrastRatio(ZINC_300, DARK_CARD));
+    expect(ratio).toBeGreaterThanOrEqual(NORMAL_TEXT_MIN);
+  });
+
+  it("dark mode — zinc-300 caption on dark page background meets AA normal-text", () => {
+    const ratio = r2(contrastRatio(ZINC_300, DARK_BG));
+    expect(ratio).toBeGreaterThanOrEqual(NORMAL_TEXT_MIN);
+  });
+
+  it("PRE-FIX: zinc-700 caption on dark card was below AA (regression guard)", () => {
+    // Documents the original failing state — zinc-700 on the dark card is too dark.
+    const ratio = r2(contrastRatio(ZINC_700, DARK_CARD));
+    expect(ratio).toBeLessThan(NORMAL_TEXT_MIN);
+  });
+});

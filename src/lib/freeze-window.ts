@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { recordAuditLog } from "@/lib/audit";
+import { isFeatureEnabled } from "@/lib/feature-flags";
 
 export interface FreezeWindowStatus {
   active: boolean;
@@ -65,6 +66,11 @@ export async function enforceFreezeWindowGuard({
   userLogin?: string | null;
   actionLabel?: string;
 }): Promise<{ blocked: boolean; response?: NextResponse; isOverride: boolean }> {
+  const flagEnabled = await isFeatureEnabled("freeze_window");
+  if (!flagEnabled) {
+    return { blocked: false, isOverride: false };
+  }
+
   const status = isFreezeWindowActive();
   if (!status.active) {
     return { blocked: false, isOverride: false };

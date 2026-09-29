@@ -10,6 +10,15 @@
 
 import { describe, it, expect, vi, afterEach } from "vitest";
 
+vi.mock("posthog-js", () => ({
+  default: {
+    init: vi.fn(),
+    capture: vi.fn(),
+    identify: vi.fn(),
+    reset: vi.fn(),
+  },
+}));
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -191,5 +200,53 @@ describe("analytics — adapter selection guards", () => {
     expect(typeof analytics.trackRecheckCompleted).toBe("function");
     expect(typeof analytics.identifyUser).toBe("function");
     expect(typeof analytics.resetAnalytics).toBe("function");
+  });
+
+  it("selects the console adapter in development when no browser key is configured", async () => {
+    const originalNodeEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = "development";
+    delete process.env.NEXT_PUBLIC_POSTHOG_API_KEY;
+    vi.stubGlobal("window", {});
+    vi.resetModules();
+
+    const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { trackRegistrationCreated } = await import("@/lib/analytics");
+    trackRegistrationCreated({ userId: "development-user" });
+
+    expect(consoleSpy).toHaveBeenCalledWith(
+      "[Analytics] registration_created",
+      { userId: "development-user" }
+    );
+
+    consoleSpy.mockRestore();
+    vi.unstubAllGlobals();
+    process.env.NODE_ENV = originalNodeEnv;
+  });
+
+  it("selects PostHog in the browser when a key is configured", async () => {
+    const originalNodeEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = "production";
+    process.env.NEXT_PUBLIC_POSTHOG_API_KEY = "test-key";
+    vi.stubGlobal("window", {});
+    vi.resetModules();
+
+    const posthog = await import("posthog-js");
+    const { trackRegistrationCreated } = await import("@/lib/analytics");
+    trackRegistrationCreated({ userId: "posthog-user" });
+
+    await vi.waitFor(() => {
+      expect(posthog.default.init).toHaveBeenCalledWith(
+        "test-key",
+        expect.objectContaining({ autocapture: false })
+      );
+      expect(posthog.default.capture).toHaveBeenCalledWith(
+        "registration_created",
+        { userId: "posthog-user" }
+      );
+    });
+
+    delete process.env.NEXT_PUBLIC_POSTHOG_API_KEY;
+    vi.unstubAllGlobals();
+    process.env.NODE_ENV = originalNodeEnv;
   });
 });

@@ -27,14 +27,35 @@ export function DisputePanel({ contributors }: DisputePanelProps) {
   const [registrationId, setRegistrationId] = useState(contributors[0]?.id ?? "");
   const [reason, setReason] = useState("");
   const [proofCid, setProofCid] = useState("");
+  const [allDisputes, setAllDisputes] = useState<Dispute[]>([]);
+  const [nextCursor, setNextCursor] = useState<string | undefined>(undefined);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+
   const disputesQuery = useQuery({
     queryKey: ["disputes"],
     queryFn: async () => {
       const response = await fetch("/api/disputes");
       if (!response.ok) throw new Error("Failed to load disputes");
-      return (await response.json()) as { disputes: Dispute[] };
+      const data = (await response.json()) as { disputes: Dispute[]; hasMore: boolean; nextCursor?: string };
+      setAllDisputes(data.disputes);
+      setNextCursor(data.nextCursor);
+      return data;
     },
   });
+
+  const loadMore = async () => {
+    if (!nextCursor || isLoadingMore) return;
+    setIsLoadingMore(true);
+    try {
+      const response = await fetch(`/api/disputes?cursor=${encodeURIComponent(nextCursor)}`);
+      if (!response.ok) throw new Error("Failed to load more disputes");
+      const data = (await response.json()) as { disputes: Dispute[]; hasMore: boolean; nextCursor?: string };
+      setAllDisputes((prev) => [...prev, ...data.disputes]);
+      setNextCursor(data.nextCursor);
+    } finally {
+      setIsLoadingMore(false);
+    }
+  };
   const createMutation = useMutation({
     mutationFn: async () => {
       const response = await fetch("/api/disputes", {
@@ -84,7 +105,7 @@ export function DisputePanel({ contributors }: DisputePanelProps) {
         </form>
         {createMutation.isError && <p role="alert" className="text-sm text-destructive">{createMutation.error.message}</p>}
         <ul className="space-y-2 text-sm" aria-live="polite">
-          {(disputesQuery.data?.disputes ?? []).map((dispute) => <li key={dispute.id} className="rounded-md border px-3 py-2">
+          {(allDisputes ?? []).map((dispute) => <li key={dispute.id} className="rounded-md border px-3 py-2">
             <div className="flex items-start justify-between gap-2 mb-2">
               <div>
                 <span className="font-medium">{dispute.status}</span> <span className="text-muted-foreground">for {dispute.registrationId}</span>
@@ -115,6 +136,20 @@ export function DisputePanel({ contributors }: DisputePanelProps) {
             <p>{dispute.reason}</p>
           </li>)}
         </ul>
+        {nextCursor && (
+          <div className="flex justify-center pt-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={loadMore}
+              disabled={isLoadingMore}
+            >
+              {isLoadingMore ? "Loading..." : "Load more"}
+            </Button>
+          </div>
+        )}
+        {resolveMutation.isError && <p className="text-sm text-destructive">{resolveMutation.error.message}</p>}
         {resolveMutation.isError && <p role="alert" className="text-sm text-destructive">{resolveMutation.error.message}</p>}
       </CardContent>
     </Card>

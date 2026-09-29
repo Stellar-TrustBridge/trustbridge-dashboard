@@ -20,14 +20,29 @@ const updateSchema = z.object({
   status: z.enum(["VALIDATED", "REJECTED"]),
 });
 
+const DEFAULT_DISPUTES_LIMIT = 25;
+const MAX_DISPUTES_LIMIT = 100;
+
 export async function GET(request: NextRequest) {
   const session = await getServerSession(authOptions);
   if (!session?.user?.id) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const registrationId = request.nextUrl.searchParams.get("registrationId");
-  const status = request.nextUrl.searchParams.get("status");
+  const searchParams = request.nextUrl.searchParams;
+  const registrationId = searchParams.get("registrationId");
+  const status = searchParams.get("status");
+  const cursor = searchParams.get("cursor") ?? undefined;
+
+  const limitParam = searchParams.get("limit");
+  let limit = DEFAULT_DISPUTES_LIMIT;
+  if (limitParam) {
+    const parsed = parseInt(limitParam, 10);
+    if (!isNaN(parsed) && parsed > 0 && parsed <= MAX_DISPUTES_LIMIT) {
+      limit = parsed;
+    }
+  }
+
   const where = {
     ...(registrationId ? { registrationId } : {}),
     ...(status && ["OPEN", "VALIDATED", "REJECTED"].includes(status)
@@ -35,6 +50,10 @@ export async function GET(request: NextRequest) {
       : {}),
     ...(session.user.isMaintainer ? {} : { registration: { userId: session.user.id } }),
   };
+
+  const { encodeCursor, decodeCursor } = await import("@/lib/cursor-pagination");
+  const decodedCursor = cursor ? decodeCursor(cursor) : null;
+
   const disputes = await prisma.disputeProof.findMany({
     where,
     select: {
@@ -48,8 +67,24 @@ export async function GET(request: NextRequest) {
       resolvedAt: true,
     },
     orderBy: { createdAt: "desc" },
+    ...(decodedCursor && {
+      skip: 1,
+      cursor: { id: decodedCursor },
+    }),
+    take: limit + 1,
   });
-  return NextResponse.json({ disputes });
+
+  const hasMore = disputes.length > limit;
+  const pageData = disputes.slice(0, limit);
+  const nextCursor = hasMore
+    ? encodeCursor(pageData[pageData.length - 1].id)
+    : null;
+
+  return NextResponse.json({
+    disputes: pageData,
+    hasMore,
+    nextCursor: nextCursor ?? undefined,
+  });
 }
 
 export async function POST(request: NextRequest) {
