@@ -25,6 +25,10 @@ vi.mock("@/lib/api-auth", () => ({
   requireOperator: vi.fn(),
 }));
 
+vi.mock("@/lib/readiness", () => ({
+  computeReadiness: vi.fn(),
+}));
+
 vi.mock("@/lib/csrf", () => ({
   assertSameOrigin: vi.fn(),
 }));
@@ -37,10 +41,6 @@ vi.mock("@/lib/prisma", () => ({
   },
 }));
 
-vi.mock("@/lib/readiness", () => ({
-  computeReadiness: vi.fn(),
-}));
-
 vi.mock("@/lib/audit", () => ({
   recordAuditLog: vi.fn(),
 }));
@@ -49,6 +49,7 @@ import { GET, POST } from "@/app/api/treasury/export/route";
 import { requireOperator } from "@/lib/api-auth";
 import { assertSameOrigin } from "@/lib/csrf";
 import { prisma } from "@/lib/prisma";
+import { computeReadiness } from "@/lib/readiness";
 import { computeReadiness } from "@/lib/readiness";
 import { recordAuditLog } from "@/lib/audit";
 
@@ -78,6 +79,7 @@ const twoRegistrations = [
     xlmBalance: "100",
     spendableXlmBalance: "50",
     lastCheckedAt: new Date("2026-07-26"),
+    lastCheckedAt: new Date("2026-07-26"),
     deletedAt: null,
     user: { githubUsername: "contributor1" },
   },
@@ -91,6 +93,7 @@ const twoRegistrations = [
     xlmBalance: "0",
     spendableXlmBalance: "0",
     lastCheckedAt: new Date("2026-07-26"),
+    lastCheckedAt: new Date("2026-07-26"),
     deletedAt: null,
     user: { githubUsername: "contributor2" },
   },
@@ -99,6 +102,7 @@ const twoRegistrations = [
 function makePostRequest(body: unknown, origin = "http://localhost:3000"): NextRequest {
   return new NextRequest("http://localhost:3000/api/treasury/export", {
     method: "POST",
+    headers: {
     headers: {
       host: "localhost:3000",
       origin,
@@ -115,6 +119,7 @@ function makePostRequest(body: unknown, origin = "http://localhost:3000"): NextR
 describe("GET /api/treasury/export", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(assertSameOrigin).mockReturnValue(null);
     vi.mocked(assertSameOrigin).mockReturnValue(null);
   });
 
@@ -211,6 +216,7 @@ describe("GET /api/treasury/export", () => {
 describe("POST /api/treasury/export", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(assertSameOrigin).mockReturnValue(null);
     vi.mocked(assertSameOrigin).mockReturnValue(null);
   });
 

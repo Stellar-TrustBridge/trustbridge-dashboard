@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
+import { getServerSession } from "next-auth";
+import { authOptions } from "@/lib/auth";
 import { requireOperator } from "@/lib/api-auth";
 import { assertSameOrigin } from "@/lib/csrf";
 import { prisma } from "@/lib/prisma";
@@ -264,7 +266,7 @@ export async function POST(request: NextRequest) {
       status: 200,
       headers: {
         "Content-Type": "text/csv",
-        "Content-Disposition": `attachment; filename="treasury-export-${new Date().toISOString().split("T")[0]}.csv"`,
+        "Content-Disposition": `attachment; filename="treasury-export-${new Date().toISOString().split("T")[0]}.csv",
       },
     });
   }
