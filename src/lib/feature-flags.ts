@@ -139,6 +139,22 @@ async function readDbFlags(): Promise<Map<string, boolean> | null> {
 
 export type FlagSource = "env" | "db" | "default" | "fail-closed";
 
+/**
+ * Human-readable label for a flag source, for the admin read-only panel.
+ */
+export function flagSourceLabel(source: FlagSource): string {
+  switch (source) {
+    case "env":
+      return "Environment override";
+    case "db":
+      return "Database";
+    case "default":
+      return "Built-in default";
+    case "fail-closed":
+      return "Fail-closed (DB unreadable)";
+  }
+}
+
 export interface ResolvedFlag {
   key: FeatureFlagKey;
   description: string;

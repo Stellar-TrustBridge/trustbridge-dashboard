@@ -25,6 +25,16 @@ interface AuditLogResponse {
   summary: { total: number; byAction: Record<string, number> };
 }
 
+interface FeatureFlagEntry {
+  key: string;
+  value: boolean;
+  source: string;
+}
+
+interface FeatureFlagsResponse {
+  flags: FeatureFlagEntry[];
+}
+
 export default function MaintainerSettingsPage() {
   const [replayBody, setReplayBody] = useState(`{
   "action": "added",
@@ -54,6 +64,15 @@ export default function MaintainerSettingsPage() {
       const response = await fetch("/api/audit?limit=25");
       if (!response.ok) throw new Error("Failed to load audit log");
       return (await response.json()) as AuditLogResponse;
+    },
+  });
+
+  const featureFlagsQuery = useQuery({
+    queryKey: ["feature-flags"],
+    queryFn: async () => {
+      const response = await fetch("/api/settings/feature-flags");
+      if (!response.ok) throw new Error("Failed to load feature flags");
+      return (await response.json()) as FeatureFlagsResponse;
     },
   });
 
@@ -192,6 +211,45 @@ export default function MaintainerSettingsPage() {
       <div className="mb-8">
         <RestorePanel />
       </div>
+
+      <Card className="mb-8" data-testid="feature-flags-panel">
+        <CardHeader>
+          <CardTitle>Feature flags</CardTitle>
+          <CardDescription>
+            Read-only view of resolved feature flags for this deployment.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {featureFlagsQuery.isLoading ? (
+            <div className="flex items-center justify-center py-10 text-muted-foreground">
+              <Loader2 className="mr-2 h-5 w-5 animate-spin" />
+              Loading feature flags...
+            </div>
+          ) : featureFlagsQuery.isError ? (
+            <p className="text-destructive">Failed to load feature flags.</p>
+          ) : !featureFlagsQuery.data ||
+            featureFlagsQuery.data.flags.length === 0 ? (
+            <p className="text-muted-foreground">No feature flags configured.</p>
+          ) : (
+            <ul className="divide-y divide-border">
+              {featureFlagsQuery.data.flags.map((flag) => (
+                <li
+                  key={flag.key}
+                  className="flex flex-wrap items-center justify-between gap-2 py-3 text-sm"
+                >
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="font-mono text-xs">{flag.key}</span>
+                    <Badge variant={flag.value ? "default" : "secondary"}>
+                      {flag.value ? "enabled" : "disabled"}
+                    </Badge>
+                  </div>
+                  <span className="text-muted-foreground">{flag.source}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </CardContent>
+      </Card>
 
       <Card>
         <CardHeader>
