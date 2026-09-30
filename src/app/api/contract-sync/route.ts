@@ -8,6 +8,8 @@ import {
 import { assertSameOrigin } from "@/lib/csrf";
 import { publicOptionsResponse, withPublicCors } from "@/lib/public-cors";
 
+import { captureException } from "@/lib/sentry";
+
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
@@ -29,6 +31,13 @@ export async function POST(request: NextRequest) {
   }
 
   const result = await syncContractToPostgres();
+  if (result.status === "error" || (result.errors && result.errors.length > 0)) {
+    captureException(
+      new Error(`Contract sync failed: ${result.errors?.join("; ") || "Unknown error"}`),
+      { surface: "contract-sync", errors: result.errors }
+    );
+  }
+
   return NextResponse.json(result, {
     status: result.status === "error" ? 502 : 200,
   });

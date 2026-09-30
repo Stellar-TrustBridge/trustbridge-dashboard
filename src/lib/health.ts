@@ -13,6 +13,7 @@ import { getContractSyncHealth } from "@/lib/contract-sync";
 import { prisma } from "@/lib/prisma";
 import { buildStalenessSummary } from "@/lib/stale-export";
 import { toContributorRow } from "@/lib/registrations";
+import { captureException } from "@/lib/sentry";
 
 export type HealthStatus = "ok" | "degraded" | "error";
 
@@ -109,6 +110,21 @@ export async function runHealthChecks(): Promise<HealthResponse> {
     dbLatencyMs = Date.now() - dbStart;
     dbStatus = "error";
     dbError = err instanceof Error ? err.message : "Unknown database error";
+    captureException(err, { surface: "health", check: "database" });
+  }
+
+  if (!horizonProbe.ok) {
+    captureException(new Error("Horizon health probe failed"), {
+      surface: "health",
+      check: "horizon",
+    });
+  }
+
+  if (!rpcProbe.ok) {
+    captureException(new Error("Soroban RPC health probe failed"), {
+      surface: "health",
+      check: "sorobanRpc",
+    });
   }
 
   const horizonStatus: HealthStatus = horizonProbe.ok ? "ok" : "degraded";

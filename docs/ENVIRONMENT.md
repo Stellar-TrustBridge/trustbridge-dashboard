@@ -308,6 +308,15 @@ Shared secret used to verify the authenticity of webhook payloads received from 
 - **Recommended in production.** If unset, signature verification fails and incoming webhooks are rejected with a 401 status.
 - Generate: `openssl rand -base64 32`
 
+### `BADGE_SIGNING_KEY`
+
+Secret key used for HMAC-SHA256 badge URL signing (`/api/badge/[username]?sig=...`).
+
+- **Server-only** — never expose to the browser
+- **Used by:** Badge endpoint authentication to prevent hotlink spoofing/faking of contributor readiness SVG badges
+- **Fallback:** If unset, falls back to `NEXTAUTH_SECRET` or `TOKEN_ENCRYPTION_KEY`. Throws in production if no secret is available.
+- Generate: `openssl rand -base64 32`
+
 ### `SOROBAN_SECRET_KEY`
 
 Secret key for the Soroban fee-payer account used to sign write-through transactions. Required for the `mirrorRegistrationToSoroban()` function to submit transactions to the Soroban contract.

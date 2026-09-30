@@ -15,12 +15,14 @@ const SIMULATE_SOURCE_ACCOUNT =
   "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF5";
 const SIMULATE_FEE = "100";
 
+import { resolveSorobanNetworkPassphrase } from "@/lib/network-config";
+
 function getSorobanRpcUrl(): string {
   return process.env.SOROBAN_RPC_URL?.trim() || DEFAULT_SOROBAN_RPC_URL;
 }
 
 function getSorobanNetworkPassphrase(): string {
-  return process.env.SOROBAN_NETWORK_PASSPHRASE?.trim() || Networks.TESTNET;
+  return resolveSorobanNetworkPassphrase();
 }
 
 function safeScValToNative(value: unknown): string {

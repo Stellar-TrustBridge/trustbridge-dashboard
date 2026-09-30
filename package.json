@@ -4,6 +4,7 @@
   "private": true,
   "engines": {
     "node": ">=18.17.0"
+  },
   "bin": {
     "trustbridge-dash": "./scripts/cli/index.mjs"
   },

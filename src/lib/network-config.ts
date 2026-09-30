@@ -27,6 +27,19 @@ export function resolveSorobanRpcUrl(): string {
   return process.env.SOROBAN_RPC_URL?.trim() || DEFAULT_SOROBAN_RPC_URL;
 }
 
+/**
+ * Resolves Soroban network passphrase. Returns SOROBAN_NETWORK_PASSPHRASE if explicitly set,
+ * otherwise derives default from Horizon config (mainnet -> Public Global Stellar Network, testnet -> Test SDF Network).
+ */
+export function resolveSorobanNetworkPassphrase(): string {
+  const explicit = process.env.SOROBAN_NETWORK_PASSPHRASE?.trim();
+  if (explicit) return explicit;
+  const horizonNetwork = classifyHorizonNetwork(resolveHorizonUrl());
+  return horizonNetwork === "mainnet"
+    ? "Public Global Stellar Network ; September 2015"
+    : "Test SDF Network ; September 2015";
+}
+
 /** Classify a Horizon URL by hostname. Unknown hosts are "custom". */
 export function classifyHorizonNetwork(url: string): StellarNetwork {
   const hostname = safeHostname(url);

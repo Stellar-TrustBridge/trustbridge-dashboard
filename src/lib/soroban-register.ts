@@ -61,7 +61,7 @@ export async function mirrorRegistrationToSoroban(
   // Missing secret key — log and skip without failing
   if (!secretKey) {
     const message = "SOROBAN_SECRET_KEY is not configured — write-through skipped";
-    logger.warn("Soroban write-through skipped: missing secret key", {
+    logger?.warn?.("Soroban write-through skipped: missing secret key", {
       registrationId: registration.id,
       contractId,
     });
@@ -145,7 +145,7 @@ export async function mirrorRegistrationToSoroban(
     const message =
       error instanceof Error ? error.message : "Unknown error writing to Soroban";
 
-    logger.error("Soroban write-through failed", {
+    logger?.error?.("Soroban write-through failed", {
       registrationId: registration.id,
       contractId,
       error: error instanceof Error ? error : new Error(message),
