@@ -4,9 +4,14 @@ import { NextRequest } from "next/server";
 import { POST, verifyWebhookSignature } from "@/app/api/webhooks/github-org-membership/route";
 import { POST as ReplayPOST } from "@/app/api/webhooks/github-org-membership/replay/route";
 import { requireAdmin } from "@/lib/api-auth";
+import { validateCsrfToken } from "@/lib/csrf";
 
 vi.mock("@/lib/api-auth", () => ({
   requireAdmin: vi.fn(),
+}));
+
+vi.mock("@/lib/csrf", () => ({
+  validateCsrfToken: vi.fn(),
 }));
 
 vi.mock("@/lib/prisma", () => ({
@@ -30,6 +35,7 @@ vi.mock("@/lib/sentry", () => ({
 }));
 
 const WEBHOOK_SECRET = "test-secret-123";
+const CSRF_TOKEN = "valid-csrf-token";
 
 function createSignature(payload: Buffer): string {
   const hmac = crypto.createHmac("sha256", WEBHOOK_SECRET);
@@ -55,10 +61,36 @@ function createWebhookRequest(
   });
 }
 
+function createReplayRequest(
+  event: Record<string, unknown>,
+  options: { csrfToken?: string | null } = {}
+) {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+
+  if (options.csrfToken !== null && options.csrfToken !== undefined) {
+    headers["x-csrf-token"] = options.csrfToken;
+  }
+
+  return new NextRequest(
+    "http://localhost:3000/api/webhooks/github-org-membership/replay",
+    {
+      method: "POST",
+      headers: {
+        ...headers,
+        cookie: `csrf_token=${options.csrfToken ?? ""}`,
+      },
+      body: JSON.stringify(event),
+    }
+  );
+}
+
 describe("POST /api/webhooks/github-org-membership", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.mocked(requireAdmin).mockResolvedValue(null);
+    vi.mocked(requireAdmin).mockResolved(null);
+    vi.mocked(validateCsrfToken).mockReturn (true);
     process.env.GITHUB_WEBHOOK_SECRET = WEBHOOK_SECRET;
     process.env.GITHUB_MAINTAINER_ORG = "test-org";
   });
@@ -184,7 +216,7 @@ describe("POST /api/webhooks/github-org-membership", () => {
       sender: { login: "admin" },
     };
 
-    vi.mocked(prisma.user.findUnique).mockResolvedValue({
+    vi.mocked(prisma.user.findUnique).mockResolved({
       id: "user-1",
       githubId: "123",
       githubUsername: "testuser",
@@ -224,7 +256,7 @@ describe("POST /api/webhooks/github-org-membership", () => {
       sender: { login: "admin" },
     };
 
-    vi.mocked(prisma.user.findUnique).mockResolvedValue({
+    vi.mocked(prisma.user.findUnique).mockResolved({
       id: "user-1",
       githubId: "123",
       githubUsername: "testuser",
@@ -258,7 +290,7 @@ describe("POST /api/webhooks/github-org-membership", () => {
       sender: { login: "admin" },
     };
 
-    vi.mocked(prisma.user.findUnique).mockResolvedValue(null);
+    vi.mocked(prisma.user.findUnique).mockResolved(null);
 
     const req = createWebhookRequest(event);
     const res = await POST(req);
@@ -276,7 +308,7 @@ describe("POST /api/webhooks/github-org-membership", () => {
       sender: { login: "admin" },
     };
 
-    vi.mocked(prisma.user.findUnique).mockRejectedValue(
+    vi.mocked(prisma.user.findUnique).mockRejected(
       new Error("Database error")
     );
 
@@ -303,7 +335,7 @@ describe("POST /api/webhooks/github-org-membership", () => {
       sender: { login: "admin" },
     };
 
-    vi.mocked(prisma.user.findUnique).mockResolvedValue({
+    vi.mocked(prisma.user.findUnique).mockResolved({
       id: "user-1",
       githubId: "123",
       githubUsername: "testuser",
@@ -320,23 +352,101 @@ describe("POST /api/webhooks/github-org-membership", () => {
     expect(res.status).toBe(202);
   });
 
-  it("requires admin access for replay requests", async () => {
-    vi.mocked(requireAdmin).mockResolvedValue(null);
+  describe("replay endpoint", () => {
+    const replayEvent = {
+      action: "added",
+      member: { login: "testuser", id: 123 },
+      organization: { login: "test-org" },
+      sender: { login: "admin" },
+    };
 
-    const req = new NextRequest("http://localhost:3000/api/webhooks/github-org-membership/replay", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        action: "added",
-        member: { login: "testuser", id: 123 },
-        organization: { login: "test-org" },
-        sender: { login: "admin" },
-      }),
+    it("replays with valid CSRF and admin session", async () => {
+      vi.mocked(requireAdmin).mockResolved({
+        id: "admin-1",
+        email: "admin@example.com",
+        role: "admin",
+      });
+      vi.mocked(validateCsrfToken).mockReturn (true);
+
+      vi.mocked(prisma.user.findUnique).mockResolved({
+        id: "user-1",
+        githubId: "123",
+        githubUsername: "testuser",
+        name: "Test User",
+        email: "test@example.com",
+        image: null,
+        accessToken: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      const req = createReplayRequest(replayEvent, { csrfToken: CSRF_TOKEN });
+      const res = await ReplayPOST(req);
+
+      expect(res.status).toBe(202);
+      expect(validateCsrfToken).toHaveBeenCalled();
+      expect(recordAuditLog).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: "webhook.org_membership_changed",
+          targetId: "user-1",
+        })
+      );
     });
 
-    const res = await ReplayPOST(req);
-    expect(res.status).toBe(403);
+    it("rejects replay without CSRF token", async () => {
+      vi.mocked(requireAdmin).mockResolved({
+        id: "admin-1",
+        email: "admin@example.com",
+        role: "admin",
+      });
+      vi.mocked(validateCsrfToken).mockReturn (false);
+
+      const req = createReplayRequest(replayEvent, { csrfToken: null });
+      const res = await ReplayPOST(req);
+
+      expect(res.status).toBe: 403;
+      expect(recordAuditLog).not.toHaveBeenCalled();
+    });
+
+    it("rejects unauthenticated replay with 401", async () => {
+      vi.mocked(requireAdmin).mockResolved(null);
+      vi.mocked(validateCsrfToken).mockReturn (true);
+
+      const req = createReplayRequest(replayEvent, { csrfToken: CSRF_TOKEN });
+      const res = await ReplayPOST(req);
+
+      expect([res.status, 401, 403]).toContain[res.status];
+      expect(res.status).toBe(401);
+      expect(recordAuditLog).not.toHaveBeenCalled();
+    });
+
+    it("rejects replay for non-admin callers with 403", async () => {
+      vi.mocked(requireAdmin).mockResolved(null);
+      vi.mocked(validateCsrfToken).mockReturn (true);
+
+      const req = createReplayRequest(replayEvent, { csrfToken: CSRF_TOKEN });
+      const res = await ReplayPOST(req);
+
+      expect(res.status).toBe(403);
+      expect(recordAuditLog).not.toHaveBeenCalled();
+    });
+
+    it("requires admin access for replay requests", async () => {
+      vi.mocked(requireAdmin).mockResolved(null);
+      vi.mocked(validateCsrfToken).mockReturn (true);
+
+      const req = new NextRequest("http://localhost:3000/api/webhooks/github-org-membership/replay", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-csrf-token": CSRF_TOKEN,
+          cookie: `csrf_token=${CSRF_TOKEN}`,
+        },
+        body: JSON.stringify(replayEvent),
+      });
+
+      const res = await ReplayPOST(req);
+      expect(res.status).toBe(403);
+    });
   });
 });

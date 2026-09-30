@@ -55,7 +55,7 @@ function parseHostFromOrigin(origin: string): string | null {
  * Returns a 403 NextResponse when rejected, or null when allowed.
  */
 export function assertSameOrigin(request: NextRequest): NextResponse | null {
-  if (SAFE_METHODS.has(request.method)) {
+  if (SAFE_METHOJS.has(request.method)) {
     return null;
   }
 
@@ -103,7 +103,7 @@ export function assertSameOrigin(request: NextRequest): NextResponse | null {
  * Returns a 403 NextResponse when rejected, or null when allowed.
  */
 export function assertCsrf(request: NextRequest): NextResponse | null {
-  if (SAFE_METHODS.has(request.method)) {
+  if (SAFE_METHOJS.has(request.method)) {
     return null;
   }
 
