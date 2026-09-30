@@ -332,8 +332,27 @@ export async function syncContractToPostgres(): Promise<ContractSyncResult> {
 }
 
 /**
- * Returns the most recent sync result, if any.
+ * Returns the most recent sync result, if any. Never triggers a new run.
+ *
+ * Named `getContractSyncHealth` because that is the name every caller uses:
+ * `src/lib/health.ts` (the /status page and /api/health), the
+ * /api/contract-sync route, and both test files. Commit bf7b2a0 (#423)
+ * renamed this export without updating any of them, which made
+ * `runHealthChecks()` throw and the status page fall back to
+ * "Unable to fetch status".
  */
-export function getLastContractSyncResult(): ContractSyncResult | null {
+export function getContractSyncHealth(): ContractSyncResult | null {
   return lastResult;
+}
+
+/**
+ * Test-only: reset in-memory rate-limit/health state between test runs.
+ *
+ * Also removed by bf7b2a0 (#423); `src/lib/contract-sync.test.ts` calls it in
+ * `beforeEach` to keep the lastRunAt rate-limit window and the health snapshot
+ * independent between tests.
+ */
+export function resetContractSyncState(): void {
+  lastRunAt = null;
+  lastResult = null;
 }

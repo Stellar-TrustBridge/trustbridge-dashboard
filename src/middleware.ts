@@ -19,10 +19,6 @@ import { extractRequestId, generateRequestId } from "@/lib/request-id";
  */
 export default withAuth(
   function middleware(req) {
-    const requestId = extractRequestId(req.headers) ?? generateRequestId();
-    const requestHeaders = new Headers(req.headers);
-    requestHeaders.set("x-request-id", requestId);
-
     const token = req.nextauth.token;
     const isMaintainer = token?.isMaintainer;
     // Maintainers without an explicit role default to "viewer" per the RBAC
