@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { authOptions } from "@/lib/auth";
 import { getAddressHistory } from "@/lib/address-history";
+import { validateCsrfToken } from "@/lib/csrf";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -20,6 +21,13 @@ export async function GET(request: NextRequest) {
   const session = await getServerSession(authOptions);
   if (!session?.user?.id) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const csrfToken =
+    request.headers.get("x-csrf-token") ??
+    request.nextUrl.searchParams.get("csrfToken");
+  if (!csrfToken || !validateCsrfToken(session.user.id, csrfToken)) {
+    return NextResponse.json({ error: "Invalid CSRF token" }, { status: 403 });
   }
 
   const requestedUserId = request.nextUrl.searchParams.get("userId");
