@@ -4,12 +4,18 @@ import { refreshMaintainerSession, requireMaintainerSession } from "@/lib/api-au
 import { recordAuditLog } from "@/lib/audit";
 import { assertSameOrigin } from "@/lib/csrf";
 import { isFeatureEnabled } from "@/lib/feature-flags";
+import { enforceFreezeWindowGuard } from "@/lib/freeze-window";
 import { getRegistryMode } from "@/lib/registry-mode";
 import { getContributors } from "@/lib/registrations";
 import { backgroundQueue } from "@/lib/background-queue";
 import { buildStalenessSummary } from "@/lib/stale-export";
 import { captureException } from "@/lib/sentry";
 import { trackServerBatchRecheckStarted } from "@/lib/analytics";
+import {
+  recheckLockCache,
+  buildRecheckLockKey,
+  parseRecheckIdempotencyTtl,
+} from "@/lib/cache";
 import type { ReadinessStatus } from "@/types";
 
 export const runtime = "nodejs";
@@ -80,6 +86,18 @@ export async function POST(request: NextRequest) {
   const session = await requireMaintainerSession();
   if (!session) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+
+  // Enforce wave freeze window — batch recheck is a mutating operation
+  const freezeGuard = await enforceFreezeWindowGuard({
+    request,
+    isMaintainer: Boolean(session.user.isMaintainer),
+    userId: session.user.id,
+    userLogin: session.user.githubUsername ?? null,
+    actionLabel: "recheck.batch",
+  });
+  if (freezeGuard.blocked && freezeGuard.response) {
+    return freezeGuard.response;
   }
 
   // Check for explicit Idempotency-Key header or use actor-scoped window key
