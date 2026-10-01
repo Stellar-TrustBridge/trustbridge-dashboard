@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireMaintainerSession } from "@/lib/api-auth";
 import { recordAuditLog } from "@/lib/audit";
 import { assertSameOrigin } from "@/lib/csrf";
+import { enforceFreezeWindowGuard } from "@/lib/freeze-window";
 import { refreshContributor } from "@/lib/registrations";
 import { captureException } from "@/lib/sentry";
 
@@ -20,6 +21,18 @@ export async function POST(request: NextRequest, { params }: RouteContext) {
   const session = await requireMaintainerSession();
   if (!session) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+
+  // Enforce wave freeze window — single contributor recheck is a mutating operation
+  const freezeGuard = await enforceFreezeWindowGuard({
+    request,
+    isMaintainer: Boolean(session.user.isMaintainer),
+    userId: session.user.id,
+    userLogin: session.user.githubUsername ?? null,
+    actionLabel: "recheck.single",
+  });
+  if (freezeGuard.blocked && freezeGuard.response) {
+    return freezeGuard.response;
   }
 
   const id = params.id?.trim();
