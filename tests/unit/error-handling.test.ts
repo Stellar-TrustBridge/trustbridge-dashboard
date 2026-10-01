@@ -151,7 +151,7 @@ describe("classifyError", () => {
     });
   });
 
-  describe("server branch — messages containing '5'", () => {
+  describe("server branch — real HTTP 5xx status codes", () => {
     it("classifies an HTTP 500 error as a recoverable server error", () => {
       const result = classifyError(new Error("HTTP 500 Internal Server Error"));
 
@@ -162,16 +162,20 @@ describe("classifyError", () => {
       });
     });
 
-    it("classifies any message with a '5' as a server error", () => {
-      // The check is `message.includes("5")` — any occurrence counts.
-      const result = classifyError(new Error("upstream returned 502"));
+    it.each([
+      "upstream returned 502",
+      "Gateway unavailable (503)",
+      "status 599 from upstream",
+      "HTTP_5XX gateway error",
+    ])("classifies %s as a server error", (message) => {
+      const result = classifyError(new Error(message));
 
       expect(result.type).toBe("server");
       expect(result.message).toBe(errorMessages.SERVER_ERROR);
       expect(result.recoverable).toBe(true);
     });
 
-    it("does not classify a 404 as a server error (no '5' present)", () => {
+    it("does not classify a 404 as a server error (no 5xx present)", () => {
       const result = classifyError(new Error("Request failed with status 404"));
 
       expect(result.type).toBe("unknown");
@@ -179,8 +183,13 @@ describe("classifyError", () => {
       expect(result.recoverable).toBe(true);
     });
 
-    it("does not classify digit-free messages as server errors", () => {
-      expect(classifyError(new Error("Service unavailable")).type).toBe("unknown");
+    it.each([
+      "invalid field 5",
+      "status 5",
+      "user selected version 5",
+      "Service unavailable",
+    ])("does not classify %s as a server error", (message) => {
+      expect(classifyError(new Error(message)).type).toBe("unknown");
     });
   });
 
@@ -233,6 +242,10 @@ describe("classifyError", () => {
 
     it("prefers auth over server when both markers are present", () => {
       expect(classifyError(new Error("403 from host5")).type).toBe("auth");
+    });
+
+    it("ignores bare numeric 5 fragments even when they appear near auth status text", () => {
+      expect(classifyError(new Error("invalid field 5 and 401")).type).toBe("auth");
     });
 
     it("prefers the fetch-TypeError branch over every other branch", () => {
