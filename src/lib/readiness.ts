@@ -122,7 +122,7 @@ export function buildCheckResult(
   spendableXlmBalance?: string,
   usdcBalance?: string,
   horizonLatencyMs?: number
-}: HorizonCheckResult {
+): HorizonCheckResult {
   const balance = String(xlm_balance ?? "0");
   const spendableBalance =
     spendableXlmBalance !== undefined ? String(spendableXlmBalance) : balance;
@@ -146,7 +146,7 @@ export function buildCheckResult(
 
 export function getReadinessTone(
   status: ReadinessStatus
-}: "success" | "warning" | "danger" {
+): "success" | "warning" | "danger" {
   if (status === "ready") return "success";
   if (status === "low_reserve") return "warning";
   return "danger";

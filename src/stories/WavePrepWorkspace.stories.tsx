@@ -15,7 +15,7 @@ const mockContributors: ContributorRow[] = [
     readiness: "ready",
     verified: true,
     lastCheckedAt: new Date(Date.now() - 1000 * 60 * 15).toISOString(),
-    isBanned: false,
+    banned: false,
   },
   {
     id: "reg-2",
@@ -29,7 +29,7 @@ const mockContributors: ContributorRow[] = [
     readiness: "low_reserve",
     verified: false,
     lastCheckedAt: new Date(Date.now() - 1000 * 60 * 60 * 2).toISOString(),
-    isBanned: false,
+    banned: false,
   },
   {
     id: "reg-3",
@@ -43,7 +43,7 @@ const mockContributors: ContributorRow[] = [
     readiness: "not_ready",
     verified: false,
     lastCheckedAt: new Date(Date.now() - 1000 * 60 * 60 * 24).toISOString(),
-    isBanned: false,
+    banned: false,
   },
 ];
 

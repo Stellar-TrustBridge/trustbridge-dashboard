@@ -266,7 +266,7 @@ export async function POST(request: NextRequest) {
       status: 200,
       headers: {
         "Content-Type": "text/csv",
-        "Content-Disposition": `attachment; filename="treasury-export-${new Date().toISOString().split("T")[0]}.csv",
+        "Content-Disposition": `attachment; filename="treasury-export-${new Date().toISOString().split("T")[0]}.csv"`,
       },
     });
   }
