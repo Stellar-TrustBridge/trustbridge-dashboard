@@ -203,3 +203,15 @@ export interface ProfilePrivacySettings {
   profilePublic: boolean;
   showStellarAddress: boolean;
 }
+
+export interface SorobanEventCursorRecord {
+  id: string;
+  maintainerOrgId: string;
+  eventType: string;
+  cursor: string;
+  lastPagingToken: string | null;
+  lastSyncedAt: Date | string;
+  createdAt: Date | string;
+  updatedAt: Date | string;
+}
+

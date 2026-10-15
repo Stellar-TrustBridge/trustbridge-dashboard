@@ -277,3 +277,17 @@ model Notification {
   @@index([read])
   @@index([createdAt])
 }
+
+model SorobanEventCursor {
+  id              String   @id @default(cuid())
+  maintainerOrgId String   @default("default")
+  eventType       String   @default("contract")
+  cursor          String
+  lastPagingToken String?
+  lastSyncedAt    DateTime @default(now())
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([maintainerOrgId, eventType])
+  @@index([maintainerOrgId])
+}
