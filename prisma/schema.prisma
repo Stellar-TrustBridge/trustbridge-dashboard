@@ -25,6 +25,8 @@ model User {
   invites         Invite[]
   apiKeys         ApiKey[]
   notifications   Notification[]
+  attemptedConflicts RegistrationConflict[] @relation("AttemptedConflicts")
+  existingConflicts  RegistrationConflict[] @relation("ExistingConflicts")
   banned          Boolean       @default(false)
   bannedAt        DateTime?
   banReason       String?
@@ -309,4 +311,24 @@ model SorobanOutbox {
   @@index([status, createdAt])
   @@index([status, nextAttemptAt])
   @@index([maintainerOrgId])
+}
+
+model RegistrationConflict {
+  id               String   @id @default(cuid())
+  maintainerOrgId  String   @default("default")
+  attemptedAddress String
+  attemptedUserId  String
+  attemptedUser    User     @relation("AttemptedConflicts", fields: [attemptedUserId], references: [id], onDelete: Cascade)
+  existingUserId   String
+  existingUser     User     @relation("ExistingConflicts", fields: [existingUserId], references: [id], onDelete: Cascade)
+  resolved         Boolean  @default(false)
+  resolvedAt       DateTime?
+  resolvedById     String?
+  createdAt        DateTime @default(now())
+
+  @@index([attemptedAddress])
+  @@index([attemptedUserId])
+  @@index([existingUserId])
+  @@index([maintainerOrgId])
+  @@index([createdAt])
 }

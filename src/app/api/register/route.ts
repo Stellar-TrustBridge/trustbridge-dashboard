@@ -122,7 +122,8 @@ export async function POST(request: NextRequest) {
     const stellarAddress = body.stellarAddress!.trim();
 
     const existing = await prisma.registration.findFirst({
-      where: { stellarAddress, deletedAt: null },
+      where: { stellarAddress },
+      orderBy: { createdAt: "desc" },
     });
 
     const userRegistration = await prisma.registration.findUnique({
@@ -134,28 +135,23 @@ export async function POST(request: NextRequest) {
         : null;
 
     if (existing && existing.userId !== session.user.id) {
-      if (prisma.registrationConflict?.create) {
-        await prisma.registrationConflict
-          .create({
-            data: {
-              attemptedAddress: stellarAddress,
-              attemptedUserId: session.user.id,
-              existingUserId: existing.userId,
-            },
-          })
-          .catch((err) =>
-            console.error("Failed to record RegistrationConflict:", err)
-          );
-      }
-
-      await recordAuditLog({
-        action: "registration.conflict",
-        actorId: session.user.id,
-        actorLogin: session.user.githubUsername ?? null,
-        targetId: existing.id,
-        targetLabel: stellarAddress,
-        metadata: { attemptedAddress: stellarAddress },
-      });
+      await Promise.all([
+        prisma.registrationConflict.create({
+          data: {
+            attemptedAddress: stellarAddress,
+            attemptedUserId: session.user.id,
+            existingUserId: existing.userId,
+          },
+        }),
+        recordAuditLog({
+          action: "registration.conflict",
+          actorId: session.user.id,
+          actorLogin: session.user.githubUsername ?? null,
+          targetId: existing.id,
+          targetLabel: stellarAddress,
+          metadata: { attemptedAddress: stellarAddress },
+        }),
+      ]);
 
       return NextResponse.json(
         {
@@ -334,6 +330,35 @@ export async function POST(request: NextRequest) {
     // That is the same conflict as the pre-check, so it gets the same answer
     // rather than a generic 500 the client cannot act on.
     if (isUniqueAddressViolation(error)) {
+      const winner = await prisma.registration.findFirst({
+        where: { stellarAddress },
+        orderBy: { createdAt: "desc" },
+      });
+
+      if (winner && winner.userId !== session.user.id) {
+        await Promise.all([
+          prisma.registrationConflict
+            .create({
+              data: {
+                attemptedAddress: stellarAddress,
+                attemptedUserId: session.user.id,
+                existingUserId: winner.userId,
+              },
+            })
+            .catch((err) =>
+              console.error("Failed to record racing RegistrationConflict:", err)
+            ),
+          recordAuditLog({
+            action: "registration.conflict",
+            actorId: session.user.id,
+            actorLogin: session.user.githubUsername ?? null,
+            targetId: winner.id,
+            targetLabel: stellarAddress,
+            metadata: { attemptedAddress: stellarAddress, racing: true },
+          }),
+        ]);
+      }
+
       return NextResponse.json(
         {
           error: "This Stellar address is already registered to another user",
