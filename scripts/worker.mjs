@@ -13,6 +13,11 @@ Runs the Trustbridge queue worker. TypeScript modules are loaded via jiti.`);
   process.exit(0);
 }
 
+if (!process.env.DATABASE_URL) {
+  console.error("FATAL: DATABASE_URL environment variable is required to run worker.mjs");
+  process.exit(1);
+}
+
 const jiti = createJiti(fileURLToPath(import.meta.url), {
   alias: {
     "@": fileURLToPath(new URL("../src", import.meta.url)),
