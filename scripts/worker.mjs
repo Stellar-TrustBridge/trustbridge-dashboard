@@ -21,7 +21,7 @@ const jiti = createJiti(fileURLToPath(import.meta.url), {
 
 const { runWorker } = await jiti.import("../src/lib/queue-worker.ts");
 const { processSorobanOutbox } = await jiti.import(
-  "../src/lib/soroban-outbox.ts",
+  "../src/lib/soroban-outbox-worker.ts",
 );
 
 const OUTBOX_INTERVAL_MS = Number(
