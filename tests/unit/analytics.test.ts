@@ -250,3 +250,131 @@ describe("analytics — adapter selection guards", () => {
     process.env.NODE_ENV = originalNodeEnv;
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #516 — identifyServerUser with org scope
+// ---------------------------------------------------------------------------
+
+describe("analytics — identifyServerUser (issue #516)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("identifyServerUser is exported", () => {
+    const analytics = require("@/lib/analytics");
+    expect(typeof analytics.identifyServerUser).toBe("function");
+  });
+
+  it("identifyServerUser does not throw when POSTHOG_API_KEY is absent", () => {
+    withEnv({ POSTHOG_API_KEY: undefined }, () => {
+      const { identifyServerUser } = require("@/lib/analytics");
+      expect(() =>
+        identifyServerUser("user-123", { maintainerOrgId: "org-abc" })
+      ).not.toThrow();
+    });
+  });
+
+  it("identifyServerUser is a no-op for anonymous userId", () => {
+    const fetchSpy = vi
+      .spyOn(global, "fetch")
+      .mockResolvedValue(new Response("{}", { status: 200 }));
+
+    withEnv({ POSTHOG_API_KEY: "test-key" }, () => {
+      vi.resetModules();
+      const { identifyServerUser } = require("@/lib/analytics");
+      identifyServerUser("anonymous", { maintainerOrgId: "org-abc" });
+    });
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    fetchSpy.mockRestore();
+  });
+
+  it("identifyServerUser is a no-op for empty userId", () => {
+    const fetchSpy = vi
+      .spyOn(global, "fetch")
+      .mockResolvedValue(new Response("{}", { status: 200 }));
+
+    withEnv({ POSTHOG_API_KEY: "test-key" }, () => {
+      vi.resetModules();
+      const { identifyServerUser } = require("@/lib/analytics");
+      identifyServerUser("", { maintainerOrgId: "org-abc" });
+    });
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    fetchSpy.mockRestore();
+  });
+
+  it("identifyServerUser sends $identify event with maintainerOrgId and $groups", async () => {
+    const bodies: string[] = [];
+    const fetchSpy = vi
+      .spyOn(global, "fetch")
+      .mockImplementation(async (_url, init) => {
+        bodies.push(init?.body as string);
+        return new Response("{}", { status: 200 });
+      });
+
+    withEnv({ POSTHOG_API_KEY: "server-key", POSTHOG_HOST: undefined }, () => {
+      vi.resetModules();
+      const { identifyServerUser } = require("@/lib/analytics");
+      identifyServerUser("user-456", {
+        maintainerOrgId: "org-stellar",
+        githubUsername: "alice",
+      });
+    });
+
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const payload = JSON.parse(bodies[0]);
+    expect(payload.event).toBe("$identify");
+    expect(payload.distinct_id).toBe("user-456");
+    expect(payload.$set).toMatchObject({ maintainerOrgId: "org-stellar" });
+    expect(payload.$groups).toEqual({ organisation: "org-stellar" });
+    // Must NOT include stellarAddress or tokens
+    expect(JSON.stringify(payload)).not.toContain("stellarAddress");
+    expect(JSON.stringify(payload)).not.toContain("accessToken");
+
+    fetchSpy.mockRestore();
+  });
+
+  it("identifyServerUser omits $groups when no maintainerOrgId", async () => {
+    const bodies: string[] = [];
+    const fetchSpy = vi
+      .spyOn(global, "fetch")
+      .mockImplementation(async (_url, init) => {
+        bodies.push(init?.body as string);
+        return new Response("{}", { status: 200 });
+      });
+
+    withEnv({ POSTHOG_API_KEY: "server-key-2" }, () => {
+      vi.resetModules();
+      const { identifyServerUser } = require("@/lib/analytics");
+      identifyServerUser("user-789", { role: "maintainer" });
+    });
+
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const payload = JSON.parse(bodies[0]);
+    expect(payload.event).toBe("$identify");
+    expect(payload.$groups).toBeUndefined();
+
+    fetchSpy.mockRestore();
+  });
+
+  it("PostHog downtime does not block requests (fetch rejection is swallowed)", () => {
+    const fetchSpy = vi
+      .spyOn(global, "fetch")
+      .mockRejectedValue(new Error("Network error"));
+
+    withEnv({ POSTHOG_API_KEY: "server-key-3" }, () => {
+      vi.resetModules();
+      const { identifyServerUser } = require("@/lib/analytics");
+      expect(() =>
+        identifyServerUser("user-abc", { maintainerOrgId: "org-x" })
+      ).not.toThrow();
+    });
+
+    fetchSpy.mockRestore();
+  });
+});

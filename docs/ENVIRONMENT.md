@@ -381,6 +381,34 @@ PostHog instance host URL. Defaults to `https://app.posthog.com` (PostHog Cloud)
 
 - **Optional.** Only needed if using a self-hosted PostHog instance.
 
+### `POSTHOG_API_KEY`
+
+Server-side PostHog API key used by API routes and background jobs to track events without going through the browser.
+
+- **Optional.** When unset, server-side analytics are a no-op.
+- **Server-only** — never expose via `NEXT_PUBLIC_*`.
+- Used by `src/lib/analytics.ts` → `ServerPostHogAdapter`.
+
+### `POSTHOG_HOST`
+
+PostHog ingestion host for server-side events. Defaults to `https://app.posthog.com`.
+
+- **Optional.** Only needed for self-hosted PostHog.
+
+#### Server-side identify / org scope (issue #516)
+
+`identifyServerUser(userId, { maintainerOrgId, githubUsername, role })` in `src/lib/analytics.ts` calls PostHog's `$identify` endpoint with:
+
+| Property | Description |
+|----------|-------------|
+| `distinct_id` | Internal user ID (never a Stellar address or GitHub token) |
+| `$set.maintainerOrgId` | GitHub org slug — enables org-scoped dashboards |
+| `$set.githubUsername` | GitHub login (optional) |
+| `$set.role` | e.g. `"maintainer"` (optional) |
+| `$groups.organisation` | PostHog group key for org-level aggregation |
+
+**Never** pass `stellarAddress`, `accessToken`, or any secret to this function.
+
 ### `CONTRACT_SYNC_MIN_INTERVAL_MS`
 
 Minimum time between `/api/contract-sync` runs; a trigger inside this window returns `{ status: "skipped" }` instead of re-running Horizon checks for every registration. Defaults to `60000` (1 minute).

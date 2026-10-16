@@ -240,6 +240,10 @@ export function resetAnalytics(): void {
  * Uses the PostHog Events API (server-to-server) when POSTHOG_API_KEY is set,
  * falls back to console logging in development, and is a no-op otherwise.
  * Never throws — analytics must not affect request latency or correctness.
+ *
+ * Issue #516 — identify() attaches maintainerOrgId as a PostHog group property
+ * when present, enabling org-scoped analytics for multi-tenant deployments.
+ * Stellar addresses and access tokens are never sent.
  */
 class ServerPostHogAdapter implements AnalyticsAdapter {
   private readonly apiKey: string;
@@ -269,8 +273,50 @@ class ServerPostHogAdapter implements AnalyticsAdapter {
     });
   }
 
-  identify(): void {
-    // Server-side identify not implemented; no-op
+  /**
+   * Issue #516 — server-side identify with org scope.
+   *
+   * Sends a PostHog `$identify` event attaching the user to their maintainer
+   * org via a `$groups` property so PostHog dashboards can filter by
+   * organisation without exposing PII.
+   *
+   * Rules:
+   *   - Anonymous / empty userId → no-op (no pollution of the identify stream)
+   *   - Never sends stellarAddress, publicKey, or any access token
+   *   - maintainerOrgId attached to both `$set` and `$groups` when present
+   */
+  identify(userId: string, properties?: Record<string, unknown>): void {
+    if (!userId || userId === "anonymous") return;
+
+    const maintainerOrgId = properties?.maintainerOrgId as string | undefined;
+
+    const payload: Record<string, unknown> = {
+      api_key: this.apiKey,
+      event: "$identify",
+      distinct_id: userId,
+      $set: {
+        // Safe properties only — no tokens, no Stellar addresses.
+        ...(maintainerOrgId ? { maintainerOrgId } : {}),
+        ...(properties?.githubUsername ? { githubUsername: properties.githubUsername } : {}),
+        ...(properties?.role ? { role: properties.role } : {}),
+        $lib: "trustbridge-server",
+      },
+      timestamp: new Date().toISOString(),
+    };
+
+    // Attach org group when maintainerOrgId is present so PostHog can
+    // aggregate events by organisation in group analytics dashboards.
+    if (maintainerOrgId) {
+      payload.$groups = { organisation: maintainerOrgId };
+    }
+
+    fetch(`${this.host}/capture/`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }).catch(() => {
+      // Never throw — analytics must not block requests
+    });
   }
 
   reset(): void {
@@ -344,4 +390,25 @@ export function trackServerBatchRecheckStarted(properties?: {
   initiatedBy?: string;
 }): void {
   serverAdapter().track("batch_recheck_started", properties);
+}
+
+/**
+ * Identify a maintainer session on the server with org scope (issue #516).
+ *
+ * Call this from:
+ *   - NextAuth `signIn` / `jwt` callbacks after a successful session is established
+ *   - API-key authenticated routes (pass the key's owning org as maintainerOrgId)
+ *
+ * Safe properties only — never pass Stellar addresses or access tokens.
+ * No-op when POSTHOG_API_KEY is not set or when userId is absent/anonymous.
+ */
+export function identifyServerUser(
+  userId: string,
+  properties?: {
+    maintainerOrgId?: string;
+    githubUsername?: string;
+    role?: string;
+  },
+): void {
+  serverAdapter().identify(userId, properties);
 }
