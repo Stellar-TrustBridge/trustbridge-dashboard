@@ -3,6 +3,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { requireOperator } from "@/lib/api-auth";
+import {
+  API_KEY_RATE_LIMIT,
+  buildRateLimitHeaders,
+  requireApiKeyScope,
+} from "@/lib/api-key-auth";
 import { assertSameOrigin } from "@/lib/csrf";
 import { prisma } from "@/lib/prisma";
 import { computeReadiness } from "@/lib/readiness";
@@ -10,8 +15,6 @@ import { recordAuditLog } from "@/lib/audit";
 import { evaluateStaleExportGuard } from "@/lib/stale-export";
 import type { ContributorRow } from "@/types";
 import {
-  DEFAULT_EXPORT_PAGE_SIZE,
-  MAX_EXPORT_PAGE_SIZE,
   parseExportPagination,
   streamJsonExport,
 } from "@/lib/treasury-export";
@@ -152,8 +155,32 @@ export async function POST(request: NextRequest) {
   if (csrf) return csrf;
 
   const session = await requireOperator("treasury.export");
-  if (!session) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  let actorId: string;
+  let actorLogin: string | null;
+  if (session) {
+    actorId = session.user.id;
+    actorLogin = session.user.githubUsername ?? null;
+  } else {
+    const apiKeyAuth = await requireApiKeyScope(request, "export:read");
+    if (!apiKeyAuth) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    if ("rateLimited" in apiKeyAuth) {
+      return NextResponse.json(
+        { error: "Too many requests" },
+        {
+          status: 429,
+          headers: buildRateLimitHeaders(
+            apiKeyAuth.result,
+            API_KEY_RATE_LIMIT.maxRequests
+          ),
+        }
+      );
+    }
+
+    actorId = apiKeyAuth.createdById;
+    actorLogin = `api-key:${apiKeyAuth.name}`;
   }
 
   const body = (await request.json()) as {
@@ -225,8 +252,8 @@ export async function POST(request: NextRequest) {
   if (staleGuard.blocked) {
     await recordAuditLog({
       action: "treasury.export.stale",
-      actorId: session.user.id,
-      actorLogin: session.user.githubUsername ?? null,
+      actorId,
+      actorLogin,
       metadata: {
         format,
         snapshotAt: body.snapshotAt ?? null,
@@ -260,8 +287,8 @@ export async function POST(request: NextRequest) {
 
   await recordAuditLog({
     action: "treasury.export",
-    actorId: session.user.id,
-    actorLogin: session.user.githubUsername ?? null,
+    actorId,
+    actorLogin,
     metadata: {
       totalContributors,
       readyCount,
@@ -315,7 +342,8 @@ export async function POST(request: NextRequest) {
     nextOffset: number | null;
   } = {
     exportedAt: new Date().toISOString(),
-    exportedBy: session.user.email ?? session.user.githubUsername ?? "",
+    exportedBy:
+      session?.user.email ?? session?.user.githubUsername ?? actorLogin ?? "",
     totalContributors,
     readyCount,
     notReadyCount,

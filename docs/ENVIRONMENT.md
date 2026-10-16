@@ -676,9 +676,9 @@ Every digest run writes a `digest.cron` entry to `AuditLog` (visible in
 
 The project includes k6 scripts to simulate Wave payout window traffic against
 treasury export and contributor read endpoints. These require environment
-variables to authenticate test requests. All variables are **optional** — the
-load tests degrade gracefully when any of them are missing (returning expected
-auth errors).
+variables to authenticate test requests. A complete run requires a maintainer
+session, an API key, and the cron secret; missing or invalid credentials cause
+the authentication checks and `http_req_failed` threshold to fail.
 
 > **Never run k6 against production.** Use a local dev instance or staging environment.
 
@@ -689,7 +689,6 @@ sign-in to the target environment. Required for load-testing endpoints that
 require a maintainer session:
 
 - `GET /api/treasury/export`
-- `POST /api/treasury/export`
 - `GET /api/contributors/paginated`
 
 **How to obtain:**
@@ -707,11 +706,25 @@ require a maintainer session:
 anywhere. Expire the session immediately after testing by clearing browser
 cookies or calling `/api/auth/signout`.
 
+### `TEST_CSRF_ORIGIN`
+
+Origin header sent with `POST /api/treasury/export` to exercise its
+same-origin CSRF check. Defaults to `BASE_URL`; override it only when the
+application's externally visible origin differs from its base URL:
+
+```bash
+export TEST_CSRF_ORIGIN="https://staging.example.test"
+```
+
+This route uses `assertSameOrigin` and does not require a CSRF token. The POST
+accepts either an operator session or an API key with `export:read` scope.
+
 ### `TEST_API_KEY`
 
 A valid `tb_…` API key with scope `export:read`. Required for load-testing the
-API-key-authenticated export path:
+API-key-authenticated treasury POST and contributor CSV paths:
 
+- `POST /api/treasury/export`
 - `GET /api/contributors/export/csv`
 
 **How to obtain:**
@@ -749,16 +762,17 @@ the server's `CRON_SECRET`.
 ### Running the treasury load test
 
 ```bash
-# All scenarios (requires all three env vars above):
+# Full run (requires all three credentials above):
 BASE_URL=http://localhost:3000 \
   TEST_SESSION_COOKIE="<session-token>" \
   TEST_API_KEY="tb_..." \
+  TEST_CSRF_ORIGIN="http://localhost:3000" \
   TEST_CRON_SECRET="<cron-secret>" \
   VUS=5 \
   DURATION=30s \
   k6 run scripts/k6/treasury-export-load.js
 
-# API-key scenario only (skip session-gated scenarios):
+# API-key scenarios only (skip session-gated and cron scenarios):
 TEST_API_KEY="tb_..." \
   VUS=5 \
   DURATION=30s \
