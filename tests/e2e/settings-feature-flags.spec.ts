@@ -1,6 +1,10 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type BrowserContext } from "@playwright/test";
 
-import { interceptApi, mockMaintainerSession } from "./helpers";
+import {
+  interceptApi,
+  mockMaintainerSession,
+  signInWithSessionCookie,
+} from "./helpers";
 
 /**
  * Feature flags on /dashboard/settings (issue #510).
@@ -29,10 +33,27 @@ const AUDIT_FIXTURE = {
 };
 
 /**
- * Everything /dashboard/settings fetches on mount. Only the feature-flags route
- * is left open for the caller to decide.
+ * Sign in as a maintainer and stub every other endpoint /dashboard/settings
+ * fetches on mount. Only the feature-flags route is left open for the caller.
+ *
+ * Both halves of the sign-in are needed: `signInWithSessionCookie` mints the
+ * JWT cookie `withAuth` in `src/middleware.ts` decodes (otherwise the request is
+ * redirected to sign-in before the page renders), and `mockMaintainerSession`
+ * feeds the `/api/auth/session` payload `useSession()` reads. See
+ * docs/E2E_TESTING.md, "Signing in without GitHub".
  */
-async function setupSettingsPage(page: Parameters<typeof interceptApi>[0]) {
+async function setupSettingsPage({
+  page,
+  context,
+}: {
+  page: Parameters<typeof interceptApi>[0];
+  context: BrowserContext;
+}) {
+  await signInWithSessionCookie(context, {
+    id: "maintainer-1",
+    githubUsername: "octocat",
+    isMaintainer: true,
+  });
   await mockMaintainerSession(page);
   await interceptApi(page, "**/api/settings/network", NETWORK_FIXTURE);
   await interceptApi(page, "**/api/audit*", AUDIT_FIXTURE);
@@ -52,8 +73,9 @@ async function setupSettingsPage(page: Parameters<typeof interceptApi>[0]) {
 test.describe("Settings — feature flags panel", () => {
   test("renders the mocked flags with their keys, sources and toggle states", async ({
     page,
+    context,
   }) => {
-    await setupSettingsPage(page);
+    await setupSettingsPage({ page, context });
     await interceptApi(page, "**/api/settings/feature-flags", {
       flags: [
         {
@@ -99,8 +121,8 @@ test.describe("Settings — feature flags panel", () => {
     await expect(panel.getByText("disabled")).toHaveCount(1);
   });
 
-  test("shows an enabled state for a flag the fixture turns on", async ({ page }) => {
-    await setupSettingsPage(page);
+  test("shows an enabled state for a flag the fixture turns on", async ({ page, context }) => {
+    await setupSettingsPage({ page, context });
     await interceptApi(page, "**/api/settings/feature-flags", {
       flags: [
         { key: "ALPHA_ENABLED", enabled: true, source: "environment" },
@@ -118,8 +140,8 @@ test.describe("Settings — feature flags panel", () => {
     await expect(row.getByText("disabled")).toHaveCount(0);
   });
 
-  test("shows a disabled state for a flag the fixture turns off", async ({ page }) => {
-    await setupSettingsPage(page);
+  test("shows a disabled state for a flag the fixture turns off", async ({ page, context }) => {
+    await setupSettingsPage({ page, context });
     await interceptApi(page, "**/api/settings/feature-flags", {
       flags: [
         { key: "ALPHA_DISABLED", enabled: false, source: "default" },
@@ -139,8 +161,9 @@ test.describe("Settings — feature flags panel", () => {
 
   test("shows the empty-state copy when the deployment has no flags", async ({
     page,
+    context,
   }) => {
-    await setupSettingsPage(page);
+    await setupSettingsPage({ page, context });
     await interceptApi(page, "**/api/settings/feature-flags", { flags: [] });
 
     await page.goto("/dashboard/settings");
@@ -151,8 +174,8 @@ test.describe("Settings — feature flags panel", () => {
     await expect(panel.getByRole("listitem")).toHaveCount(0);
   });
 
-  test("shows the loading state until the slow response arrives", async ({ page }) => {
-    await setupSettingsPage(page);
+  test("shows the loading state until the slow response arrives", async ({ page, context }) => {
+    await setupSettingsPage({ page, context });
 
     let release: () => void = () => {};
     const gate = new Promise<void>((resolve) => {
@@ -184,8 +207,9 @@ test.describe("Settings — feature flags panel", () => {
 
   test("shows the error state when the endpoint returns HTTP 500", async ({
     page,
+    context,
   }) => {
-    await setupSettingsPage(page);
+    await setupSettingsPage({ page, context });
     await interceptApi(
       page,
       "**/api/settings/feature-flags",
@@ -202,8 +226,8 @@ test.describe("Settings — feature flags panel", () => {
     await expect(panel.getByRole("listitem")).toHaveCount(0);
   });
 
-  test("recovers from an error and renders the flags on retry", async ({ page }) => {
-    await setupSettingsPage(page);
+  test("recovers from an error and renders the flags on retry", async ({ page, context }) => {
+    await setupSettingsPage({ page, context });
 
     let attempt = 0;
     await page.route("**/api/settings/feature-flags", async (route) => {
@@ -237,8 +261,8 @@ test.describe("Settings — feature flags panel", () => {
     await expect(panel.getByText(/failed to load feature flags/i)).toHaveCount(0);
   });
 
-  test("requests the flags again when the page is revisited", async ({ page }) => {
-    await setupSettingsPage(page);
+  test("requests the flags again when the page is revisited", async ({ page, context }) => {
+    await setupSettingsPage({ page, context });
 
     let requests = 0;
     await page.route("**/api/settings/feature-flags", async (route) => {
