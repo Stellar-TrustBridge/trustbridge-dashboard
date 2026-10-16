@@ -540,16 +540,27 @@ and replace calls to `checkRateLimit()` with `checkRateLimitRedis()` in
 ## Security checklist
 ## Rate-Limit Headers
 
-Public API endpoints (`/api/check`, `/api/actions/lookup`, `/api/stats`) emit standard rate-limit response headers on every response:
+Public API endpoints (`/api/check`, `/api/actions/lookup`, `/api/stats`, `/api/freeze-status`) emit standard rate-limit response headers on every response:
 
 | Header | Description |
 |--------|-------------|
-| `RateLimit-Limit` | Max requests allowed per window (default: 10 for `/api/check`, 60 for lookup, 120 for stats) |
+| `RateLimit-Limit` | Max requests allowed per window |
 | `RateLimit-Remaining` | Requests remaining in the current window |
 | `RateLimit-Reset` | Seconds until the window resets |
 | `Retry-After` | Seconds to wait before retrying (only on 429 responses) |
 
 These follow the [IETF RateLimit Headers draft](https://datatracker.ietf.org/doc/draft-ietf-httpapi-ratelimit-headers-07/) standard.
+
+### Per-endpoint limits
+
+| Endpoint | Limit | Window | Notes |
+|----------|-------|--------|-------|
+| `GET /api/freeze-status` | 60 req | 1 min | Public unauthenticated; generous for polling UI, protects against polling storms during Wave events (#519) |
+| `GET /api/stats` | 120 req | 1 min | Public |
+| `GET /api/actions/lookup` | 60 req | 1 min | Public |
+| `POST /api/check` | 10 req | 1 min | Per env default (`RATE_LIMIT_MAX_REQUESTS`) |
+
+`/api/freeze-status` uses a route-prefixed key (`freeze-status:<ip>`) so its counter is independent of other rate-limited endpoints on the same process.
 
 **Multi-instance note:** The rate limiter uses an in-memory sliding window. When running behind a load balancer with N instances, the effective limit is approximately `N × maxRequests`. For strict per-client limits, consider a shared store (Redis, etc.) — but the current approach is sufficient for abuse prevention.
 
