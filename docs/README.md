@@ -19,3 +19,21 @@
 | [LOGGING_AND_PAGINATION.md](./LOGGING_AND_PAGINATION.md) | Logging and cursor pagination |
 | [PERFORMANCE_TESTING.md](./PERFORMANCE_TESTING.md) | k6 smoke tests and load testing guide |
 | [PWA.md](./PWA.md) | PWA manifest, service worker shell caching, offline banner, security notes |
+
+## i18n pattern (#515)
+
+Server-rendered and client-hydrated strings share a single source of truth via `src/lib/i18n-config.ts`.
+
+| Symbol | Description |
+|--------|-------------|
+| `SUPPORTED_LOCALES` | `['en', 'es', 'pt']` — the canonical list consumed by both server and client |
+| `DEFAULT_LOCALE` | `'en'` — used when no locale cookie is present |
+| `SupportedLocale` | TypeScript union type derived from `SUPPORTED_LOCALES` |
+| `isSupportedLocale(s)` | Type-guard; normalises case before checking |
+| `resolveLocale(raw)` | Returns a `SupportedLocale`, falling back to `DEFAULT_LOCALE` for unknown/missing values |
+
+**Server (`src/i18n.ts`):** calls `resolveLocale` on the incoming locale, then calls `notFound()` for values that remain unsupported after normalisation. Falls back to `en.json` when the requested locale file is absent.
+
+**Client (`src/lib/i18n-context.tsx`):** `I18nProvider` accepts an optional `initialLocale` prop so the server-selected locale can be forwarded to the client tree without a hydration mismatch. Locale changes load messages from `public/locales/<locale>.json`, matching the server path exactly.
+
+Locale files live in `public/locales/` (`en.json`, `es.json`, `pt.json`). All three must have identical top-level keys — enforced by `tests/unit/i18n.test.ts`.
