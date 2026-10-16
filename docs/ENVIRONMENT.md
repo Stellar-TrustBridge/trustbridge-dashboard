@@ -672,6 +672,105 @@ Every digest run writes a `digest.cron` entry to `AuditLog` (visible in
 
 ---
 
+## k6 load testing (optional — local/staging only)
+
+The project includes k6 scripts to simulate Wave payout window traffic against
+treasury export and contributor read endpoints. These require environment
+variables to authenticate test requests. All variables are **optional** — the
+load tests degrade gracefully when any of them are missing (returning expected
+auth errors).
+
+> **Never run k6 against production.** Use a local dev instance or staging environment.
+
+### `TEST_SESSION_COOKIE`
+
+Raw value of the `next-auth.session-token` cookie obtained from a maintainer
+sign-in to the target environment. Required for load-testing endpoints that
+require a maintainer session:
+
+- `GET /api/treasury/export`
+- `POST /api/treasury/export`
+- `GET /api/contributors/paginated`
+
+**How to obtain:**
+
+1. Open the staging or local app in a browser.
+2. Sign in with a maintainer GitHub account.
+3. Open browser DevTools → Application (Chrome) / Storage (Firefox) → Cookies.
+4. Copy the `Value` of the `next-auth.session-token` cookie.
+5. Export it for k6:
+   ```bash
+   export TEST_SESSION_COOKIE="<copied-value>"
+   ```
+
+**Security:** This is a live maintainer session. Do not commit it or log it
+anywhere. Expire the session immediately after testing by clearing browser
+cookies or calling `/api/auth/signout`.
+
+### `TEST_API_KEY`
+
+A valid `tb_…` API key with scope `export:read`. Required for load-testing the
+API-key-authenticated export path:
+
+- `GET /api/contributors/export/csv`
+
+**How to obtain:**
+
+1. Sign in to the staging or local app as an operator or admin maintainer.
+2. Go to `/dashboard/settings` → **API keys** panel.
+3. Create a new key (e.g., name it `k6-load-test`).
+4. Copy the secret (shown only once).
+5. Export it for k6:
+   ```bash
+   export TEST_API_KEY="tb_Abc123..."
+   ```
+
+**Security:** Revoke the key immediately after testing via the settings UI or
+`DELETE /api/settings/api-keys/:id`.
+
+### `TEST_CRON_SECRET`
+
+The value of `CRON_SECRET` configured on the target environment. Required for
+load-testing the cron export endpoint:
+
+- `POST /api/cron/export`
+
+This simulates Vercel Cron triggering the nightly treasury CSV export job.
+
+**How to obtain:**
+
+```bash
+export TEST_CRON_SECRET="<same value as server CRON_SECRET>"
+```
+
+**Security:** Do not commit this value. Use the same secret rotation policy as
+the server's `CRON_SECRET`.
+
+### Running the treasury load test
+
+```bash
+# All scenarios (requires all three env vars above):
+BASE_URL=http://localhost:3000 \
+  TEST_SESSION_COOKIE="<session-token>" \
+  TEST_API_KEY="tb_..." \
+  TEST_CRON_SECRET="<cron-secret>" \
+  VUS=5 \
+  DURATION=30s \
+  k6 run scripts/k6/treasury-export-load.js
+
+# API-key scenario only (skip session-gated scenarios):
+TEST_API_KEY="tb_..." \
+  VUS=5 \
+  DURATION=30s \
+  k6 run --env SKIP_SESSION_SCENARIOS=1 scripts/k6/treasury-export-load.js
+```
+
+See [docs/PERFORMANCE_TESTING.md](./PERFORMANCE_TESTING.md) for full usage.
+
+---
+
+## Security checklist
+
 - [ ] Never commit `.env.local` or secrets
 - [ ] Rotate `GITHUB_CLIENT_SECRET` if exposed
 - [ ] Use `sslmode=require` for remote Postgres
