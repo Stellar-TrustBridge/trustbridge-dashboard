@@ -7,6 +7,8 @@ import {
   GraphQLObjectType,
   GraphQLSchema,
   GraphQLString,
+  Kind,
+  coerceInputValue,
   graphql,
   parse,
   validate,
@@ -15,6 +17,7 @@ import {
   type DefinitionNode,
   type FragmentDefinitionNode,
   type SelectionSetNode,
+  type ValueNode,
 } from "graphql";
 import { NextRequest, NextResponse } from "next/server";
 
@@ -108,6 +111,83 @@ const queryType = new GraphQLObjectType({
 
 const schema = new GraphQLSchema({ query: queryType });
 
+/**
+ * Coerce the `contributors(first:)` argument into a bounded integer page size.
+ *
+ * `valueFromAST` is only safe for inline literals: for a `Variable` node it
+ * returns the raw JSON value out of `variables` *without* coercing it to the
+ * argument's declared type, so a String, Boolean, object, or fractional value
+ * slipped past the range check below and poisoned the cost multiplier with
+ * `NaN` (`NaN > MAX_QUERY_COST` is false, so the cost limit was silently
+ * skipped). Variables are therefore coerced with `coerceInputValue` against
+ * `GraphQLInt` — exactly what execution does — and anything that still is not a
+ * finite whole number inside `[1, MAX_CONTRIBUTORS]` is rejected with a
+ * client-facing message before the resolver can run.
+ *
+ * @returns the validated limit, or an `error` describing why it is invalid.
+ */
+function resolveContributorsLimit(
+  valueNode: ValueNode | undefined,
+  variables: Record<string, unknown>
+): ContributorsLimit {
+  const rangeMessage = `contributors.first must be an Int between 1 and ${MAX_CONTRIBUTORS}`;
+
+  // Missing argument, explicit null, or an omitted optional variable all fall
+  // back to the schema default rather than producing a NaN multiplier.
+  if (!valueNode || valueNode.kind === Kind.NULL) {
+    return { ok: true, limit: DEFAULT_CONTRIBUTORS };
+  }
+
+  let raw: unknown;
+
+  if (valueNode.kind === Kind.VARIABLE) {
+    const variableName = valueNode.name.value;
+    if (!(variableName in variables)) {
+      // Absent optional variable: the argument default applies.
+      return { ok: true, limit: DEFAULT_CONTRIBUTORS };
+    }
+    // `coerceInputValue` throws on the first problem unless it is handed an
+    // `onError` collector, and the coercion message ("Int cannot represent
+    // non-integer value: ...") is what makes the 400 actionable.
+    const coercionErrors: GraphQLError[] = [];
+    const coerced = coerceInputValue(
+      variables[variableName],
+      GraphQLInt,
+      (_path, _invalidValue, error) => {
+        coercionErrors.push(error);
+      }
+    );
+    if (coercionErrors.length > 0) {
+      return {
+        ok: false,
+        error: `${rangeMessage} — $${variableName} is invalid: ${coercionErrors[0].message}`,
+      };
+    }
+    raw = coerced;
+  } else {
+    raw = valueFromAST(valueNode, GraphQLInt);
+    if (raw === undefined) {
+      return { ok: false, error: rangeMessage };
+    }
+  }
+
+  if (raw === null) return { ok: true, limit: DEFAULT_CONTRIBUTORS };
+  if (typeof raw !== "number" || !Number.isFinite(raw)) {
+    return { ok: false, error: rangeMessage };
+  }
+
+  const limit = Math.floor(raw);
+  if (limit !== raw || limit < 1 || limit > MAX_CONTRIBUTORS) {
+    return { ok: false, error: rangeMessage };
+  }
+
+  return { ok: true, limit };
+}
+
+type ContributorsLimit =
+  | { ok: true; limit: number }
+  | { ok: false; error: string };
+
 function analyzeDocument(
   definitions: readonly DefinitionNode[],
   variables: Record<string, unknown>
@@ -122,7 +202,7 @@ function analyzeDocument(
   let fieldCount = 0;
   let cost = 0;
   let tooDeep = false;
-  let badPageSize = false;
+  let pageSizeError: string | null = null;
 
   function inspect(
     selectionSet: SelectionSetNode,
@@ -137,16 +217,21 @@ function analyzeDocument(
         if (nextDepth > MAX_QUERY_DEPTH) tooDeep = true;
 
         let childMultiplier = multiplier;
-        if (selection.name.value === "contributors") {
+        if (selection.name.value === "contributors" && !pageSizeError) {
           const firstArgument = selection.arguments?.find(
             (argument) => argument.name.value === "first"
           );
-          const requested = firstArgument
-            ? valueFromAST(firstArgument.value, GraphQLInt, variables)
-            : DEFAULT_CONTRIBUTORS;
-          const first = requested == null ? DEFAULT_CONTRIBUTORS : requested;
-          if (first < 1 || first > MAX_CONTRIBUTORS) badPageSize = true;
-          childMultiplier *= Math.min(Math.max(first, 1), MAX_CONTRIBUTORS);
+          const resolved = resolveContributorsLimit(firstArgument?.value, variables);
+          if (!resolved.ok) {
+            // Stop growing the multiplier: an unusable page size must not be
+            // able to widen the rest of the cost walk.
+            pageSizeError = resolved.error;
+            childMultiplier = multiplier;
+          } else {
+            // Multiplier comes from the validated, coerced limit — never a raw
+            // variable value.
+            childMultiplier *= resolved.limit;
+          }
         }
 
         cost += multiplier;
@@ -176,9 +261,7 @@ function analyzeDocument(
   }
 
   if (tooDeep) return `Query depth exceeds the limit of ${MAX_QUERY_DEPTH}`;
-  if (badPageSize) {
-    return `contributors.first must be between 1 and ${MAX_CONTRIBUTORS}`;
-  }
+  if (pageSizeError) return pageSizeError;
   if (fieldCount > MAX_QUERY_FIELDS) {
     return `Query field count exceeds the limit of ${MAX_QUERY_FIELDS}`;
   }
@@ -206,18 +289,27 @@ export async function POST(request: NextRequest) {
 
   const bodyText = await request.text();
   if (Buffer.byteLength(bodyText, "utf8") > MAX_QUERY_BYTES) {
-    return NextResponse.json({ errors: [{ message: "Query body is too large" }] }, { status: 413 });
+    return NextResponse.json(
+      { errors: [{ message: "Query body is too large" }] },
+      { status: 413, headers: rateLimitHeaders }
+    );
   }
 
   let body: { query?: unknown; variables?: unknown };
   try {
     body = JSON.parse(bodyText);
   } catch {
-    return NextResponse.json({ errors: [{ message: "Invalid JSON body" }] }, { status: 400 });
+    return NextResponse.json(
+      { errors: [{ message: "Invalid JSON body" }] },
+      { status: 400, headers: rateLimitHeaders }
+    );
   }
 
   if (typeof body.query !== "string") {
-    return NextResponse.json({ errors: [{ message: "A query string is required" }] }, { status: 400 });
+    return NextResponse.json(
+      { errors: [{ message: "A query string is required" }] },
+      { status: 400, headers: rateLimitHeaders }
+    );
   }
 
   const variables =
@@ -231,13 +323,16 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     return NextResponse.json(
       { errors: [{ message: error instanceof Error ? error.message : "Invalid GraphQL query" }] },
-      { status: 400 }
+      { status: 400, headers: rateLimitHeaders }
     );
   }
 
   const limitError = analyzeDocument(document.definitions, variables);
   if (limitError) {
-    return NextResponse.json({ errors: [{ message: limitError }] }, { status: 400 });
+    return NextResponse.json(
+      { errors: [{ message: limitError }] },
+      { status: 400, headers: rateLimitHeaders }
+    );
   }
 
   const validationRules =
@@ -248,7 +343,7 @@ export async function POST(request: NextRequest) {
   if (validationErrors.length > 0) {
     return NextResponse.json(
       { errors: validationErrors.map((error) => ({ message: error.message })) },
-      { status: 400 }
+      { status: 400, headers: rateLimitHeaders }
     );
   }
 

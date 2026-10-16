@@ -16,6 +16,7 @@ npx playwright show-report              # last run
 | `tests/e2e/register.spec.ts` | Contributor registration: sign in, paste an address, read the readiness result, save, copy the Freighter proof. |
 | `tests/e2e/maintainer.spec.ts` | Maintainer dashboard: access control, contributor table, re-check, metrics, settings. |
 | `tests/e2e/status.spec.ts` | Public health page (`/status`, issue #384): loads without auth, renders the heading, timestamp, overall banner and component checks, and refreshes via the "Check now" control against a mocked `/api/health`. |
+| `tests/e2e/settings-feature-flags.spec.ts` | Feature-flag panel on `/dashboard/settings` (issue #510): renders mocked flags with their keys, sources and enabled/disabled states, plus the loading, empty, error (HTTP 500) and re-request states. `GET /api/settings/feature-flags` resolves the deployment's real `FEATURE_*` environment, so every case intercepts it — see below. |
 
 ## Accessibility gate (axe-core)
 
@@ -83,6 +84,16 @@ wiring actually works. That is the kind of bug a unit test cannot see.
 
 `DATABASE_URL` is set to a placeholder. The dev server logs Prisma connection
 errors for routes no test exercises; that is expected and not a failure.
+
+### Feature flags must always be intercepted
+
+`GET /api/settings/feature-flags` returns flags resolved from the deployment's
+real `FEATURE_*` environment and database overrides. A spec that lets it through
+would assert against whatever the host machine or CI runner happens to have set,
+so it would pass locally and fail in CI for reasons that have nothing to do with
+the code. `settings-feature-flags.spec.ts` therefore declares its fixture inside
+each test and intercepts the route in every case, including the error case. Keep
+new flag assertions that way: mock the response, never the environment.
 
 ## Freighter
 

@@ -288,7 +288,6 @@ export function ContributorTable({
   const columnPickerId = useId();
   const searchInputId = useId();
   const paletteTitleId = useId();
-  const headingId = useId();
   const columnPickerRef = useRef<HTMLFieldSetElement | null>(null);
   const columnPickerToggleRef = useRef<HTMLButtonElement | null>(null);
   const csvExportRef = useRef<HTMLButtonElement | null>(null);
@@ -310,10 +309,6 @@ export function ContributorTable({
   const [isSubmittingBan, setIsSubmittingBan] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
-  const csvExportRef = useRef<HTMLButtonElement | null>(null);
-  const jsonExportRef = useRef<HTMLButtonElement | null>(null);
-  const columnPickerToggleRef = useRef<HTMLButtonElement | null>(null);
-  const columnPickerRef = useRef<HTMLFieldSetElement | null>(null);
   const paletteRef = useRef<HTMLDivElement | null>(null);
   const paletteOpenerRef = useRef<HTMLElement | null>(null);
 

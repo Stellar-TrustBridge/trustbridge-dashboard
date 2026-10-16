@@ -269,11 +269,25 @@ export default function DashboardPage() {
         </div>
       </div>
 
+      {/*
+        #498: `error` used to be an undefined identifier here, so an SSE
+        disconnect was rendered only as the visible banner below and never
+        reached screen readers. The stream error is also the *current* failure
+        (recheckMutation's error is whatever the last POST left behind), so it
+        takes precedence; `||` rather than `??` so an empty stream message
+        cannot mask a meaningful mutation error.
+      */}
       <BatchRecheckLiveRegion
         event={event}
         isStarting={recheckMutation.isPending}
         isStreaming={isStreaming}
-        error={recheckMutation.isError ? recheckMutation.error.message : error}
+        isReconnecting={isReconnecting}
+        reconnectAttempt={reconnectAttempt}
+        maxReconnectAttempts={maxReconnectAttempts}
+        error={
+          streamError ||
+          (recheckMutation.isError ? recheckMutation.error.message : null)
+        }
       />
 
       {!allContributorsQuery.isLoading &&
