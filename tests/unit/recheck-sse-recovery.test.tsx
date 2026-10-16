@@ -1,6 +1,6 @@
 import React from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import DashboardPage from "@/app/dashboard/page";
 import * as jobProgressHook from "@/lib/use-job-progress";
@@ -13,7 +13,7 @@ vi.mock("next/navigation", () => ({
 }));
 
 // Mock global fetch for background queries
-global.fetch = vi.fn().mockImplementation((url: string) => {
+function defaultFetch(url: string) {
   if (url.includes("/api/settings/freeze") || url.includes("/api/freeze-status")) {
     return Promise.resolve({
       ok: true,
@@ -30,6 +30,7 @@ global.fetch = vi.fn().mockImplementation((url: string) => {
           assetIssuer: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
           baseReserveXlm: 0.5,
           minXlmBalance: 1.5,
+          warnings: [],
         }),
     });
   }
@@ -43,7 +44,9 @@ global.fetch = vi.fn().mockImplementation((url: string) => {
     ok: true,
     json: () => Promise.resolve({}),
   });
-});
+}
+
+global.fetch = vi.fn().mockImplementation(defaultFetch);
 
 describe("Dashboard SSE Recheck Disconnect Recovery UI", () => {
   let queryClient: QueryClient;
@@ -112,8 +115,9 @@ describe("Dashboard SSE Recheck Disconnect Recovery UI", () => {
     expect(recheckButton).toBeInTheDocument();
     expect(recheckButton).toBeDisabled();
 
-    // Screen reader live status region
-    expect(screen.getByRole("status", { name: "" })).toHaveTextContent(
+    // Screen reader live status region. Queried by test id rather than role
+    // because the reconnecting banner above is also a `role="status"`.
+    expect(screen.getByTestId("recheck-live-region")).toHaveTextContent(
       "Batch re-check: Reconnecting (2/3)..."
     );
   });
@@ -167,5 +171,125 @@ describe("Dashboard SSE Recheck Disconnect Recovery UI", () => {
     expect(
       screen.getByText(/batch recheck completed\. 12 contributors refreshed\./i)
     ).toBeInTheDocument();
+
+    // The live region announces the same outcome once the event clears the
+    // error it was reporting while streaming was down.
+    expect(screen.getByTestId("recheck-live-region")).toHaveTextContent(
+      "Batch re-check completed. 12 contributors refreshed."
+    );
+  });
+
+  // #498 — the live region used to receive an undefined `error` identifier, so
+  // an SSE disconnect only ever appeared in the visible banner. A stream
+  // failure has to reach screen readers too, and it has to win over the
+  // mutation error left behind by an earlier failed POST.
+  it("announces the stream disconnect error in the live region", () => {
+    vi.spyOn(jobProgressHook, "useJobProgress").mockReturnValue({
+      activeJobId: "job-recheck-123",
+      event: null,
+      isStreaming: false,
+      isReconnecting: false,
+      reconnectAttempt: 0,
+      maxReconnectAttempts: 3,
+      error: "Connection lost. Failed to reconnect after 3 attempts.",
+      startProgress: vi.fn(),
+      stopProgress: vi.fn(),
+    });
+
+    render(<DashboardPage />, { wrapper });
+
+    expect(screen.getByTestId("recheck-live-region")).toHaveTextContent(
+      "Batch re-check failed: Connection lost. Failed to reconnect after 3 attempts."
+    );
+    // The visible alert is still there — the live region is an addition, not a
+    // replacement.
+    expect(screen.getByTestId("recheck-disconnect-error-banner")).toBeInTheDocument();
+  });
+
+  it("announces the mutation error when no stream error is present", async () => {
+    vi.spyOn(jobProgressHook, "useJobProgress").mockReturnValue({
+      activeJobId: null,
+      event: null,
+      isStreaming: false,
+      isReconnecting: false,
+      reconnectAttempt: 0,
+      maxReconnectAttempts: 3,
+      error: null,
+      startProgress: vi.fn(),
+      stopProgress: vi.fn(),
+    });
+
+    vi.mocked(global.fetch).mockImplementation((input: RequestInfo | URL) => {
+      if (String(input) === "/api/contributors") {
+        return Promise.resolve({ ok: false, json: () => Promise.resolve({}) });
+      }
+      return defaultFetch(String(input));
+    });
+
+    render(<DashboardPage />, { wrapper });
+
+    await fireEvent.click(screen.getByRole("button", { name: /re-check all/i }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("recheck-live-region")).toHaveTextContent(
+        "Batch re-check failed: Re-check failed"
+      );
+    });
+  });
+
+  it("prefers the current stream error over a stale mutation error", async () => {
+    const jobProgressSpy = vi
+      .spyOn(jobProgressHook, "useJobProgress")
+      .mockReturnValue({
+        activeJobId: null,
+        event: null,
+        isStreaming: false,
+        isReconnecting: false,
+        reconnectAttempt: 0,
+        maxReconnectAttempts: 3,
+        error: null,
+        startProgress: vi.fn(),
+        stopProgress: vi.fn(),
+      });
+
+    vi.mocked(global.fetch).mockImplementation((input: RequestInfo | URL) => {
+      if (String(input) === "/api/contributors") {
+        return Promise.resolve({ ok: false, json: () => Promise.resolve({}) });
+      }
+      return defaultFetch(String(input));
+    });
+
+    const { rerender } = render(<DashboardPage />, { wrapper });
+
+    // Fail a re-check first: the mutation error is set but not stale yet.
+    await fireEvent.click(screen.getByRole("button", { name: /re-check all/i }));
+    await waitFor(() => {
+      expect(screen.getByTestId("recheck-live-region")).toHaveTextContent(
+        "Batch re-check failed: Re-check failed"
+      );
+    });
+
+    // A later stream failure must replace it, not be appended to it, and the
+    // stale mutation error must not be announced alongside it. `rerender`
+    // stands in for the SSE hook producing the new state.
+    jobProgressSpy.mockReturnValue({
+      activeJobId: "job-recheck-123",
+      event: null,
+      isStreaming: false,
+      isReconnecting: false,
+      reconnectAttempt: 0,
+      maxReconnectAttempts: 3,
+      error: "Connection lost. Failed to reconnect after 3 attempts.",
+      startProgress: vi.fn(),
+      stopProgress: vi.fn(),
+    });
+
+    rerender(<DashboardPage />);
+
+    const liveRegion = screen.getByTestId("recheck-live-region");
+    expect(liveRegion).toHaveTextContent(
+      "Batch re-check failed: Connection lost. Failed to reconnect after 3 attempts."
+    );
+    expect(liveRegion).not.toHaveTextContent("Re-check failed");
   });
 });
