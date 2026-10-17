@@ -10,8 +10,10 @@ export const dynamic = "force-dynamic";
 /**
  * Verifies the trustbridge-action webhook signature to ensure the request is authentic.
  * trustbridge-action sends the signature in the X-TrustBridge-Signature header in `sha256=<hex>` format.
+ *
+ * Exported for direct unit-testing of the timing-safe comparison path.
  */
-function verifySignature(payload: Buffer, signature: string | undefined): boolean {
+export function verifySignature(payload: Buffer, signature: string | undefined): boolean {
   const secret = process.env.TRUSTBRIDGE_ACTION_SECRET?.trim();
   if (!secret) {
     console.warn("TRUSTBRIDGE_ACTION_SECRET not configured — webhook signature verification failed");

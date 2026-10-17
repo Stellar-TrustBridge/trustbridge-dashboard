@@ -16,6 +16,7 @@ import { useTheme } from "next-themes";
 
 import { GitHubIcon } from "@/components/icons/GitHubIcon";
 import { NotificationBell } from "@/components/NotificationBell";
+import { OrgSwitcher } from "@/components/OrgSwitcher";
 import { SignInButton } from "@/components/SignInButton";
 import { useI18n } from "@/lib/i18n-context";
 
@@ -242,6 +243,7 @@ function LocaleSwitcherMobile() {
           </Button>
 
           {session && <NotificationBell />}
+          {session?.user?.isMaintainer && <OrgSwitcher />}
 
           {session ? (
             <div className="flex items-center gap-1.5">

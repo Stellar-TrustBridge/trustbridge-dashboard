@@ -14,6 +14,13 @@ declare module "next-auth" {
       isMaintainer?: boolean;
       role?: AppRole;
       csrfToken?: string;
+      /** The org the maintainer is currently scoped to. Defaults to "default". */
+      maintainerOrgId?: string;
+      /**
+       * All orgs the maintainer belongs to (from ALLOWED_MAINTAINER_ORGS).
+       * Only populated for maintainers; empty array for contributors.
+       */
+      availableOrgs?: string[];
     };
   }
 }
@@ -24,5 +31,9 @@ declare module "next-auth/jwt" {
     githubUsername?: string;
     isMaintainer?: boolean;
     role?: AppRole;
+    /** Active org for this session (set at sign-in, switchable via /api/auth/switch-org). */
+    maintainerOrgId?: string;
+    /** All orgs this maintainer belongs to (baked in at sign-in). */
+    availableOrgs?: string[];
   }
 }

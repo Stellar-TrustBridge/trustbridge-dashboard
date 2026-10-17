@@ -96,6 +96,34 @@ Maintainer check flow (two-tier: org, then optionally team):
 
 Non-maintainers hitting `/dashboard` are redirected to `/register?error=maintainer`.
 
+### Multi-org support and the org-switcher
+
+When `ALLOWED_MAINTAINER_ORGS` lists more than one org (comma-separated), the
+JWT callback calls `resolveAvailableOrgs()` at sign-in to find which of those
+orgs the user actually belongs to. The full list is baked into the token as
+`availableOrgs` and the first matched org becomes the initial `maintainerOrgId`.
+
+**Switching orgs without re-logging in:**
+
+1. The `OrgSwitcher` component (`src/components/OrgSwitcher.tsx`) renders in
+   the header only for maintainers with `availableOrgs.length > 1`.
+2. The user picks a different org. The component POSTs to
+   `POST /api/auth/switch-org` which validates the requested org is in the
+   session's `availableOrgs` list and records an `org_switched` audit log entry.
+3. The client calls NextAuth's `update({ maintainerOrgId })` to refresh the
+   session cookie without a full re-login.
+4. The page hard-navigates to `/dashboard` so server-side RLS picks up the new
+   `app.maintainer_org_id` setting.
+
+**Tenant isolation.** PostgreSQL RLS enforces row-level isolation via
+`current_setting('app.maintainer_org_id', true)` — switching org changes which
+rows the Prisma queries return. A maintainer can only switch to orgs present in
+their JWT-baked `availableOrgs`; any other value returns 403 with an audit log
+entry (`org_switch_denied`).
+
+**Single-org deployments** are unaffected: if `ALLOWED_MAINTAINER_ORGS`
+resolves to one org the switcher is hidden and nothing changes.
+
 ### Read-only GraphQL (`POST /api/graphql`)
 
 The endpoint exposes two query fields:
