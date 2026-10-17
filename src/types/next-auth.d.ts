@@ -1,6 +1,8 @@
 import "next-auth";
 import "next-auth/jwt";
 
+export type AppRole = "admin" | "operator" | "viewer";
+
 declare module "next-auth" {
   interface Session {
     user: {
@@ -10,6 +12,8 @@ declare module "next-auth" {
       image?: string | null;
       githubUsername?: string;
       isMaintainer?: boolean;
+      role?: AppRole;
+      csrfToken?: string;
     };
   }
 }
@@ -19,5 +23,6 @@ declare module "next-auth/jwt" {
     githubId?: string;
     githubUsername?: string;
     isMaintainer?: boolean;
+    role?: AppRole;
   }
 }

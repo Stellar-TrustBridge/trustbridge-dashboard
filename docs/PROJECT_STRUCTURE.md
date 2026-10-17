@@ -14,6 +14,7 @@ trustbridge-dashboard/
 ├── prisma/
 │   ├── schema.prisma     # Database schema (User, Registration, TokenAuditLog, NextAuth models)
 │   └── migrations/       # Prisma migration history
+├── scripts/              # Build-time helper scripts for Prisma/Next
 ├── src/
 │   ├── app/              # Next.js App Router pages & API routes
 │   ├── components/       # React components
@@ -24,6 +25,7 @@ trustbridge-dashboard/
 ├── components.json       # shadcn/ui configuration
 ├── tailwind.config.ts    # Tailwind + Stellar brand tokens
 ├── next.config.mjs       # Next.js config (webpack externals for stellar-sdk)
+├── package-lock.json     # npm lockfile
 └── package.json
 ```
 
@@ -93,6 +95,15 @@ components/
 
 ---
 
+## `scripts/` — Build helpers
+
+| File | Purpose |
+|------|---------|
+| `prisma-generate.mjs` | Runs `prisma generate`, using a placeholder PostgreSQL URL only when `DATABASE_URL` is unset or empty at build time |
+| `next-build.mjs` | Runs `next build`, supplying build-time placeholders for required server-only env vars when CI/preview builds do not provide real secrets |
+
+---
+
 ## `src/types/`
 
 | File | Purpose |
@@ -122,8 +133,9 @@ All docs link back to the [README](../README.md).
 | Script | Command | Purpose |
 |--------|---------|---------|
 | `dev` | `next dev` | Local development |
-| `build` | `prisma generate && next build` | Production build |
+| `build` | `npm run prisma:generate && node scripts/next-build.mjs` | Production build |
 | `start` | `next start` | Run production server |
+| `prisma:generate` | `node scripts/prisma-generate.mjs` | Generate Prisma client safely during installs/builds |
 | `lint` | `next lint` | ESLint |
 | `test` | `vitest run` | Unit tests |
 | `db:push` | `prisma db push` | Sync schema to DB |

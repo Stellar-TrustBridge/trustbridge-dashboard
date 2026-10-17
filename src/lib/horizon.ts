@@ -12,6 +12,7 @@ import {
   isAccountNotFoundError,
 } from "@/lib/readiness";
 import { withRetry } from "@/lib/retry";
+import { withSpan } from "@/lib/tracing";
 import {
   isValidStellarAddress,
   normalizeStellarAddress,
@@ -50,11 +51,26 @@ export function getHorizonCircuitBreakerMetrics(): ReturnType<
   return horizonCircuitBreaker.getMetrics();
 }
 
-async function loadAccountFromHorizon(
-  address: string
-): Promise<Horizon.ServerApi.AccountRecord> {
+async function loadAccountFromHorizon(address: string) {
   const server = getHorizonServer();
-  return server.loadAccount(address);
+  // Span name carries no address (issue #203); the account is a G-address.
+  return withSpan(
+    "horizon.loadAccount",
+    () =>
+      // SDK typings expose AccountResponse; runtime payload includes sponsorship fields.
+      server.loadAccount(address) as unknown as Promise<
+        Horizon.ServerApi.AccountRecord
+      >,
+    {
+      attributes: {
+        "peer.service": "horizon",
+        "horizon.url":
+          process.env.NEXT_PUBLIC_HORIZON_URL?.trim() || DEFAULT_HORIZON_URL,
+      },
+    },
+  );
+}
+
 /** True when the balance line is a trustline for the requested asset. */
 function isMatchingTrustline(
   balance: AccountBalance,
@@ -113,40 +129,24 @@ export async function checkStellarAddress(
     ]);
   }
 
-  const errors: string[] = [];
-
-  try {
-    const account = await horizonCircuitBreaker.call(() =>
-      loadAccountFromHorizon(trimmed)
-    );
-    const xlmBalance =
-      account.balances.find((b) => b.asset_type === "native")?.balance ?? "0";
-
-    const trustline = account.balances.some((balance) => {
-      if (balance.asset_type === "native") return false;
-      if (balance.asset_type === "liquidity_pool_shares") return false;
-      return (
-        "asset_code" in balance &&
-        balance.asset_code === assetCode &&
-        "asset_issuer" in balance &&
-        balance.asset_issuer === assetIssuer
-      );
   const cacheKey = buildCacheKey("horizon", trimmed, assetCode, assetIssuer);
   if (useCache) {
     const cached = verificationCache.get(cacheKey) as HorizonCheckResult | null;
     if (cached) return cached;
   }
 
-  const server = getHorizonServer();
-
   try {
-    const account = await withRetry(() => server.loadAccount(trimmed), {
-      attempts: retries,
-      // A missing account (404) will never succeed — fail fast instead of retrying.
-      shouldRetry: (error) =>
-        !isAccountNotFoundError(getHorizonErrorMessage(error)),
-    });
+    const startedAt = Date.now();
+    const account = await horizonCircuitBreaker.call(() =>
+      withRetry(() => loadAccountFromHorizon(trimmed), {
+        attempts: retries,
+        // A missing account (404) will never succeed — fail fast instead of retrying.
+        shouldRetry: (error) =>
+          !isAccountNotFoundError(getHorizonErrorMessage(error)),
+      })
+    );
 
+    const latencyMs = Date.now() - startedAt;
     const nativeBalance = account.balances.find(
       (b) => b.asset_type === "native"
     );
@@ -171,6 +171,7 @@ export async function checkStellarAddress(
     );
     const trustline = Boolean(trustlineBalance);
     const trustlineAuthorized = isTrustlineAuthorized(trustlineBalance);
+    const usdcBalance = (trustlineBalance && "balance" in trustlineBalance) ? trustlineBalance.balance : "0";
 
     const result = buildCheckResult(
       true,
@@ -178,7 +179,9 @@ export async function checkStellarAddress(
       xlmBalance,
       [],
       trustlineAuthorized,
-      spendableXlmBalance
+      spendableXlmBalance,
+      usdcBalance,
+      latencyMs
     );
 
     if (useCache) verificationCache.set(cacheKey, result);
