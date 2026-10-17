@@ -393,6 +393,52 @@ End-to-end/browser coverage (e.g. Playwright) for the event timeline panel and a
 
 ---
 
+## Webhook module layout
+
+GitHub webhook logic is separated from Next.js App Router route files so that:
+
+1. **Next.js static analysis** sees only HTTP handler exports (`GET`, `POST`, `OPTIONS`, and `runtime` / `dynamic` config) in `route.ts` files — no stray helpers that the bundler might interpret as additional route entries.
+2. **Shared helpers can be imported** from the replay route and tests without creating cross-route import cycles.
+3. **Tree-shaking** keeps the edge/Node.js bundle lean; helpers that are only needed server-side are still marked `import "server-only"` inside the lib module.
+
+### File layout
+
+```
+src/
+  lib/
+    github-org-membership-webhook.ts   ← ALL shared logic lives here
+      verifyWebhookSignature()           HMAC-SHA256, constant-time compare
+      processGithubOrgMembershipEvent()  Prisma upsert + audit log
+      GithubOrgMembershipPayload (type)
+      WebhookVerificationResult (type)
+      ProcessEventResult (type)
+
+  app/api/webhooks/
+    github-org-membership/
+      route.ts          ← exports POST only; imports from @/lib
+      replay/
+        route.ts        ← maintainer-only replay; imports from @/lib (not from sibling route)
+
+tests/api/
+  github-org-membership-webhook.test.ts
+    ├── verifyWebhookSignature  (pure unit — lib path)
+    ├── processGithubOrgMembershipEvent  (lib path)
+    ├── POST /api/webhooks/github-org-membership  (route)
+    └── POST /api/webhooks/github-org-membership/replay  (route)
+```
+
+### Adding a new webhook type
+
+1. Create `src/lib/<event-type>-webhook.ts` with `verify*` and `process*` helpers.
+2. Create `src/app/api/webhooks/<event-type>/route.ts` that imports from the lib module.
+3. Add tests under `tests/api/<event-type>-webhook.test.ts` importing from lib, not from the route.
+4. Document the module here.
+
+### Environment variables
+
+| Variable | Purpose |
+|----------|---------|
+| `GITHUB_WEBHOOK_SECRET` | HMAC secret shared with GitHub; required for all `github-org-membership` webhooks |
 ### Unified Transactional Outbox for Soroban write-through (#199, #488)
 
 To ensure reliable write-through to Soroban without losing registrations during chain or RPC outages, while supporting fast, hermetic unit tests:
