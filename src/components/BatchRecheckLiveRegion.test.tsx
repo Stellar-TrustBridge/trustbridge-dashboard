@@ -57,4 +57,75 @@ describe("BatchRecheckLiveRegion", () => {
 
     expect(screen.getByRole("status")).toHaveTextContent(expected);
   });
+
+  // #498 — the dashboard used to pass an undefined `error` identifier here, so
+  // an SSE disconnect never reached the live region.
+  it("announces a stream failure while not streaming", () => {
+    render(
+      <BatchRecheckLiveRegion
+        event={null}
+        isStarting={false}
+        isStreaming={false}
+        error="Connection lost. Failed to reconnect after 3 attempts."
+      />
+    );
+
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Batch re-check failed: Connection lost. Failed to reconnect after 3 attempts."
+    );
+  });
+
+  it("announces reconnection instead of a failure that is still being retried", () => {
+    render(
+      <BatchRecheckLiveRegion
+        event={{ type: "processing", startedAt: "2026-09-27T12:00:00Z" }}
+        isStarting={false}
+        isStreaming={false}
+        isReconnecting
+        reconnectAttempt={2}
+        maxReconnectAttempts={3}
+        error="Connection lost. Failed to reconnect after 3 attempts."
+      />
+    );
+
+    const status = screen.getByRole("status");
+    expect(status).toHaveTextContent("Batch re-check: Reconnecting (2/3)...");
+    expect(status).not.toHaveTextContent("failed");
+  });
+
+  it("reports a completed run once reconnection succeeds", () => {
+    const { rerender } = render(
+      <BatchRecheckLiveRegion
+        event={null}
+        isStarting={false}
+        isStreaming={false}
+        isReconnecting
+        reconnectAttempt={1}
+        maxReconnectAttempts={3}
+        error={null}
+      />
+    );
+
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Batch re-check: Reconnecting (1/3)..."
+    );
+
+    rerender(
+      <BatchRecheckLiveRegion
+        event={{ type: "completed", result: { refreshed: 7 } }}
+        isStarting={false}
+        isStreaming={false}
+        isReconnecting={false}
+        reconnectAttempt={0}
+        maxReconnectAttempts={3}
+        error={null}
+      />
+    );
+
+    const status = screen.getByRole("status");
+    expect(status).toHaveTextContent(
+      "Batch re-check completed. 7 contributors refreshed."
+    );
+    expect(status).not.toHaveTextContent("Reconnecting");
+  });
 });

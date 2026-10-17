@@ -160,6 +160,32 @@ export interface SorobanEventTimelineResponse {
   errors: string[];
 }
 
+// ---------------------------------------------------------------------------
+// Onboarding checklist
+// ---------------------------------------------------------------------------
+
+/**
+ * Canonical keys that the onboarding checklist tracks.
+ * Add new steps here; the reducer and API route stay in sync automatically.
+ */
+export type OnboardingChecklistKey =
+  | "stellarAccountCreated"
+  | "usdcTrustlineAdded"
+  | "addressRegistered"
+  | "readinessConfirmed";
+
+/**
+ * Maps each checklist step to a completion boolean.
+ * Unknown keys from the server are ignored at the UI layer; partial updates
+ * must not wipe steps that are already completed.
+ *
+ * Initialise as `{}` (all steps pending) and merge incoming PATCH payloads
+ * with `{ ...existing, ...incoming }` so completed steps are never cleared.
+ */
+export type OnboardingChecklistState = Partial<
+  Record<OnboardingChecklistKey, boolean>
+>;
+
 export type StellarNetwork = "mainnet" | "testnet" | "custom";
 
 /**

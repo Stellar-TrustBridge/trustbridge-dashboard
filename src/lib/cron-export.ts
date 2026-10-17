@@ -8,6 +8,7 @@ import { prisma } from "@/lib/prisma";
 import { toContributorRow } from "@/lib/registrations";
 import { getStaleContributors, isExportStale } from "@/lib/stale-export";
 import { trackServerCsvExported } from "@/lib/analytics";
+import { sendCronExportAlert, pingCronExportSuccess } from "@/lib/cron-export-alert";
 import type { ContributorRow } from "@/types";
 
 const logger = new StructuredLogger("cron-export");
@@ -205,6 +206,9 @@ export async function runCronExport(
       durationMs,
     });
 
+    // Ping dead-man's switch on success (no-op when CRON_EXPORT_PING_URL unset)
+    void pingCronExportSuccess();
+
     return lastResult;
   } catch (error) {
     const durationMs = Date.now() - now;
@@ -228,6 +232,9 @@ export async function runCronExport(
       durationMs,
       error: message,
     };
+
+    // Fire alert webhook (no-op when CRON_EXPORT_ALERT_WEBHOOK_URL unset)
+    void sendCronExportAlert(lastResult);
 
     return lastResult;
   }

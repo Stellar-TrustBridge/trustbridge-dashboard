@@ -64,6 +64,20 @@ model TokenAuditLog {
 }
 
 model Registration {
+  id             String    @id @default(cuid())
+  userId         String    @unique
+  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  stellarAddress String    @unique
+  trustlineReady Boolean   @default(false)
+  trustlineAuthorized Boolean @default(false)
+  funded         Boolean   @default(false)
+  xlmBalance     String    @default("0")
+  spendableXlmBalance String @default("0")
+  lastCheckedAt  DateTime?
+  /// JSON map of OnboardingChecklistState keys → boolean. Null = no steps completed yet.
+  checklistCompleted Json?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
   id                  String        @id @default(cuid())
   maintainerOrgId     String        @default("default")
   userId              String        @unique
@@ -255,6 +269,32 @@ model VerificationToken {
   @@unique([identifier, token])
 }
 
+model ApiKey {
+  id        String    @id @default(cuid())
+  name      String
+  /// SHA-256 hex digest of the raw key. The raw key is shown exactly once
+  /// and never stored in plaintext — see src/lib/invite-helpers.ts for the
+  /// same pattern used for invite tokens.
+  keyHash   String    @unique
+  scopes    String[]
+  createdAt DateTime  @default(now())
+  revokedAt DateTime?
+
+  @@index([createdAt])
+}
+
+model Invite {
+  id         String    @id @default(cuid())
+  email      String
+  /// SHA-256 hex digest of the raw token. Only the hash is persisted.
+  tokenHash  String    @unique
+  expiresAt  DateTime
+  usedAt     DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([email])
+  @@index([expiresAt])
+}
 enum NotificationType {
   BATCH_JOB_COMPLETED
   BATCH_JOB_FAILED

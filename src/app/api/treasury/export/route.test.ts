@@ -1,13 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest, NextResponse } from "next/server";
+import { getServerSession } from "next-auth";
 
 /**
  * Tests for GET and POST /api/treasury/export
  *
  * Authorization matrix:
- *   - Unauthenticated (requireOperator returns null)  → 403
- *   - Viewer / non-operator (requireOperator returns null) → 403
- *   - Operator or higher (requireOperator returns session)  → 200
+ *   - Unauthenticated (no operator session or API key) → 401
+ *   - Operator session or export:read API key → 200
+ *   - Rate-limited API key → 429
  *
  * Functional coverage:
  *   - GET: returns export payload with correct counts and audit log
@@ -23,6 +24,16 @@ import { NextRequest, NextResponse } from "next/server";
 
 vi.mock("@/lib/api-auth", () => ({
   requireOperator: vi.fn(),
+}));
+
+vi.mock("next-auth", () => ({
+  getServerSession: vi.fn(),
+}));
+
+vi.mock("@/lib/api-key-auth", () => ({
+  API_KEY_RATE_LIMIT: { maxRequests: 60 },
+  buildRateLimitHeaders: vi.fn().mockReturnValue({}),
+  requireApiKeyScope: vi.fn(),
 }));
 
 vi.mock("@/lib/readiness", () => ({
@@ -47,9 +58,10 @@ vi.mock("@/lib/audit", () => ({
 
 import { GET, POST } from "@/app/api/treasury/export/route";
 import { requireOperator } from "@/lib/api-auth";
+import { authOptions } from "@/lib/auth";
 import { assertSameOrigin } from "@/lib/csrf";
+import { buildRateLimitHeaders, requireApiKeyScope } from "@/lib/api-key-auth";
 import { prisma } from "@/lib/prisma";
-import { computeReadiness } from "@/lib/readiness";
 import { computeReadiness } from "@/lib/readiness";
 import { recordAuditLog } from "@/lib/audit";
 
@@ -78,8 +90,7 @@ const twoRegistrations = [
     trustlineAuthorized: true,
     xlmBalance: "100",
     spendableXlmBalance: "50",
-    lastCheckedAt: new Date("2026-07-26"),
-    lastCheckedAt: new Date("2026-07-26"),
+    lastCheckedAt: new Date(),
     deletedAt: null,
     user: { githubUsername: "contributor1" },
   },
@@ -92,21 +103,24 @@ const twoRegistrations = [
     trustlineAuthorized: false,
     xlmBalance: "0",
     spendableXlmBalance: "0",
-    lastCheckedAt: new Date("2026-07-26"),
-    lastCheckedAt: new Date("2026-07-26"),
+    lastCheckedAt: new Date(),
     deletedAt: null,
     user: { githubUsername: "contributor2" },
   },
 ];
 
-function makePostRequest(body: unknown, origin = "http://localhost:3000"): NextRequest {
+function makePostRequest(
+  body: unknown,
+  origin = "http://localhost:3000",
+  authorization?: string
+): NextRequest {
   return new NextRequest("http://localhost:3000/api/treasury/export", {
     method: "POST",
-    headers: {
     headers: {
       host: "localhost:3000",
       origin,
       "content-type": "application/json",
+      ...(authorization ? { authorization } : {}),
     },
     body: JSON.stringify(body),
   });
@@ -119,15 +133,15 @@ function makePostRequest(body: unknown, origin = "http://localhost:3000"): NextR
 describe("GET /api/treasury/export", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.mocked(assertSameOrigin).mockReturnValue(null);
+    vi.mocked(getServerSession).mockResolvedValue(null);
     vi.mocked(assertSameOrigin).mockReturnValue(null);
   });
 
   // ── Authorization ────────────────────────────────────────────────────────
 
   describe("Authorization", () => {
-    it("returns 403 when unauthenticated (requireOperator returns null)", async () => {
-      vi.mocked(requireOperator).mockResolvedValue(null);
+    it("returns 403 when unauthenticated", async () => {
+      vi.mocked(getServerSession).mockResolvedValue(null);
 
       const res = await GET();
 
@@ -137,9 +151,10 @@ describe("GET /api/treasury/export", () => {
       expect(prisma.registration.findMany).not.toHaveBeenCalled();
     });
 
-    it("returns 403 when caller is a viewer (requireOperator returns null)", async () => {
-      // requireOperator already enforces role — returning null models a viewer denial
-      vi.mocked(requireOperator).mockResolvedValue(null);
+    it("returns 403 when caller is not a maintainer", async () => {
+      vi.mocked(getServerSession).mockResolvedValue({
+        user: { id: "viewer-1", isMaintainer: false },
+      } as never);
 
       const res = await GET();
 
@@ -147,14 +162,14 @@ describe("GET /api/treasury/export", () => {
     });
 
     it("allows an operator to export", async () => {
-      vi.mocked(requireOperator).mockResolvedValue(operatorSession as never);
+      vi.mocked(getServerSession).mockResolvedValue(operatorSession as never);
       vi.mocked(prisma.registration.findMany).mockResolvedValue([]);
       vi.mocked(computeReadiness).mockReturnValue("ready");
 
       const res = await GET();
 
       expect(res.status).toBe(200);
-      expect(requireOperator).toHaveBeenCalledWith("treasury.export");
+      expect(getServerSession).toHaveBeenCalledWith(authOptions);
     });
   });
 
@@ -162,7 +177,7 @@ describe("GET /api/treasury/export", () => {
 
   describe("Response", () => {
     beforeEach(() => {
-      vi.mocked(requireOperator).mockResolvedValue(operatorSession as never);
+      vi.mocked(getServerSession).mockResolvedValue(operatorSession as never);
     });
 
     it("returns correct counts and contributor list", async () => {
@@ -223,23 +238,27 @@ describe("POST /api/treasury/export", () => {
   // ── Authorization ────────────────────────────────────────────────────────
 
   describe("Authorization", () => {
-    it("returns 403 when unauthenticated (requireOperator returns null)", async () => {
+    it("returns 401 when unauthenticated (no session or API key)", async () => {
       vi.mocked(requireOperator).mockResolvedValue(null);
+      vi.mocked(requireApiKeyScope).mockResolvedValue(null);
 
       const res = await POST(makePostRequest({ format: "json" }));
 
-      expect(res.status).toBe(403);
+      expect(res.status).toBe(401);
       const json = await res.json();
-      expect(json.error).toBe("Forbidden");
+      expect(json.error).toBe("Unauthorized");
       expect(prisma.registration.findMany).not.toHaveBeenCalled();
     });
 
-    it("returns 403 when caller is a viewer (requireOperator returns null)", async () => {
+    it("returns 401 when the API key is missing or invalid", async () => {
       vi.mocked(requireOperator).mockResolvedValue(null);
+      vi.mocked(requireApiKeyScope).mockResolvedValue(null);
 
-      const res = await POST(makePostRequest({ format: "json" }));
+      const res = await POST(
+        makePostRequest({ format: "json" }, "http://localhost:3000", "Bearer invalid")
+      );
 
-      expect(res.status).toBe(403);
+      expect(res.status).toBe(401);
     });
 
     it("allows an operator to export", async () => {
@@ -251,6 +270,52 @@ describe("POST /api/treasury/export", () => {
 
       expect(res.status).toBe(200);
       expect(requireOperator).toHaveBeenCalledWith("treasury.export");
+    });
+
+    it("allows an API key with export:read scope", async () => {
+      vi.mocked(requireOperator).mockResolvedValue(null);
+      vi.mocked(requireApiKeyScope).mockResolvedValue({
+        id: "key-1",
+        name: "load-test",
+        scopes: ["export:read"],
+        createdById: "operator-1",
+        maintainerOrgId: "org-1",
+      });
+      vi.mocked(prisma.registration.findMany).mockResolvedValue([]);
+      vi.mocked(computeReadiness).mockReturnValue("ready");
+
+      const res = await POST(
+        makePostRequest({ format: "json" }, "http://localhost:3000", "Bearer test-key")
+      );
+
+      expect(res.status).toBe(200);
+      expect(requireApiKeyScope).toHaveBeenCalledWith(
+        expect.anything(),
+        "export:read"
+      );
+      expect(recordAuditLog).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: "treasury.export",
+          actorId: "operator-1",
+          actorLogin: "api-key:load-test",
+        })
+      );
+    });
+
+    it("returns 429 when the API key is rate limited", async () => {
+      vi.mocked(requireOperator).mockResolvedValue(null);
+      vi.mocked(requireApiKeyScope).mockResolvedValue({
+        rateLimited: true,
+        result: { allowed: false, retryAfter: 10, remaining: 0 },
+      });
+
+      const res = await POST(
+        makePostRequest({ format: "json" }, "http://localhost:3000", "Bearer test-key")
+      );
+
+      expect(res.status).toBe(429);
+      expect(buildRateLimitHeaders).toHaveBeenCalled();
+      expect(prisma.registration.findMany).not.toHaveBeenCalled();
     });
   });
 
@@ -394,4 +459,3 @@ describe("POST /api/treasury/export", () => {
     });
   });
 });
-
