@@ -3,7 +3,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSession } from "next-auth/react";
 import { useSearchParams } from "next/navigation";
-import { useState } from "react";
+import { useReducer, useState } from "react";
 import { CheckCircle2, Loader2 } from "lucide-react";
 
 import { AddressInput } from "@/components/AddressInput";
@@ -17,13 +17,63 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import type { OnboardingChecklistState } from "@/types";
+
+// ---------------------------------------------------------------------------
+// Checklist reducer
+// ---------------------------------------------------------------------------
+
+type ChecklistAction =
+  | { type: "COMPLETE_STEP"; key: keyof OnboardingChecklistState }
+  | { type: "MERGE"; payload: OnboardingChecklistState };
+
+/**
+ * Merge incoming payload into existing state so completed steps are never
+ * wiped by a partial server update.  Unknown keys from the API are ignored
+ * because the spread only carries recognised fields through the typed payload.
+ */
+function checklistReducer(
+  state: OnboardingChecklistState,
+  action: ChecklistAction
+): OnboardingChecklistState {
+  switch (action.type) {
+    case "COMPLETE_STEP":
+      return { ...state, [action.key]: true };
+    case "MERGE":
+      // Only apply keys that are already defined in OnboardingChecklistState
+      // to prevent stray server fields from polluting local state.
+      return { ...state, ...action.payload };
+    default:
+      return state;
+  }
+}
+
+/**
+ * Normalise a potentially-null checklist value coming from the server to the
+ * canonical empty object so the reducer always receives a valid state shape.
+ */
+function normaliseChecklist(
+  raw: OnboardingChecklistState | null | undefined
+): OnboardingChecklistState {
+  if (!raw || typeof raw !== "object") return {};
+  return raw;
+}
+
+// ---------------------------------------------------------------------------
+// API shape
+// ---------------------------------------------------------------------------
 
 interface RegistrationResponse {
   registration?: {
     stellarAddress: string;
     readiness: "ready" | "low_reserve" | "not_ready";
+    checklistCompleted?: OnboardingChecklistState | null;
   };
 }
+
+// ---------------------------------------------------------------------------
+// Component
+// ---------------------------------------------------------------------------
 
 export function RegisterClient() {
   const { data: session } = useSession();
@@ -32,6 +82,9 @@ export function RegisterClient() {
   const [address, setAddress] = useState("");
   const [saved, setSaved] = useState(false);
 
+  // Checklist state — typed, no `any` casts, partial updates safe.
+  const [checklist, dispatchChecklist] = useReducer(checklistReducer, {});
+
   const maintainerError = searchParams.get("error") === "maintainer";
 
   const existingQuery = useQuery({
@@ -39,7 +92,17 @@ export function RegisterClient() {
     queryFn: async () => {
       const response = await fetch("/api/register");
       if (!response.ok) throw new Error("Failed to load registration");
-      return (await response.json()) as RegistrationResponse;
+      const data = (await response.json()) as RegistrationResponse;
+
+      // Hydrate local checklist from persisted server state on first load.
+      if (data.registration?.checklistCompleted != null) {
+        dispatchChecklist({
+          type: "MERGE",
+          payload: normaliseChecklist(data.registration.checklistCompleted),
+        });
+      }
+
+      return data;
     },
     enabled: !!session,
   });
@@ -51,14 +114,25 @@ export function RegisterClient() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ stellarAddress }),
       });
-      const data = await response.json();
+      const data = (await response.json()) as {
+        error?: string;
+        registration?: RegistrationResponse["registration"];
+      };
       if (!response.ok) {
         throw new Error(data.error ?? "Registration failed");
       }
       return data;
     },
-    onSuccess: () => {
+    onSuccess: (data) => {
       setSaved(true);
+      // Mark the address registration step as complete.
+      dispatchChecklist({ type: "COMPLETE_STEP", key: "addressRegistered" });
+
+      // If the returned registration is ready, mark readiness confirmed too.
+      if (data.registration?.readiness === "ready") {
+        dispatchChecklist({ type: "COMPLETE_STEP", key: "readinessConfirmed" });
+      }
+
       queryClient.invalidateQueries({ queryKey: ["registration"] });
       queryClient.invalidateQueries({ queryKey: ["stats"] });
     },
@@ -109,6 +183,34 @@ export function RegisterClient() {
               )}
             </Card>
           )}
+
+          {/* Onboarding checklist — driven by shared OnboardingChecklistState */}
+          <Card data-testid="onboarding-checklist">
+            <CardHeader className="pb-2">
+              <CardTitle className="text-base">Onboarding checklist</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <ul className="space-y-1 text-sm">
+                {(
+                  [
+                    ["stellarAccountCreated", "Create a Stellar account"],
+                    ["usdcTrustlineAdded", "Add USDC trustline"],
+                    ["addressRegistered", "Register your address"],
+                    ["readinessConfirmed", "Readiness confirmed"],
+                  ] satisfies [keyof OnboardingChecklistState, string][]
+                ).map(([key, label]) => (
+                  <li key={key} className="flex items-center gap-2">
+                    <CheckCircle2
+                      className={`h-4 w-4 ${checklist[key] ? "text-emerald-500" : "text-muted-foreground/30"}`}
+                    />
+                    <span className={checklist[key] ? "font-medium" : "text-muted-foreground"}>
+                      {label}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </CardContent>
+          </Card>
 
           <Card>
             <CardHeader>
