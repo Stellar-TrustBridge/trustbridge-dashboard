@@ -5,6 +5,10 @@ import { z } from "zod";
 import { authOptions } from "@/lib/auth";
 import { assertSameOrigin } from "@/lib/csrf";
 import { prisma } from "@/lib/prisma";
+import {
+  trackServerDisputeClosed,
+  trackServerDisputeOpened,
+} from "@/lib/analytics";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -125,6 +129,13 @@ export async function POST(request: NextRequest) {
     },
     select: { id: true, registrationId: true, reason: true, proofCid: true, status: true, createdAt: true },
   });
+  trackServerDisputeOpened({
+    userId: session.user.id,
+    disputeId: dispute.id,
+    registrationId: dispute.registrationId,
+    actorRole: session.user.isMaintainer ? "maintainer" : "contributor",
+    hasProof: Boolean(dispute.proofCid),
+  });
   return NextResponse.json({ dispute }, { status: 201 });
 }
 
@@ -172,6 +183,14 @@ export async function PATCH(request: NextRequest) {
       resolvedAt: true,
     },
   });
+
+  if (dispute.status === "OPEN") {
+    trackServerDisputeClosed({
+      userId: session.user.id,
+      disputeId: updated.id,
+      status: updated.status,
+    });
+  }
 
   return NextResponse.json({ dispute: updated });
 }

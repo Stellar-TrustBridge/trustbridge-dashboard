@@ -3,6 +3,7 @@ import "server-only";
 import type { NextRequest } from "next/server";
 
 import { recordAuditLog } from "@/lib/audit";
+import { ApiKeyScope, API_KEY_SCOPES, hasApiKeyScope } from "@/lib/api-key-scopes";
 import { hashApiKey, isValidApiKeyFormat } from "@/lib/api-key-crypto";
 import { prisma } from "@/lib/prisma";
 import {
@@ -15,9 +16,8 @@ import {
 // Types
 // ---------------------------------------------------------------------------
 
-export type ApiKeyScope = "export:read";
-
-export const API_KEY_SCOPES: ApiKeyScope[] = ["export:read"];
+export type { ApiKeyScope } from "@/lib/api-key-scopes";
+export { API_KEY_SCOPES } from "@/lib/api-key-scopes";
 
 /** The subset of the ApiKey row returned to callers after a successful auth. */
 export interface AuthenticatedApiKey {
@@ -38,7 +38,7 @@ export interface AuthenticatedApiKey {
  * not creatable via the UI, but is recognised here for flexibility.
  */
 export function hasScope(scopes: string[], required: ApiKeyScope): boolean {
-  return scopes.includes(required) || scopes.includes("*");
+  return hasApiKeyScope(scopes, required);
 }
 
 // ---------------------------------------------------------------------------
@@ -177,7 +177,7 @@ export async function requireApiKeyScope(
   // ── 6. Update lastUsedAt (best-effort, non-blocking) ────────────────────
   prisma.apiKey
     .update({ where: { id: key.id }, data: { lastUsedAt: now } })
-    .catch(() => {/* best-effort */});
+    .catch(() => {/* best-effort */ });
 
   return {
     id: key.id,

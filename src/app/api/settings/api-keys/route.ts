@@ -3,7 +3,7 @@ import { z } from "zod";
 
 import { requireOperator } from "@/lib/api-auth";
 import { generateApiKey, hashApiKey } from "@/lib/api-key-crypto";
-import { API_KEY_SCOPES } from "@/lib/api-key-auth";
+import { API_KEY_SCOPES, API_KEY_SCOPE_VALUES } from "@/lib/api-key-scopes";
 import { recordAuditLog } from "@/lib/audit";
 import { assertSameOrigin } from "@/lib/csrf";
 import { prisma } from "@/lib/prisma";
@@ -22,7 +22,7 @@ const CreateApiKeySchema = z.object({
     .max(80, "Name must be 80 characters or fewer")
     .trim(),
   scopes: z
-    .array(z.enum(["export:read"]))
+    .array(z.enum(API_KEY_SCOPE_VALUES))
     .min(1, "At least one scope is required")
     .max(API_KEY_SCOPES.length, "Too many scopes"),
   expiresAt: z

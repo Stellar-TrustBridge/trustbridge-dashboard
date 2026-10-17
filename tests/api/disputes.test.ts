@@ -20,8 +20,21 @@ vi.mock("@/lib/prisma", () => ({
   },
 }));
 
+vi.mock("@/lib/analytics", () => ({
+  trackServerDisputeOpened: vi.fn(),
+  trackServerDisputeClosed: vi.fn(),
+}));
+
 import { getServerSession } from "next-auth";
 import { prisma } from "@/lib/prisma";
+import {
+  trackServerDisputeClosed,
+  trackServerDisputeOpened,
+} from "@/lib/analytics";
+
+beforeEach(() => {
+  vi.clearAllMocks();
+});
 
 const sameOriginHeaders: Record<string, string> = {
   origin: "http://localhost:3000",
@@ -404,6 +417,13 @@ describe("POST /api/disputes", () => {
     expect(res.status).toBe(201);
     const json = await res.json();
     expect(json.dispute.proofCid).toBe("Qm12345");
+    expect(trackServerDisputeOpened).toHaveBeenCalledWith({
+      userId: "user-1",
+      disputeId: "d-1",
+      registrationId: "r-1",
+      actorRole: "contributor",
+      hasProof: true,
+    });
   });
 });
 
@@ -496,6 +516,11 @@ describe("PATCH /api/disputes", () => {
         }),
       })
     );
+    expect(trackServerDisputeClosed).toHaveBeenCalledWith({
+      userId: "user-1",
+      disputeId: "d-1",
+      status: "VALIDATED",
+    });
   });
 
   it("updates dispute status to REJECTED", async () => {
@@ -529,5 +554,32 @@ describe("PATCH /api/disputes", () => {
         }),
       })
     );
+  });
+
+  it("does not track another close event when the dispute was already closed", async () => {
+    vi.mocked(getServerSession).mockResolvedValue({
+      user: { id: "user-1", isMaintainer: true },
+    } as any);
+    vi.mocked(prisma.disputeProof.findUnique).mockResolvedValue({
+      id: "d-1",
+      status: "VALIDATED",
+    });
+    vi.mocked(prisma.disputeProof.update).mockResolvedValue({
+      id: "d-1",
+      registrationId: "r-1",
+      reason: "Invalid address",
+      proofCid: null,
+      status: "REJECTED",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      resolvedAt: new Date(),
+    });
+
+    const res = await PATCH(
+      request("PATCH", { disputeId: "d-1", status: "REJECTED" })
+    );
+
+    expect(res.status).toBe(200);
+    expect(trackServerDisputeClosed).not.toHaveBeenCalled();
   });
 });

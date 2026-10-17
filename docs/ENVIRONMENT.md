@@ -195,6 +195,9 @@ FREEZE_WINDOW_START=2026-09-25T00:00:00.000Z
 - Parsed with `new Date()`. Invalid values are silently ignored (freeze inactive).
 - Must be set alongside `FREEZE_WINDOW_END`; either variable alone has no effect.
 - Setting `FREEZE_WINDOW_ENABLED=false` overrides both time variables.
+- The start and end are inclusive. If they are equal, the freeze is active only
+  at that exact instant. A start later than the end is invalid and leaves the
+  freeze inactive.
 
 ### `FREEZE_WINDOW_END`
 
@@ -370,7 +373,7 @@ Minimum time between `/api/cron/export` runs; repeated triggers within this wind
 
 ### `NEXT_PUBLIC_POSTHOG_API_KEY`
 
-PostHog project API key for product analytics. When set, the dashboard tracks key events like registration completions, rechecks, and CSV exports.
+PostHog project API key for browser analytics. When set, the dashboard tracks key events like registration completions, rechecks, and CSV exports. Server-side API events, including the dispute open/close funnel, use `POSTHOG_API_KEY` instead.
 
 - **Optional.** When unset, analytics events are silently ignored (no-op) or logged to console in development.
 - **Security:** This is a public key (prefixed with `NEXT_PUBLIC_`) — PostHog project API keys are safe to expose in the browser.
@@ -566,6 +569,8 @@ API keys are self-contained in the database. The only prerequisite is that `DATA
 ### `API_KEY_RATE_LIMIT_WINDOW_MS` _(optional, reserved)_
 
 Currently the per-IP rate limit for API key–authenticated export requests is hardcoded to **60 requests per 60 seconds**. A future release will read `API_KEY_RATE_LIMIT_WINDOW_MS` and `API_KEY_RATE_LIMIT_MAX_REQUESTS` from the environment to allow operators to tune the window. For now, use the existing `RATE_LIMIT_WINDOW_MS` / `RATE_LIMIT_MAX_REQUESTS` env vars to tune the process-wide default, which also affects `/api/check` and other guarded endpoints.
+
+API key permissions are stored as named scopes and checked through the documented scope bitmask (`export:read` is bit 0, mask `1`). The API continues to accept and return scope-name arrays; see [API key scope bitmask](./API_KEYS.md#scope-bitmask) for the mapping and rules.
 
 ### Security properties
 

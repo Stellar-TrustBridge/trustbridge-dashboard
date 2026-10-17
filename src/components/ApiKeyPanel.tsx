@@ -23,6 +23,7 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { API_KEY_SCOPE_DEFINITIONS, ApiKeyScope } from "@/lib/api-key-scopes";
 import { formatRelativeTime } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
@@ -48,8 +49,19 @@ interface CreateResponse {
 // ---------------------------------------------------------------------------
 
 function ScopeChip({ scope }: { scope: string }) {
+  const definition = API_KEY_SCOPE_DEFINITIONS[scope as ApiKeyScope];
+  const tooltip = definition
+    ? `${scope} — bit ${definition.bit} (mask ${definition.mask}): ${definition.description}`
+    : `${scope} — unrecognized scope`;
+
   return (
-    <Badge variant="secondary" className="font-mono text-xs">
+    <Badge
+      variant="secondary"
+      className="font-mono text-xs"
+      title={tooltip}
+      aria-label={tooltip}
+      data-testid={`api-key-scope-${scope}`}
+    >
       {scope}
     </Badge>
   );
@@ -197,7 +209,10 @@ function CreateKeyForm({ onCreated }: { onCreated: (secret: string) => void }) {
           data-testid="api-key-name-input"
         />
         <p className="text-xs text-muted-foreground">
-          Scope: <code className="font-mono">export:read</code> — read-only access
+          Scope: <code
+            className="font-mono"
+            title="Bit 0 (mask 1): read contributor export endpoints; does not allow writes."
+          >export:read</code> — read-only access
           to contributor export endpoints.
         </p>
       </div>

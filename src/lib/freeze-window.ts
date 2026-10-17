@@ -31,11 +31,16 @@ export function isFreezeWindowActive(now = new Date()): FreezeWindowStatus {
   const start = new Date(startStr);
   const end = new Date(endStr);
 
-  if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+  if (
+    isNaN(start.getTime()) ||
+    isNaN(end.getTime()) ||
+    start.getTime() > end.getTime()
+  ) {
     return { active: false };
   }
 
-  const active = now >= start && now <= end;
+  const nowTime = now.getTime();
+  const active = nowTime >= start.getTime() && nowTime <= end.getTime();
   if (active) {
     return {
       active: true,

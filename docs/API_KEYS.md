@@ -31,6 +31,16 @@ API keys solve all three problems: they are long-lived, scoped to the minimum re
 | **Audit trail** | `api_key.created`, `api_key.revoked`, `api_key.use_rejected` written to `AuditLog` on every relevant event. |
 | **Plaintext guard** | `isValidApiKeyFormat()` rejects malformed values before the DB round-trip. |
 
+### Scope bitmask
+
+Scopes are submitted and stored as named strings (for example, `scopes: ["export:read"]`). Authorization maps those names to a bitmask so scope checks are composable; the database and API response remain string arrays.
+
+| Scope | Bit | Mask | Permission |
+|---|---:|---:|---|
+| `export:read` | 0 | `1` (`0b0001`) | Read `/api/contributors/export/*`; no write access |
+
+Bits are zero-based and masks are powers of two (`1 << bit`). Unknown scope names grant no permissions and are rejected when creating keys. The wildcard `*` is reserved for internal authorization use and cannot be created through the management API. New scopes must be assigned the next unused bit and added to the shared scope definitions before they are exposed.
+
 > The rate limiter is in-process. On multi-instance deployments the effective limit is `N × 60` where N is the number of running instances. This is noted in `ENVIRONMENT.md` and acceptable for abuse prevention.
 
 ---
@@ -42,6 +52,7 @@ API keys solve all three problems: they are long-lived, scoped to the minimum re
 1. Go to `/dashboard/settings` (requires `operator` or `admin` role).
 2. Find the **API keys** card.
 3. Enter a descriptive name (e.g. `nightly-export-cron`) and click **Create key**.
+  The scope badge tooltip shows its bit and mask; currently all UI-created keys use `export:read` (bit 0, mask 1).
 4. Copy the secret from the green banner — it will **not** be shown again.
 5. Store it in your CI/CD secret store (e.g. GitHub Actions secrets).
 

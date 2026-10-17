@@ -25,7 +25,9 @@ export type EventType =
   | "recheck_completed"
   | "batch_recheck_started"
   | "csv_exported"
-  | "soroban_mirror_completed";
+  | "soroban_mirror_completed"
+  | "dispute_opened"
+  | "dispute_closed";
 
 export interface AnalyticsEvent {
   type: EventType;
@@ -301,6 +303,14 @@ function serverAdapter(): AnalyticsAdapter {
   return _serverAdapter;
 }
 
+function trackServerEvent(event: EventType, properties?: Record<string, unknown>): void {
+  try {
+    serverAdapter().track(event, properties);
+  } catch {
+    // Analytics must never affect request handling.
+  }
+}
+
 /**
  * Track a registration event from a server-side API route.
  * No-op when POSTHOG_API_KEY is not set.
@@ -309,7 +319,7 @@ export function trackServerRegistrationCreated(properties?: {
   userId?: string;
   stellarAddress?: string;
 }): void {
-  serverAdapter().track("registration_created", properties);
+  trackServerEvent("registration_created", properties);
 }
 
 /**
@@ -321,7 +331,7 @@ export function trackServerRegistrationUpdated(properties?: {
   stellarAddress?: string;
   fieldsChanged?: string[];
 }): void {
-  serverAdapter().track("registration_updated", properties);
+  trackServerEvent("registration_updated", properties);
 }
 
 /**
@@ -332,7 +342,7 @@ export function trackServerCsvExported(properties?: {
   rowCount?: number;
   triggeredBy?: string;
 }): void {
-  serverAdapter().track("csv_exported", properties);
+  trackServerEvent("csv_exported", properties);
 }
 
 /**
@@ -343,5 +353,25 @@ export function trackServerBatchRecheckStarted(properties?: {
   totalRegistrations?: number;
   initiatedBy?: string;
 }): void {
-  serverAdapter().track("batch_recheck_started", properties);
+  trackServerEvent("batch_recheck_started", properties);
+}
+
+/** Track a dispute opening from a server-side API route. */
+export function trackServerDisputeOpened(properties?: {
+  userId?: string;
+  disputeId?: string;
+  registrationId?: string;
+  actorRole?: "maintainer" | "contributor";
+  hasProof?: boolean;
+}): void {
+  trackServerEvent("dispute_opened", properties);
+}
+
+/** Track the first transition of a dispute from OPEN to a terminal status. */
+export function trackServerDisputeClosed(properties?: {
+  userId?: string;
+  disputeId?: string;
+  status?: "VALIDATED" | "REJECTED";
+}): void {
+  trackServerEvent("dispute_closed", properties);
 }

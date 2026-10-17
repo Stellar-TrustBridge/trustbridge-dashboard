@@ -104,12 +104,16 @@ describe("analytics — server-side track helpers", () => {
       trackServerRegistrationUpdated,
       trackServerCsvExported,
       trackServerBatchRecheckStarted,
+      trackServerDisputeOpened,
+      trackServerDisputeClosed,
     } = require("@/lib/analytics");
 
     expect(() => trackServerRegistrationCreated()).not.toThrow();
     expect(() => trackServerRegistrationUpdated()).not.toThrow();
     expect(() => trackServerCsvExported()).not.toThrow();
     expect(() => trackServerBatchRecheckStarted()).not.toThrow();
+    expect(() => trackServerDisputeOpened()).not.toThrow();
+    expect(() => trackServerDisputeClosed()).not.toThrow();
   });
 });
 
@@ -189,6 +193,8 @@ describe("analytics — adapter selection guards", () => {
     expect(typeof analytics.trackServerRegistrationUpdated).toBe("function");
     expect(typeof analytics.trackServerCsvExported).toBe("function");
     expect(typeof analytics.trackServerBatchRecheckStarted).toBe("function");
+    expect(typeof analytics.trackServerDisputeOpened).toBe("function");
+    expect(typeof analytics.trackServerDisputeClosed).toBe("function");
   });
 
   it("exports all expected client-track symbols", () => {

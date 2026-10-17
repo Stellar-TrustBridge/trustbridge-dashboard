@@ -71,6 +71,33 @@ describe("isFreezeWindowActive", () => {
     expect(status.active).toBe(true);
     expect(status.reason).toContain("freeze");
   });
+
+  it("includes both start and end boundaries but excludes adjacent milliseconds", () => {
+    process.env.FREEZE_WINDOW_START = "2026-06-01T00:00:00.000Z";
+    process.env.FREEZE_WINDOW_END = "2026-06-01T01:00:00.000Z";
+
+    expect(isFreezeWindowActive(new Date("2026-06-01T00:00:00.000Z")).active).toBe(true);
+    expect(isFreezeWindowActive(new Date("2026-06-01T01:00:00.000Z")).active).toBe(true);
+    expect(isFreezeWindowActive(new Date("2026-05-31T23:59:59.999Z")).active).toBe(false);
+    expect(isFreezeWindowActive(new Date("2026-06-01T01:00:00.001Z")).active).toBe(false);
+  });
+
+  it("treats a zero-duration window as active only at its exact instant", () => {
+    process.env.FREEZE_WINDOW_START = "2026-06-01T00:00:00.000Z";
+    process.env.FREEZE_WINDOW_END = "2026-06-01T00:00:00.000Z";
+
+    expect(isFreezeWindowActive(new Date("2026-06-01T00:00:00.000Z")).active).toBe(true);
+    expect(isFreezeWindowActive(new Date("2026-06-01T00:00:00.001Z")).active).toBe(false);
+  });
+
+  it("treats a reversed window as invalid", () => {
+    process.env.FREEZE_WINDOW_START = "2026-06-01T01:00:00.000Z";
+    process.env.FREEZE_WINDOW_END = "2026-06-01T00:00:00.000Z";
+
+    expect(isFreezeWindowActive(new Date("2026-06-01T00:30:00.000Z"))).toEqual({
+      active: false,
+    });
+  });
 });
 
 describe("enforceFreezeWindowGuard with freeze_window feature flag", () => {
