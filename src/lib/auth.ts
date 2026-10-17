@@ -67,6 +67,27 @@ export function getAllowedMaintainerOrgs(): string[] {
     .filter((o) => o.length > 0);
 }
 
+/**
+ * Returns every org from ALLOWED_MAINTAINER_ORGS that the user is a member of.
+ * Used at sign-in to populate the token's `availableOrgs` list.
+ * Never throws — API errors are treated as non-membership (fail closed).
+ */
+export async function resolveAvailableOrgs(
+  accessToken: string
+): Promise<string[]> {
+  const allowedOrgs = getAllowedMaintainerOrgs();
+  if (allowedOrgs.length === 0 || !accessToken) return [];
+
+  const results = await Promise.all(
+    allowedOrgs.map(async (org) => {
+      const member = await isOrgMember(accessToken, org);
+      return member ? org : null;
+    })
+  );
+
+  return results.filter((org): org is string => org !== null);
+}
+
 export function verifyTenantAccess(targetOrgId: string, currentOrgId: string): boolean {
   if (!targetOrgId || !currentOrgId) return false;
   return targetOrgId.toLowerCase() === currentOrgId.toLowerCase();
@@ -222,6 +243,19 @@ export const authOptions: NextAuthOptions = {
                 metadata: { reason: "not_org_member" },
               });
             }
+
+            // Multi-org: populate all orgs the maintainer belongs to so the
+            // org-switcher can show them. Non-maintainers get an empty list.
+            if (isMaintainer) {
+              const availableOrgs = await resolveAvailableOrgs(account.access_token);
+              token.availableOrgs = availableOrgs;
+              // Default active org: first matched org, or the legacy single-org env var.
+              token.maintainerOrgId =
+                availableOrgs[0] ?? maintainerOrg ?? "default";
+            } else {
+              token.availableOrgs = [];
+              token.maintainerOrgId = "default";
+            }
           }
         }
       }
@@ -234,6 +268,8 @@ export const authOptions: NextAuthOptions = {
         session.user.githubUsername = token.githubUsername;
         session.user.isMaintainer = token.isMaintainer ?? false;
         session.user.role = token.role as AppRole | undefined;
+        session.user.maintainerOrgId = token.maintainerOrgId ?? "default";
+        session.user.availableOrgs = token.availableOrgs ?? [];
         if (session.user.id) {
           session.user.csrfToken = generateCsrfToken(session.user.id);
         }
