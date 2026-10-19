@@ -204,8 +204,13 @@ export function validateEnv(): Environment {
       .map(([field, msgs]) => `${field}: ${msgs?.join(", ")}`)
       .join("\n");
 
-    const message = `❌ Environment validation failed:\n${fieldErrors}`;
+    const message = `❌ Environment validation failed — Wave cannot start:\n\n${fieldErrors}\n\nRequired secrets missing or invalid. Check your .env.local or Vercel environment variables.\nSee docs/ENVIRONMENT.md for setup guide.`;
     console.error(message);
+
+    // In production, fail-fast immediately — do not allow half-booted deployments
+    if (process.env.NODE_ENV === "production") {
+      throw new Error(`Production deployment blocked: ${fieldErrors}`);
+    }
 
     throw new Error(message);
   }

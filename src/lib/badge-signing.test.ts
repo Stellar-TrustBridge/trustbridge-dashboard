@@ -102,6 +102,73 @@ describe("badge-signing", () => {
       expect(verifyBadgeSignature("alice", "too-short")).toBe(false);
       expect(verifyBadgeSignature("alice", "g".repeat(64))).toBe(false);
     });
+
+    describe("tampered payload rejection", () => {
+      it("rejects signature with single bit flip at start", () => {
+        const sig = signBadge("alice");
+        const firstChar = sig[0];
+        const flipped = (parseInt(firstChar, 16) ^ 1).toString(16);
+        const tampered = flipped + sig.substring(1);
+        expect(verifyBadgeSignature("alice", tampered)).toBe(false);
+      });
+
+      it("rejects signature with single bit flip in middle", () => {
+        const sig = signBadge("alice");
+        const midChar = sig[32];
+        const flipped = (parseInt(midChar, 16) ^ 1).toString(16);
+        const tampered = sig.substring(0, 32) + flipped + sig.substring(33);
+        expect(verifyBadgeSignature("alice", tampered)).toBe(false);
+      });
+
+      it("rejects signature with truncated payload", () => {
+        const sig = signBadge("alice");
+        expect(verifyBadgeSignature("alice", sig.substring(0, 63))).toBe(false);
+      });
+
+      it("rejects signature with appended data", () => {
+        const sig = signBadge("alice");
+        expect(verifyBadgeSignature("alice", sig + "00")).toBe(false);
+      });
+
+      it("rejects case-swapped username with valid signature", () => {
+        const sig = signBadge("alice");
+        expect(verifyBadgeSignature("Alice", sig)).toBe(false);
+        expect(verifyBadgeSignature("ALICE", sig)).toBe(false);
+      });
+
+      it("rejects signature from different key", () => {
+        const sig = signBadge("alice");
+        process.env.BADGE_SIGNING_KEY = "different-secret-key-99999";
+        expect(verifyBadgeSignature("alice", sig)).toBe(false);
+      });
+
+      it("rejects expired signature even if HMAC is valid", () => {
+        const pastExp = Math.floor(Date.now() / 1000) - 60;
+        const sig = signBadge("alice", pastExp);
+        // Signature is cryptographically valid but expired
+        expect(verifyBadgeSignature("alice", sig, pastExp)).toBe(false);
+      });
+
+      it("rejects modified expiration timestamp", () => {
+        const futureExp = Math.floor(Date.now() / 1000) + 3600;
+        const sig = signBadge("alice", futureExp);
+        const differentExp = futureExp + 1800;
+        // Same sig, different exp → should fail
+        expect(verifyBadgeSignature("alice", sig, differentExp)).toBe(false);
+      });
+
+      it("rejects non-hex characters in signature", () => {
+        expect(verifyBadgeSignature("alice", "z".repeat(64))).toBe(false);
+        expect(verifyBadgeSignature("alice", "G".repeat(64))).toBe(false);
+      });
+
+      it("rejects SQL injection-style username manipulation", () => {
+        const sig = signBadge("alice");
+        expect(verifyBadgeSignature("alice' OR '1'='1", sig)).toBe(false);
+        expect(verifyBadgeSignature("alice--", sig)).toBe(false);
+        expect(verifyBadgeSignature("alice; DROP TABLE users;--", sig)).toBe(false);
+      });
+    });
   });
 
   describe("generateBadgeUrl", () => {

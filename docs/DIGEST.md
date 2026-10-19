@@ -162,9 +162,19 @@ Use it only when the digest destination mailbox is a controlled, access-restrict
 inbox and your data handling policy permits it. The dashboard provides the same
 information on demand with proper access control.
 
-The digest never includes Stellar addresses, email addresses, or any financial
-data. Contributor usernames in the full list are the same handles that appear
-in GitHub org membership — treat them accordingly.
+**Guaranteed PII compliance:**
+
+✅ **Never includes Stellar addresses** — regardless of configuration, the digest never serializes Stellar public keys to email bodies, audit logs, or the result JSON
+
+✅ **Never includes email addresses** — contributor contact info stays in the registration table
+
+✅ **Never includes financial data** — XLM/USDC balances, transaction history, or wallet details are excluded
+
+✅ **GitHub usernames are opt-in** — the default privacy mode omits all individual contributor identifiers; only aggregate counts are sent
+
+**Test coverage:** `src/lib/cron-digest.test.ts` includes dedicated PII leak prevention tests that scan email bodies and result objects for Stellar address patterns (`/G[A-Z0-9]{55}/`) and verify they never appear in digest output.
+
+**Why this matters:** Accidentally leaking Stellar addresses in a digest email creates compliance risk for Wave organizations operating under GDPR (EU), CCPA (California), PIPEDA (Canada), or similar privacy regulations. The default counts-only mode lets maintainers monitor readiness health without exposing PII beyond their controlled dashboard.
 
 ---
 

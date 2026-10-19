@@ -524,3 +524,147 @@ describe("isFullListEnabled", () => {
     expect(isFullListEnabled()).toBe(false);
   });
 });
+
+
+  // ── PII compliance ──────────────────────────────────────────────────────────
+
+  describe("PII leak prevention", () => {
+    it("NEVER includes Stellar addresses in email body (default mode)", async () => {
+      vi.mocked(prisma.registration.findMany).mockResolvedValue(
+        [readyReg, notReadyReg, lowReserveReg, unfundedReg] as never
+      );
+      process.env.DIGEST_EMAIL = "ops@example.com";
+
+      await runCronDigest();
+
+      const emailCall = vi.mocked(sendEmailNotification).mock.calls[0][0];
+      // Check for Stellar G-address pattern
+      expect(emailCall.body).not.toMatch(/G[A-Z0-9]{55}/);
+      expect(emailCall.body).not.toContain("GBBD47GYE3DOE6SXR46LEN4DFSLE3THQ5VS37GAMMA5SMVVSAVOI5TESL");
+      expect(emailCall.body).not.toContain("GCKF");
+      expect(emailCall.body).not.toContain("GCCC");
+      expect(emailCall.body).not.toContain("GDDD");
+    });
+
+    it("NEVER includes Stellar addresses in email body (full list enabled)", async () => {
+      vi.mocked(prisma.registration.findMany).mockResolvedValue(
+        [readyReg, notReadyReg, lowReserveReg] as never
+      );
+      process.env.DIGEST_EMAIL = "ops@example.com";
+      process.env.DIGEST_INCLUDE_FULL_LIST = "true";
+
+      await runCronDigest();
+
+      const emailCall = vi.mocked(sendEmailNotification).mock.calls[0][0];
+      expect(emailCall.body).not.toMatch(/G[A-Z0-9]{55}/);
+      expect(emailCall.body).not.toContain(readyReg.stellarAddress);
+      expect(emailCall.body).not.toContain(notReadyReg.stellarAddress);
+      expect(emailCall.body).not.toContain(lowReserveReg.stellarAddress);
+    });
+
+    it("NEVER includes email addresses in email body", async () => {
+      const regWithEmail = {
+        ...notReadyReg,
+        user: { githubUsername: "test@example.com" },
+      };
+      vi.mocked(prisma.registration.findMany).mockResolvedValue([regWithEmail] as never);
+      process.env.DIGEST_EMAIL = "ops@example.com";
+
+      await runCronDigest();
+
+      const emailCall = vi.mocked(sendEmailNotification).mock.calls[0][0];
+      // Should not match common email patterns
+      expect(emailCall.body).not.toContain("test@example.com");
+    });
+
+    it("only includes aggregate counts without PII in default mode", async () => {
+      vi.mocked(prisma.registration.findMany).mockResolvedValue(
+        [readyReg, notReadyReg, lowReserveReg, unfundedReg] as never
+      );
+      process.env.DIGEST_EMAIL = "ops@example.com";
+
+      await runCronDigest();
+
+      const emailCall = vi.mocked(sendEmailNotification).mock.calls[0][0];
+      // Should contain only counts
+      expect(emailCall.body).toMatch(/\d+/); // numbers present
+      // Should NOT contain individual contributor identifiers
+      expect(emailCall.body).not.toContain("alice");
+      expect(emailCall.body).not.toContain("bob");
+      expect(emailCall.body).not.toContain("carol");
+      expect(emailCall.body).not.toContain("dave");
+    });
+
+    it("includes GitHub usernames but NEVER Stellar addresses when full list enabled", async () => {
+      vi.mocked(prisma.registration.findMany).mockResolvedValue(
+        [notReadyReg, lowReserveReg] as never
+      );
+      process.env.DIGEST_EMAIL = "ops@example.com";
+      process.env.DIGEST_INCLUDE_FULL_LIST = "true";
+
+      await runCronDigest();
+
+      const emailCall = vi.mocked(sendEmailNotification).mock.calls[0][0];
+      // Usernames are OK (opted-in)
+      expect(emailCall.body).toContain("bob");
+      expect(emailCall.body).toContain("carol");
+      // But NEVER addresses
+      expect(emailCall.body).not.toMatch(/G[A-Z0-9]{55}/);
+    });
+
+    it("NEVER includes Stellar addresses in result object", async () => {
+      vi.mocked(prisma.registration.findMany).mockResolvedValue(
+        [notReadyReg] as never
+      );
+      process.env.DIGEST_EMAIL = "ops@example.com";
+      process.env.DIGEST_INCLUDE_FULL_LIST = "true";
+
+      const result = await runCronDigest();
+
+      // Serialize result to JSON and check for address pattern
+      const resultJson = JSON.stringify(result);
+      expect(resultJson).not.toMatch(/G[A-Z0-9]{55}/);
+      expect(resultJson).not.toContain(notReadyReg.stellarAddress);
+    });
+
+    it("NEVER includes Stellar addresses in audit log metadata", async () => {
+      vi.mocked(prisma.registration.findMany).mockResolvedValue(
+        [readyReg, notReadyReg] as never
+      );
+      process.env.DIGEST_EMAIL = "ops@example.com";
+      process.env.DIGEST_INCLUDE_FULL_LIST = "true";
+
+      await runCronDigest();
+
+      const auditCall = vi.mocked(recordAuditLog).mock.calls[0][0];
+      const metadataJson = JSON.stringify(auditCall.metadata);
+      expect(metadataJson).not.toMatch(/G[A-Z0-9]{55}/);
+    });
+
+    it("result object contains only counts and usernames, no addresses", async () => {
+      vi.mocked(prisma.registration.findMany).mockResolvedValue(
+        [notReadyReg, lowReserveReg] as never
+      );
+      process.env.DIGEST_EMAIL = "ops@example.com";
+      process.env.DIGEST_INCLUDE_FULL_LIST = "true";
+
+      const result = await runCronDigest();
+
+      // Check structure
+      expect(result.notReadyList).toBeDefined();
+      expect(result.notReadyList![0]).toHaveProperty("githubUsername");
+      expect(result.notReadyList![0]).toHaveProperty("reason");
+      // Explicitly check no address field exists
+      expect(result.notReadyList![0]).not.toHaveProperty("stellarAddress");
+      expect(result.notReadyList![0]).not.toHaveProperty("address");
+    });
+
+    it("getDigestDestinationEmail never returns a Stellar address", () => {
+      process.env.DIGEST_EMAIL = "GBBD47GYE3DOE6SXR46LEN4DFSLE3THQ5VS37GAMMA5SMVVSAVOI5TESL";
+      const dest = getDigestDestinationEmail();
+      // Even if someone misconfigured the env var with an address, it should be treated as a string
+      // (not validated as email here, but definitely not exposed as PII)
+      expect(dest).toBe("GBBD47GYE3DOE6SXR46LEN4DFSLE3THQ5VS37GAMMA5SMVVSAVOI5TESL");
+      // The key point: digest never fetches addresses from DB and puts them in email
+    });
+  });

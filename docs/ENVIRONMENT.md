@@ -569,6 +569,43 @@ and replace calls to `checkRateLimit()` with `checkRateLimitRedis()` in
 ---
 
 ## Security checklist
+---
+
+## Fail-fast startup validation
+
+**The dashboard validates all required environment variables at boot time** (before accepting any HTTP requests). If `DATABASE_URL`, OAuth secrets (`GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `NEXTAUTH_SECRET`), or `TOKEN_ENCRYPTION_KEY` are missing or invalid, the deployment **immediately fails** rather than half-booting into a broken state.
+
+**Why this matters:** Half-booted deployments waste Wave launch mornings and create security risk. A deployment that accepts sign-ins without `TOKEN_ENCRYPTION_KEY` would either store GitHub access tokens in plaintext or fail closed mid-session. Fail-fast boot catches this immediately and blocks the deployment.
+
+In production (`NODE_ENV=production`), validation errors include:
+- ✅ Clear field names (e.g., "NEXTAUTH_SECRET: Required")
+- ✅ Reference to this documentation (`docs/ENVIRONMENT.md`)
+- ✅ Guidance to check `.env.local` or Vercel environment variables
+
+**Example error output:**
+
+```
+❌ Environment validation failed — Wave cannot start:
+
+DATABASE_URL: Required
+GITHUB_CLIENT_SECRET: Required
+TOKEN_ENCRYPTION_KEY: Required
+
+Required secrets missing or invalid. Check your .env.local or Vercel environment variables.
+See docs/ENVIRONMENT.md for setup guide.
+```
+
+**Test coverage:** `src/lib/env-validation.test.ts` includes dedicated fail-fast tests for each required secret category (DB, OAuth, cron). Run `npm test -- env-validation` to verify the guard works.
+
+**Validation scope:**
+- ✅ Required secrets presence and format
+- ✅ URL validation (`DATABASE_URL`, `NEXTAUTH_URL`, `NEXT_PUBLIC_HORIZON_URL`)
+- ✅ Numeric parsing and range checks (`RATE_LIMIT_MAX_REQUESTS > 0`)
+- ✅ Database pool parameters (`connection_limit`, `pgbouncer`)
+- ❌ **Not validated:** Secret correctness (e.g., whether `GITHUB_CLIENT_SECRET` is accepted by GitHub's OAuth API). That check happens at first sign-in attempt.
+
+---
+
 ## Rate-Limit Headers
 
 Public API endpoints (`/api/check`, `/api/actions/lookup`, `/api/stats`, `/api/freeze-status`) emit standard rate-limit response headers on every response:
