@@ -19,6 +19,7 @@ import {
   parseExportPagination,
   streamJsonExport,
 } from "@/lib/treasury-export";
+import { withSpan } from "@/lib/telemetry";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -78,283 +79,332 @@ function toExportItem(reg: {
 }
 
 export async function GET(request?: NextRequest) {
-  const session = await getServerSession(authOptions);
+  return withSpan(
+    "treasury.export.get",
+    { "http.method": "GET", "export.format": "json" },
+    async (span) => {
+      const session = await getServerSession(authOptions);
 
-  if (!session?.user?.id || !session.user.isMaintainer) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  }
+      if (!session?.user?.id || !session.user.isMaintainer) {
+        span.setAttribute("auth.failure", true);
+        return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+      }
 
-  const pagination = parseExportPagination(request?.nextUrl?.searchParams);
-  if (!pagination.ok) {
-    return NextResponse.json({ error: pagination.error }, { status: 400 });
-  }
+      span.setAttribute("actor.id", session.user.id);
 
-  const { offset, limit } = pagination;
+      const pagination = parseExportPagination(request?.nextUrl?.searchParams);
+      if (!pagination.ok) {
+        span.setAttribute("validation.failure", true);
+        span.setAttribute("error.message", pagination.error);
+        return NextResponse.json({ error: pagination.error }, { status: 400 });
+      }
 
-  const [countResult, registrations] = await Promise.all([
-    prisma.registration?.count
-      ? prisma.registration.count({ where: { deletedAt: null } }).catch(() => null)
-      : Promise.resolve(null),
-    prisma.registration.findMany({
-      where: { deletedAt: null },
-      orderBy: { id: "asc" },
-      skip: offset,
-      take: limit,
-      include: {
-        user: {
-          select: {
-            githubUsername: true,
+      const { offset, limit } = pagination;
+      span.setAttribute("export.offset", offset);
+      span.setAttribute("export.limit", limit);
+
+      const [countResult, registrations] = await Promise.all([
+        prisma.registration?.count
+          ? prisma.registration.count({ where: { deletedAt: null } }).catch(() => null)
+          : Promise.resolve(null),
+        prisma.registration.findMany({
+          where: { deletedAt: null },
+          orderBy: { id: "asc" },
+          skip: offset,
+          take: limit,
+          include: {
+            user: {
+              select: {
+                githubUsername: true,
+              },
+            },
           },
+        }),
+      ]);
+
+      const totalContributors = countResult ?? registrations.length;
+      const contributors = registrations.map(toExportItem);
+      const readyCount = contributors.filter((c) => c.readiness === "ready").length;
+      const notReadyCount = contributors.length - readyCount;
+      const nextOffset = offset + contributors.length;
+      const hasMore = nextOffset < totalContributors;
+
+      span.setAttribute("export.total_contributors", totalContributors);
+      span.setAttribute("export.ready_count", readyCount);
+      span.setAttribute("export.not_ready_count", notReadyCount);
+      span.setAttribute("export.has_more", hasMore);
+
+      await recordAuditLog({
+        action: "treasury.export",
+        actorId: session.user.id,
+        actorLogin: session.user.githubUsername ?? null,
+        metadata: {
+          totalContributors,
+          readyCount,
+          notReadyCount,
+          offset,
+          limit,
         },
-      },
-    }),
-  ]);
+      });
 
-  const totalContributors = countResult ?? registrations.length;
-  const contributors = registrations.map(toExportItem);
-  const readyCount = contributors.filter((c) => c.readiness === "ready").length;
-  const notReadyCount = contributors.length - readyCount;
-  const nextOffset = offset + contributors.length;
-  const hasMore = nextOffset < totalContributors;
+      const response: TreasuryExportResponse & {
+        offset: number;
+        limit: number;
+        hasMore: boolean;
+        nextOffset: number | null;
+      } = {
+        exportedAt: new Date().toISOString(),
+        exportedBy: session.user.email ?? session.user.githubUsername ?? "",
+        totalContributors,
+        readyCount,
+        notReadyCount,
+        contributors,
+        offset,
+        limit,
+        hasMore,
+        nextOffset: hasMore ? nextOffset : null,
+      };
 
-  await recordAuditLog({
-    action: "treasury.export",
-    actorId: session.user.id,
-    actorLogin: session.user.githubUsername ?? null,
-    metadata: {
-      totalContributors,
-      readyCount,
-      notReadyCount,
-      offset,
-      limit,
-    },
-  });
-
-  const response: TreasuryExportResponse & {
-    offset: number;
-    limit: number;
-    hasMore: boolean;
-    nextOffset: number | null;
-  } = {
-    exportedAt: new Date().toISOString(),
-    exportedBy: session.user.email ?? session.user.githubUsername ?? "",
-    totalContributors,
-    readyCount,
-    notReadyCount,
-    contributors,
-    offset,
-    limit,
-    hasMore,
-    nextOffset: hasMore ? nextOffset : null,
-  };
-
-  return streamJsonExport(response);
+      return streamJsonExport(response);
+    }
+  );
 }
 
 export async function POST(request: NextRequest) {
-  const csrf = assertSameOrigin(request);
-  if (csrf) return csrf;
+  return withSpan(
+    "treasury.export.post",
+    { "http.method": "POST" },
+    async (span) => {
+      const csrf = assertSameOrigin(request);
+      if (csrf) {
+        span.setAttribute("csrf.failure", true);
+        return csrf;
+      }
 
-  const session = await requireOperator("treasury.export");
-  let actorId: string;
-  let actorLogin: string | null;
-  if (session) {
-    actorId = session.user.id;
-    actorLogin = session.user.githubUsername ?? null;
-  } else {
-    const apiKeyAuth = await requireApiKeyScope(request, "export:read");
-    if (!apiKeyAuth) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
+      const session = await requireOperator("treasury.export");
+      let actorId: string;
+      let actorLogin: string | null;
+      if (session) {
+        actorId = session.user.id;
+        actorLogin = session.user.githubUsername ?? null;
+      } else {
+        const apiKeyAuth = await requireApiKeyScope(request, "export:read");
+        if (!apiKeyAuth) {
+          span.setAttribute("auth.failure", true);
+          return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+        }
 
-    if ("rateLimited" in apiKeyAuth) {
-      return NextResponse.json(
-        { error: "Too many requests" },
+        if ("rateLimited" in apiKeyAuth) {
+          span.setAttribute("rate_limited", true);
+          return NextResponse.json(
+            { error: "Too many requests" },
+            {
+              status: 429,
+              headers: buildRateLimitHeaders(
+                apiKeyAuth.result,
+                API_KEY_RATE_LIMIT.maxRequests
+              ),
+            }
+          );
+        }
+
+        actorId = apiKeyAuth.createdById;
+        actorLogin = `api-key:${apiKeyAuth.name}`;
+      }
+
+      span.setAttribute("actor.id", actorId);
+
+      const body = (await request.json()) as {
+        format?: string;
+        snapshotAt?: string;
+        offset?: number;
+        limit?: number;
+        blockWhenStale?: boolean;
+        confirmStale?: boolean;
+        allowStale?: boolean;
+        overrideStale?: boolean;
+      };
+      const format = body.format ?? "json";
+      span.setAttribute("export.format", format);
+
+      if (format !== "json" && format !== "csv") {
+        span.setAttribute("validation.failure", true);
+        return NextResponse.json(
+          { error: "Unsupported export format" },
+          { status: 400 }
+        );
+      }
+
+      const pagination = parseExportPagination({
+        get: (key: string) => {
+          const value = body[key as "offset" | "limit"];
+          return value === undefined || value === null ? null : String(value);
+        },
+      });
+      if (!pagination.ok) {
+        span.setAttribute("validation.failure", true);
+        span.setAttribute("error.message", pagination.error);
+        return NextResponse.json({ error: pagination.error }, { status: 400 });
+      }
+
+      const { offset, limit } = pagination;
+      span.setAttribute("export.offset", offset);
+      span.setAttribute("export.limit", limit);
+
+      const [countResult, registrations] = await Promise.all([
+        prisma.registration?.count
+          ? prisma.registration.count({ where: { deletedAt: null } }).catch(() => null)
+          : Promise.resolve(null),
+        prisma.registration.findMany({
+          where: { deletedAt: null },
+          orderBy: { id: "asc" },
+          skip: offset,
+          take: limit,
+          include: {
+            user: {
+              select: {
+                githubUsername: true,
+              },
+            },
+          },
+        }),
+      ]);
+
+      const totalContributors = countResult ?? registrations.length;
+      const contributors = registrations.map(toExportItem);
+
+      const blockWhenStale =
+        body.blockWhenStale !== undefined
+          ? body.blockWhenStale
+          : !(body.confirmStale || body.allowStale || body.overrideStale);
+
+      const staleGuard = evaluateStaleExportGuard(
+        contributors as unknown as ContributorRow[],
         {
-          status: 429,
-          headers: buildRateLimitHeaders(
-            apiKeyAuth.result,
-            API_KEY_RATE_LIMIT.maxRequests
-          ),
+          snapshotAt: body.snapshotAt,
+          blockWhenStale,
         }
       );
-    }
 
-    actorId = apiKeyAuth.createdById;
-    actorLogin = `api-key:${apiKeyAuth.name}`;
-  }
+      if (staleGuard.blocked) {
+        span.setAttribute("stale_export.blocked", true);
+        span.setAttribute("stale_export.count", staleGuard.staleCount ?? 0);
 
-  const body = (await request.json()) as {
-    format?: string;
-    snapshotAt?: string;
-    offset?: number;
-    limit?: number;
-    blockWhenStale?: boolean;
-    confirmStale?: boolean;
-    allowStale?: boolean;
-    overrideStale?: boolean;
-  };
-  const format = body.format ?? "json";
-
-  if (format !== "json" && format !== "csv") {
-    return NextResponse.json(
-      { error: "Unsupported export format" },
-      { status: 400 }
-    );
-  }
-
-  const pagination = parseExportPagination({
-    get: (key: string) => {
-      const value = body[key as "offset" | "limit"];
-      return value === undefined || value === null ? null : String(value);
-    },
-  });
-  if (!pagination.ok) {
-    return NextResponse.json({ error: pagination.error }, { status: 400 });
-  }
-
-  const { offset, limit } = pagination;
-
-  const [countResult, registrations] = await Promise.all([
-    prisma.registration?.count
-      ? prisma.registration.count({ where: { deletedAt: null } }).catch(() => null)
-      : Promise.resolve(null),
-    prisma.registration.findMany({
-      where: { deletedAt: null },
-      orderBy: { id: "asc" },
-      skip: offset,
-      take: limit,
-      include: {
-        user: {
-          select: {
-            githubUsername: true,
+        await recordAuditLog({
+          action: "treasury.export.stale",
+          actorId,
+          actorLogin,
+          metadata: {
+            format,
+            snapshotAt: body.snapshotAt ?? null,
+            reason: staleGuard.reason ?? "stale_export",
+            staleCount: staleGuard.staleCount,
+            totalCount: staleGuard.totalCount,
           },
+        });
+
+        return NextResponse.json(
+          {
+            error:
+              staleGuard.error ??
+              staleGuard.warning ??
+              "Export blocked due to stale data",
+            reason: staleGuard.reason ?? "stale_export",
+            stale: staleGuard.stale,
+            staleCount: staleGuard.staleCount,
+            totalCount: staleGuard.totalCount,
+            stalePercent: staleGuard.stalePercent,
+            warning: staleGuard.warning,
+          },
+          { status: 409 }
+        );
+      }
+
+      const readyCount = contributors.filter((c) => c.readiness === "ready").length;
+      const notReadyCount = contributors.length - readyCount;
+      const nextOffset = offset + contributors.length;
+      const hasMore = nextOffset < totalContributors;
+
+      span.setAttribute("export.total_contributors", totalContributors);
+      span.setAttribute("export.ready_count", readyCount);
+      span.setAttribute("export.not_ready_count", notReadyCount);
+      span.setAttribute("export.has_more", hasMore);
+
+      await recordAuditLog({
+        action: "treasury.export",
+        actorId,
+        actorLogin,
+        metadata: {
+          totalContributors,
+          readyCount,
+          notReadyCount,
+          format,
+          offset,
+          limit,
         },
-      },
-    }),
-  ]);
+      });
 
-  const totalContributors = countResult ?? registrations.length;
-  const contributors = registrations.map(toExportItem);
+      if (format === "csv") {
+        span.setAttribute("export.streaming", false);
 
-  const blockWhenStale =
-    body.blockWhenStale !== undefined
-      ? body.blockWhenStale
-      : !(body.confirmStale || body.allowStale || body.overrideStale);
+        const headers = [
+          "github_username",
+          "stellar_address",
+          "readiness",
+          "funded",
+          "trustline_ready",
+          "trustline_authorized",
+          "xlm_balance",
+          "spendable_xlm_balance",
+          "last_checked_at",
+        ];
 
-  const staleGuard = evaluateStaleExportGuard(
-    contributors as unknown as ContributorRow[],
-    {
-      snapshotAt: body.snapshotAt,
-      blockWhenStale,
+        const rows = contributors.map((c) => [
+          c.githubUsername,
+          c.stellarAddress,
+          c.readiness,
+          c.funded,
+          c.trustlineReady,
+          c.trustlineAuthorized,
+          c.xlmBalance,
+          c.spendableXlmBalance,
+          c.lastCheckedAt ?? "",
+        ]);
+
+        const csv = buildCsv(headers, rows);
+
+        return new NextResponse(csv, {
+          status: 200,
+          headers: {
+            "Content-Type": "text/csv;charset=utf-8",
+            "Content-Disposition": `attachment; filename="${buildCsvFilename("treasury-export")}"`,
+            "Cache-Control": "no-store",
+          },
+        });
+      }
+
+      span.setAttribute("export.streaming", true);
+
+      const response: TreasuryExportResponse & {
+        offset: number;
+        limit: number;
+        hasMore: boolean;
+        nextOffset: number | null;
+      } = {
+        exportedAt: new Date().toISOString(),
+        exportedBy:
+          session?.user.email ?? session?.user.githubUsername ?? actorLogin ?? "",
+        totalContributors,
+        readyCount,
+        notReadyCount,
+        contributors,
+        offset,
+        limit,
+        hasMore,
+        nextOffset: hasMore ? nextOffset : null,
+      };
+
+      return streamJsonExport(response);
     }
   );
-
-  if (staleGuard.blocked) {
-    await recordAuditLog({
-      action: "treasury.export.stale",
-      actorId,
-      actorLogin,
-      metadata: {
-        format,
-        snapshotAt: body.snapshotAt ?? null,
-        reason: staleGuard.reason ?? "stale_export",
-        staleCount: staleGuard.staleCount,
-        totalCount: staleGuard.totalCount,
-      },
-    });
-
-    return NextResponse.json(
-      {
-        error:
-          staleGuard.error ??
-          staleGuard.warning ??
-          "Export blocked due to stale data",
-        reason: staleGuard.reason ?? "stale_export",
-        stale: staleGuard.stale,
-        staleCount: staleGuard.staleCount,
-        totalCount: staleGuard.totalCount,
-        stalePercent: staleGuard.stalePercent,
-        warning: staleGuard.warning,
-      },
-      { status: 409 }
-    );
-  }
-
-  const readyCount = contributors.filter((c) => c.readiness === "ready").length;
-  const notReadyCount = contributors.length - readyCount;
-  const nextOffset = offset + contributors.length;
-  const hasMore = nextOffset < totalContributors;
-
-  await recordAuditLog({
-    action: "treasury.export",
-    actorId,
-    actorLogin,
-    metadata: {
-      totalContributors,
-      readyCount,
-      notReadyCount,
-      format,
-      offset,
-      limit,
-    },
-  });
-
-  if (format === "csv") {
-    const headers = [
-      "github_username",
-      "stellar_address",
-      "readiness",
-      "funded",
-      "trustline_ready",
-      "trustline_authorized",
-      "xlm_balance",
-      "spendable_xlm_balance",
-      "last_checked_at",
-    ];
-
-    const rows = contributors.map((c) => [
-      c.githubUsername,
-      c.stellarAddress,
-      c.readiness,
-      c.funded,
-      c.trustlineReady,
-      c.trustlineAuthorized,
-      c.xlmBalance,
-      c.spendableXlmBalance,
-      c.lastCheckedAt ?? "",
-    ]);
-
-    const csv = buildCsv(headers, rows);
-
-    return new NextResponse(csv, {
-      status: 200,
-      headers: {
-        "Content-Type": "text/csv;charset=utf-8",
-        "Content-Disposition": `attachment; filename="${buildCsvFilename("treasury-export")}"`,
-        "Cache-Control": "no-store",
-      },
-    });
-  }
-
-  const response: TreasuryExportResponse & {
-    offset: number;
-    limit: number;
-    hasMore: boolean;
-    nextOffset: number | null;
-  } = {
-    exportedAt: new Date().toISOString(),
-    exportedBy:
-      session?.user.email ?? session?.user.githubUsername ?? actorLogin ?? "",
-    totalContributors,
-    readyCount,
-    notReadyCount,
-    contributors,
-    offset,
-    limit,
-    hasMore,
-    nextOffset: hasMore ? nextOffset : null,
-  };
-
-  return streamJsonExport(response);
 }

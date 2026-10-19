@@ -296,6 +296,22 @@ export function ContributorTable({
   const [sortKey, setSortKey] = useState<SortKey>("githubUsername");
   const [sortAsc, setSortAsc] = useState(true);
   const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [searchResultCount, setSearchResultCount] = useState<number | null>(null);
+  const [isSearching, setIsSearching] = useState(false);
+  const [isSearching, setIsSearching] = useState(false);
+  const searchAnnouncementRef = useRef<HTMLDivElement | null>(null);
+
+  // Debounce search input (300ms delay)
+  useEffect(() => {
+    setIsSearching(true);
+    const timer = setTimeout(() => {
+      setDebouncedSearch(search);
+      setIsSearching(false);
+    }, 300);
+
+    return () => clearTimeout(timer);
+  }, [search]);
   const [visibleColumns, setVisibleColumns] = useState<Set<ContributorColumnKey>>(
     () => defaultVisibleColumns()
   );
@@ -327,9 +343,18 @@ export function ContributorTable({
 
   const filtered = useMemo(() => {
     const byFilter = filterContributors(contributors, filter);
-    const bySearch = searchContributors(byFilter, search);
-    return sortContributors(bySearch, sortKey, sortAsc);
-  }, [contributors, filter, search, sortAsc, sortKey]);
+    const bySearch = searchContributors(byFilter, debouncedSearch);
+    const sorted = sortContributors(bySearch, sortKey, sortAsc);
+    
+    // Update search result count for a11y announcement
+    if (debouncedSearch.trim()) {
+      setSearchResultCount(sorted.length);
+    } else {
+      setSearchResultCount(null);
+    }
+    
+    return sorted;
+  }, [contributors, filter, debouncedSearch, sortAsc, sortKey]);
 
   useEffect(() => {
     function handleShortcut(event: KeyboardEvent) {
@@ -525,6 +550,21 @@ export function ContributorTable({
       <h2 id={headingId} className="sr-only">
         Contributor payout readiness
       </h2>
+
+      {/* A11y live region for search result announcements */}
+      <div
+        ref={searchAnnouncementRef}
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+        className="sr-only"
+      >
+        {isSearching && debouncedSearch.trim()
+          ? "Searching contributors…"
+          : searchResultCount !== null
+            ? `Found ${searchResultCount} contributor${searchResultCount !== 1 ? "s" : ""} matching "${debouncedSearch}"`
+            : ""}
+      </div>
 
       {/* Labelled so a screen reader announces "Contributor table controls"
           rather than an unnamed group of eleven buttons. */}
@@ -736,7 +776,8 @@ export function ContributorTable({
         {filtered.length === contributors.length
           ? `${contributors.length} contributor${contributors.length !== 1 ? "s" : ""}`
           : `${filtered.length} of ${contributors.length} contributors`}
-        {search && ` matching "${search}"`}
+        {debouncedSearch && ` matching "${debouncedSearch}"`}
+        {isSearching && search.trim() && search !== debouncedSearch && " (filtering…)"}
       </p>
 
       <div className="space-y-4 md:hidden">

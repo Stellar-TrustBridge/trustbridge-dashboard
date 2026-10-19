@@ -426,3 +426,100 @@ function escapeHtml(str: string): string {
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
 }
+
+
+// ---------------------------------------------------------------------------
+// Invite expiry reminder email template
+// ---------------------------------------------------------------------------
+
+export interface InviteExpiryReminderDetails {
+  expiringCount: number;
+  thresholdHours: number;
+  invites: Array<{
+    batchLabel: string | null;
+    expiresAt: Date;
+    createdAt: Date;
+  }>;
+  generatedAt?: string;
+}
+
+/**
+ * Build the HTML body for the scheduled invite expiry reminder.
+ * Alerts maintainers when one or more pending invites are about to expire.
+ */
+export function buildInviteExpiryReminderBody(
+  details: InviteExpiryReminderDetails
+): string {
+  const generatedAt = details.generatedAt ?? new Date().toISOString();
+  const dashboardUrl =
+    (process.env.NEXTAUTH_URL?.trim() || "https://trustbridge.dev") +
+    "/dashboard/invites";
+
+  const plural = details.expiringCount !== 1;
+
+  const alertBanner = `<div style="background:#fff3cd;border:1px solid #ffeeba;color:#856404;padding:12px 16px;border-radius:4px;margin-bottom:20px;">
+  <strong>⚠️ Action required:</strong> ${details.expiringCount} invite${plural ? "s" : ""} will expire within the next ${details.thresholdHours} hours.
+</div>`;
+
+  const inviteRows = details.invites
+    .slice(0, 10) // Limit displayed list to first 10
+    .map(
+      (inv, i) => `<tr${i % 2 === 0 ? "" : ' style="background:#f8f9fa;"'}>
+      <td style="padding:6px 12px;border:1px solid #dee2e6;">${escapeHtml(inv.batchLabel || "(no label)")}</td>
+      <td style="padding:6px 12px;border:1px solid #dee2e6;">${inv.expiresAt.toISOString()}</td>
+      <td style="padding:6px 12px;border:1px solid #dee2e6;">${inv.createdAt.toISOString()}</td>
+    </tr>`
+    )
+    .join("\n");
+
+  const inviteTable = `
+<h3 style="font-size:14px;margin-top:24px;margin-bottom:8px;">Expiring Invites</h3>
+<table style="border-collapse:collapse;width:100%;max-width:700px;font-size:13px;">
+  <thead>
+    <tr style="background:#f8f9fa;">
+      <th style="padding:6px 12px;border:1px solid #dee2e6;text-align:left;">Batch</th>
+      <th style="padding:6px 12px;border:1px solid #dee2e6;text-align:left;">Expires At</th>
+      <th style="padding:6px 12px;border:1px solid #dee2e6;text-align:left;">Created At</th>
+    </tr>
+  </thead>
+  <tbody>
+    ${inviteRows}
+  </tbody>
+</table>
+${
+  details.expiringCount > 10
+    ? `<p style="font-size:12px;color:#6c757d;margin-top:8px;">… and ${details.expiringCount - 10} more. Visit the dashboard to view all.</p>`
+    : ""
+}`.trim();
+
+  return `
+<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:640px;margin:0 auto;color:#212529;">
+  <h2 style="margin-bottom:4px;">Invite Expiry Reminder</h2>
+  <p style="color:#6c757d;font-size:13px;margin-top:0;margin-bottom:20px;">
+    Generated ${generatedAt} · TrustBridge Dashboard
+  </p>
+
+  ${alertBanner}
+
+  <p style="margin-bottom:16px;">
+    ${details.expiringCount} pending invite${plural ? "s" : ""} will expire within the next ${details.thresholdHours} hour${details.thresholdHours !== 1 ? "s" : ""}. 
+    These invites have not been used yet and will become invalid after expiration.
+  </p>
+
+  ${inviteTable}
+
+  <p style="margin-top:24px;">
+    <a href="${dashboardUrl}"
+       style="display:inline-block;background:#0d6efd;color:#fff;padding:10px 20px;border-radius:4px;text-decoration:none;font-size:14px;font-weight:500;">
+      Manage invites →
+    </a>
+  </p>
+
+  <hr style="border:none;border-top:1px solid #dee2e6;margin:24px 0;" />
+  <p style="font-size:12px;color:#6c757d;">
+    You are receiving this reminder because your address is configured as the
+    maintainer notification recipient for this TrustBridge deployment.
+  </p>
+</div>
+  `.trim();
+}

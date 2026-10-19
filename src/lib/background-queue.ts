@@ -29,7 +29,7 @@ export function sanitizeJobError(raw?: string | null): string {
     : redacted;
 }
 
-export type JobType = "recheck.batch" | "recheck.single";
+export type JobType = "recheck.batch" | "recheck.single" | "invite.expiry_reminder";
 export type JobStatus = "pending" | "processing" | "completed" | "failed";
 
 export interface Job {

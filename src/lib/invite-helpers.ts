@@ -170,3 +170,64 @@ export async function revokeInvites(
 
   return { revoked: result.count };
 }
+
+/**
+ * Query invites expiring within a given threshold window (e.g., 48 hours).
+ * Used by the scheduled invite expiry reminder job to warn maintainers
+ * before invites become invalid.
+ *
+ * @param thresholdMs Time window in milliseconds before expiration (default 48h)
+ * @returns Array of invites expiring soon that haven't been used yet
+ */
+export async function findExpiringInvites(
+  thresholdMs: number = 48 * 60 * 60 * 1000
+): Promise<PersistedInvite[]> {
+  const now = new Date();
+  const thresholdDate = new Date(now.getTime() + thresholdMs);
+
+  const invites = await prisma.invite.findMany({
+    where: {
+      expiresAt: {
+        not: null,
+        gte: now,
+        lte: thresholdDate,
+      },
+      used: false,
+      usedAt: null,
+    },
+    orderBy: { expiresAt: "asc" },
+  });
+
+  return invites.map((invite) => ({
+    id: invite.id,
+    codeHash: invite.codeHash,
+    batchLabel: invite.batchLabel ?? null,
+    expiresAt: invite.expiresAt,
+    used: invite.used,
+    usedAt: invite.usedAt,
+    createdAt: invite.createdAt,
+  }));
+}
+
+/**
+ * Count total invites expiring within the given threshold.
+ * Useful for summary statistics in reminder emails.
+ */
+export async function countExpiringInvites(
+  thresholdMs: number = 48 * 60 * 60 * 1000
+): Promise<number> {
+  const now = new Date();
+  const thresholdDate = new Date(now.getTime() + thresholdMs);
+
+  return prisma.invite.count({
+    where: {
+      expiresAt: {
+        not: null,
+        gte: now,
+        lte: thresholdDate,
+      },
+      used: false,
+      usedAt: null,
+    },
+  });
+}

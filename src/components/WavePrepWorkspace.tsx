@@ -84,49 +84,49 @@ export function WavePrepWorkspace({
         </CardHeader>
         <CardContent className="space-y-6">
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-6">
-            <div className="rounded-lg bg-slate-50 p-4 dark:bg-slate-900">
-              <div className="text-sm font-medium text-muted-foreground">
+            <div className="rounded-lg bg-slate-50 p-4 dark:bg-slate-900/80 border border-slate-200 dark:border-slate-700">
+              <div className="text-sm font-medium text-slate-700 dark:text-slate-300">
                 Total Contributors
               </div>
-              <div className="mt-2 text-2xl font-bold">{stats.total}</div>
+              <div className="mt-2 text-2xl font-bold text-slate-900 dark:text-slate-100">{stats.total}</div>
             </div>
-            <div className="rounded-lg bg-green-50 p-4 dark:bg-green-950">
-              <div className="text-sm font-medium text-muted-foreground">
+            <div className="rounded-lg bg-green-50 p-4 dark:bg-green-950/80 border border-green-200 dark:border-green-800">
+              <div className="text-sm font-medium text-green-800 dark:text-green-300">
                 Ready
               </div>
-              <div className="mt-2 text-2xl font-bold text-green-600 dark:text-green-400">
+              <div className="mt-2 text-2xl font-bold text-green-700 dark:text-green-300">
                 {stats.ready}
               </div>
             </div>
-            <div className="rounded-lg bg-yellow-50 p-4 dark:bg-yellow-950">
-              <div className="text-sm font-medium text-muted-foreground">
+            <div className="rounded-lg bg-yellow-50 p-4 dark:bg-yellow-950/80 border border-yellow-200 dark:border-yellow-800">
+              <div className="text-sm font-medium text-yellow-800 dark:text-yellow-300">
                 Low Reserve
               </div>
-              <div className="mt-2 text-2xl font-bold text-yellow-600 dark:text-yellow-400">
+              <div className="mt-2 text-2xl font-bold text-yellow-700 dark:text-yellow-300">
                 {stats.lowReserve}
               </div>
             </div>
-            <div className="rounded-lg bg-red-50 p-4 dark:bg-red-950">
-              <div className="text-sm font-medium text-muted-foreground">
+            <div className="rounded-lg bg-red-50 p-4 dark:bg-red-950/80 border border-red-200 dark:border-red-800">
+              <div className="text-sm font-medium text-red-800 dark:text-red-300">
                 Not Ready
               </div>
-              <div className="mt-2 text-2xl font-bold text-red-600 dark:text-red-400">
+              <div className="mt-2 text-2xl font-bold text-red-700 dark:text-red-300">
                 {stats.notReady}
               </div>
             </div>
-            <div className="rounded-lg bg-blue-50 p-4 dark:bg-blue-950">
-              <div className="text-sm font-medium text-muted-foreground">
+            <div className="rounded-lg bg-blue-50 p-4 dark:bg-blue-950/80 border border-blue-200 dark:border-blue-800">
+              <div className="text-sm font-medium text-blue-800 dark:text-blue-300">
                 Verified
               </div>
-              <div className="mt-2 text-2xl font-bold text-blue-600 dark:text-blue-400">
+              <div className="mt-2 text-2xl font-bold text-blue-700 dark:text-blue-300">
                 {stats.verified}
               </div>
             </div>
-            <div className="rounded-lg bg-purple-50 p-4 dark:bg-purple-950">
-              <div className="text-sm font-medium text-muted-foreground">
+            <div className="rounded-lg bg-purple-50 p-4 dark:bg-purple-950/80 border border-purple-200 dark:border-purple-800">
+              <div className="text-sm font-medium text-purple-800 dark:text-purple-300">
                 Funded
               </div>
-              <div className="mt-2 text-2xl font-bold text-purple-600 dark:text-purple-400">
+              <div className="mt-2 text-2xl font-bold text-purple-700 dark:text-purple-300">
                 {stats.funded}
               </div>
             </div>
@@ -193,8 +193,8 @@ export function WavePrepWorkspace({
             </div>
           </div>
 
-          <div className="rounded-lg bg-blue-50 p-4 dark:bg-blue-950">
-            <p className="text-sm text-muted-foreground">
+          <div className="rounded-lg bg-blue-50 p-4 dark:bg-blue-950/80 border border-blue-200 dark:border-blue-800">
+            <p className="text-sm text-blue-900 dark:text-blue-100">
               <strong>Filtered:</strong> {filteredContributors.length} of{" "}
               {contributors.length} contributors match the selected criteria.
             </p>
