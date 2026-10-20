@@ -25,12 +25,17 @@ vi.mock("@/lib/analytics", () => ({
   trackServerDisputeClosed: vi.fn(),
 }));
 
+vi.mock("@/lib/audit", () => ({
+  recordAuditLog: vi.fn().mockResolvedValue(undefined),
+}));
+
 import { getServerSession } from "next-auth";
 import { prisma } from "@/lib/prisma";
 import {
   trackServerDisputeClosed,
   trackServerDisputeOpened,
 } from "@/lib/analytics";
+import { recordAuditLog } from "@/lib/audit";
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -82,7 +87,13 @@ describe("GET /api/disputes", () => {
     const res = await GET(request("GET"));
     expect(res.status).toBe(200);
     const json = await res.json();
-    expect(json.disputes).toEqual(mockDisputes);
+    expect(json.disputes).toEqual([
+      {
+        ...mockDisputes[0],
+        createdAt: mockDisputes[0].createdAt.toISOString(),
+        updatedAt: mockDisputes[0].updatedAt.toISOString(),
+      },
+    ]);
   });
 
   it("returns only user's disputes for contributors", async () => {
@@ -181,7 +192,13 @@ describe("GET /api/disputes", () => {
     const res = await GET(request("GET"));
     expect(res.status).toBe(200);
     const json = await res.json();
-    expect(json.disputes).toEqual(mockDisputes);
+    expect(json.disputes).toEqual([
+      {
+        ...mockDisputes[0],
+        createdAt: mockDisputes[0].createdAt.toISOString(),
+        updatedAt: mockDisputes[0].updatedAt.toISOString(),
+      },
+    ]);
     expect(json.hasMore).toBe(false);
     expect(json.nextCursor).toBeUndefined();
   });
@@ -521,6 +538,19 @@ describe("PATCH /api/disputes", () => {
       disputeId: "d-1",
       status: "VALIDATED",
     });
+    expect(recordAuditLog).toHaveBeenCalledWith({
+      action: "dispute.resolve",
+      actorId: "user-1",
+      actorLogin: null,
+      targetId: "d-1",
+      targetLabel: "r-1",
+      metadata: expect.objectContaining({
+        disputeId: "d-1",
+        registrationId: "r-1",
+        status: "VALIDATED",
+        previousStatus: "OPEN",
+      }),
+    });
   });
 
   it("updates dispute status to REJECTED", async () => {
@@ -554,6 +584,19 @@ describe("PATCH /api/disputes", () => {
         }),
       })
     );
+    expect(recordAuditLog).toHaveBeenCalledWith({
+      action: "dispute.resolve",
+      actorId: "user-1",
+      actorLogin: null,
+      targetId: "d-1",
+      targetLabel: "r-1",
+      metadata: expect.objectContaining({
+        disputeId: "d-1",
+        registrationId: "r-1",
+        status: "REJECTED",
+        previousStatus: "OPEN",
+      }),
+    });
   });
 
   it("does not track another close event when the dispute was already closed", async () => {
@@ -581,5 +624,45 @@ describe("PATCH /api/disputes", () => {
 
     expect(res.status).toBe(200);
     expect(trackServerDisputeClosed).not.toHaveBeenCalled();
+    expect(recordAuditLog).toHaveBeenCalledWith({
+      action: "dispute.resolve",
+      actorId: "user-1",
+      actorLogin: null,
+      targetId: "d-1",
+      targetLabel: "r-1",
+      metadata: expect.objectContaining({
+        disputeId: "d-1",
+        registrationId: "r-1",
+        status: "REJECTED",
+        previousStatus: "VALIDATED",
+      }),
+    });
+  });
+
+  it("does not record audit log when dispute status is unchanged", async () => {
+    vi.mocked(getServerSession).mockResolvedValue({
+      user: { id: "user-1", isMaintainer: true },
+    } as any);
+    vi.mocked(prisma.disputeProof.findUnique).mockResolvedValue({
+      id: "d-1",
+      status: "VALIDATED",
+    });
+    vi.mocked(prisma.disputeProof.update).mockResolvedValue({
+      id: "d-1",
+      registrationId: "r-1",
+      reason: "Invalid address",
+      proofCid: null,
+      status: "VALIDATED",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      resolvedAt: new Date(),
+    });
+
+    const res = await PATCH(
+      request("PATCH", { disputeId: "d-1", status: "VALIDATED" })
+    );
+
+    expect(res.status).toBe(200);
+    expect(recordAuditLog).not.toHaveBeenCalled();
   });
 });

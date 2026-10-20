@@ -21,6 +21,8 @@ export const AUDIT_ACTION_LABELS: Record<string, string> = {
   "api_key.use_rejected": "API key use rejected",
   "digest.cron": "Scheduled contributor readiness digest sent",
   "digest.cron.failed": "Scheduled contributor readiness digest failed",
+  "dispute.resolve": "Resolved a contributor dispute",
+  "dispute.status_change": "Changed dispute status",
 };
 
 export function describeAuditAction(action: string): string {

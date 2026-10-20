@@ -4,6 +4,7 @@ vi.mock("@/lib/prisma", () => ({
   prisma: {
     user: {
       upsert: vi.fn(),
+      findUnique: vi.fn(),
     },
   },
 }));
@@ -129,7 +130,7 @@ describe("auth jwt callback - maintainer team scoping", () => {
     const token = await callJwt();
 
     expect(token.isMaintainer).toBe(true);
-    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch).toHaveBeenCalledTimes(3);
     expect(recordAuditLog).not.toHaveBeenCalled();
   });
 
@@ -165,5 +166,65 @@ describe("auth jwt callback - maintainer team scoping", () => {
 
     process.env.ALLOWED_MAINTAINER_ORGS = "OrgA, OrgB, OrgC";
     expect(getAllowedMaintainerOrgs()).toEqual(["OrgA", "OrgB", "OrgC"]);
+  });
+});
+
+describe("auth callback error hardening and token leak prevention", () => {
+  it("redacts sensitive tokens from logger.error", () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    authOptions.logger?.error("OAUTH_CALLBACK_ERROR", {
+      error: new Error("Failed with token gho_12345678901234567890"),
+      access_token: "gho_super_secret_token_1234567",
+      providerId: "github",
+    } as any);
+
+    expect(errorSpy).toHaveBeenCalled();
+    const loggedOutput = JSON.stringify(errorSpy.mock.calls);
+    expect(loggedOutput).not.toContain("gho_12345678901234567890");
+    expect(loggedOutput).not.toContain("gho_super_secret_token_1234567");
+    expect(loggedOutput).toContain("[redacted");
+    errorSpy.mockRestore();
+  });
+
+  it("handles jwt callback database or processing failures without leaking tokens in error", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.mocked(prisma.user.upsert).mockRejectedValueOnce(
+      new Error("DB failure on token gho_secret_token_1234567890")
+    );
+
+    await expect(
+      jwtCallback({
+        token: {},
+        account: githubAccount("gho_secret_token_1234567890"),
+        profile: githubProfile("octocat"),
+      } as any)
+    ).rejects.toThrow("OAuthCallbackError");
+
+    const loggedOutput = JSON.stringify(errorSpy.mock.calls);
+    expect(loggedOutput).not.toContain("gho_secret_token_1234567890");
+    errorSpy.mockRestore();
+  });
+
+  it("redacts tokens when decryptToken fails in getDecryptedGithubAccessToken", async () => {
+    const { getDecryptedGithubAccessToken } = await import("@/lib/auth");
+    const { decryptToken } = await import("@/lib/token-crypto");
+    const { recordTokenAudit } = await import("@/lib/token-audit");
+
+    vi.mocked(prisma.user.findUnique).mockResolvedValueOnce({
+      accessToken: "encrypted:gho_secret_token_1234567890",
+    } as any);
+
+    vi.mocked(decryptToken).mockImplementationOnce(() => {
+      throw new Error("Bad key for gho_secret_token_1234567890");
+    });
+
+    const token = await getDecryptedGithubAccessToken("user-1");
+    expect(token).toBeNull();
+    expect(recordTokenAudit).toHaveBeenCalledWith(
+      "user-1",
+      "token_decrypt_failed",
+      false,
+      expect.not.stringContaining("gho_secret_token_1234567890")
+    );
   });
 });

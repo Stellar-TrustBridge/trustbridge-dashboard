@@ -15,6 +15,9 @@ describe("describeAuditAction", () => {
     expect(describeAuditAction("export.cron")).toBe(
       "Automated nightly treasury CSV export"
     );
+    expect(describeAuditAction("dispute.resolve")).toBe(
+      "Resolved a contributor dispute"
+    );
   });
 
   it("falls back to the raw action for unknown ones", () => {

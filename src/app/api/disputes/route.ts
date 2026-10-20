@@ -9,6 +9,7 @@ import {
   trackServerDisputeClosed,
   trackServerDisputeOpened,
 } from "@/lib/analytics";
+import { recordAuditLog } from "@/lib/audit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -42,8 +43,8 @@ export async function GET(request: NextRequest) {
   let limit = DEFAULT_DISPUTES_LIMIT;
   if (limitParam) {
     const parsed = parseInt(limitParam, 10);
-    if (!isNaN(parsed) && parsed > 0 && parsed <= MAX_DISPUTES_LIMIT) {
-      limit = parsed;
+    if (!isNaN(parsed) && parsed > 0) {
+      limit = Math.min(parsed, MAX_DISPUTES_LIMIT);
     }
   }
 
@@ -189,6 +190,23 @@ export async function PATCH(request: NextRequest) {
       userId: session.user.id,
       disputeId: updated.id,
       status: updated.status,
+    });
+  }
+
+  if (dispute.status !== updated.status) {
+    await recordAuditLog({
+      action: "dispute.resolve",
+      actorId: session.user.id,
+      actorLogin: session.user.githubUsername ?? null,
+      targetId: updated.id,
+      targetLabel: updated.registrationId,
+      metadata: {
+        disputeId: updated.id,
+        registrationId: updated.registrationId,
+        status: updated.status,
+        previousStatus: dispute.status,
+        resolvedAt: updated.resolvedAt?.toISOString() ?? null,
+      },
     });
   }
 

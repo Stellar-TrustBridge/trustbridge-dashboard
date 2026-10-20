@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 
 import MetricsPage from "@/app/dashboard/metrics/page";
@@ -53,17 +53,25 @@ const metricsFixture = {
   },
 };
 
+const defaultQueryState = {
+  isLoading: false,
+  isError: false,
+  isFetching: false,
+  refetch: vi.fn(),
+  data: metricsFixture,
+};
+
+const mockUseQuery = vi.fn().mockImplementation(() => defaultQueryState);
+
 vi.mock("@tanstack/react-query", () => ({
-  useQuery: () => ({
-    isLoading: false,
-    isError: false,
-    isFetching: false,
-    refetch: vi.fn(),
-    data: metricsFixture,
-  }),
+  useQuery: () => mockUseQuery(),
 }));
 
 describe("MetricsPage layout", () => {
+  beforeEach(() => {
+    mockUseQuery.mockImplementation(() => defaultQueryState);
+  });
+
   it("renders a mobile-first stacked readiness grid", () => {
     const { container } = render(<MetricsPage />);
 
@@ -91,7 +99,7 @@ describe("MetricsPage layout", () => {
   it("keeps all readiness counts visible", () => {
     render(<MetricsPage />);
 
-    expect(screen.getByText(/ready/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/ready/i).length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText(/low reserve/i)).toBeInTheDocument();
     expect(screen.getByText(/not ready/i)).toBeInTheDocument();
   });
@@ -157,4 +165,61 @@ describe("MetricsPage layout", () => {
       expect(screen.getByText(/window:.*60s.*max:.*10 req/i)).toBeInTheDocument();
     });
   });
+
+  describe("loading and empty states", () => {
+    it("renders MetricsSkeleton when isLoading is true", () => {
+      mockUseQuery.mockImplementation(() => ({
+        ...defaultQueryState,
+        isLoading: true,
+        data: undefined,
+      }));
+
+      render(<MetricsPage />);
+      expect(screen.getByTestId("metrics-skeleton")).toBeInTheDocument();
+      expect(screen.getByRole("status")).toHaveAttribute("aria-busy", "true");
+    });
+
+    it("renders overall metrics-empty-state when no data is returned", () => {
+      mockUseQuery.mockImplementation(() => ({
+        ...defaultQueryState,
+        isLoading: false,
+        data: null,
+      }));
+
+      render(<MetricsPage />);
+      expect(screen.getByTestId("metrics-empty-state")).toBeInTheDocument();
+    });
+
+    it("renders section-specific empty states when sections have no data", () => {
+      mockUseQuery.mockImplementation(() => ({
+        ...defaultQueryState,
+        isLoading: false,
+        data: {
+          ...metricsFixture,
+          contributors: {
+            total: 0,
+            ready: 0,
+            readyPercent: 0,
+            byStatus: { ready: 0, low_reserve: 0, not_ready: 0 },
+          },
+          audit: {
+            recentEntries: 0,
+            byAction: {},
+            latestAt: null,
+          },
+          circuitBreaker: {
+            ...metricsFixture.circuitBreaker,
+            totalTrips: 0,
+            recentTrips: [],
+          },
+        },
+      }));
+
+      render(<MetricsPage />);
+      expect(screen.getByTestId("readiness-empty-state")).toBeInTheDocument();
+      expect(screen.getByTestId("audit-empty-state")).toBeInTheDocument();
+      expect(screen.getByTestId("trips-empty-state")).toBeInTheDocument();
+    });
+  });
 });
+

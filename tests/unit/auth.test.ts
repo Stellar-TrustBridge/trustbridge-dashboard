@@ -19,3 +19,22 @@ describe("getSessionUserId", () => {
     );
   });
 });
+
+describe("authOptions logger redaction", () => {
+  it("scrubs tokens and sensitive fields in error logging", async () => {
+    const { authOptions } = await import("@/lib/auth");
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    authOptions.logger?.error("OAUTH_CALLBACK_ERROR", {
+      message: "Callback error with token gho_abcdef1234567890123456",
+      access_token: "secret-token",
+    } as any);
+
+    expect(errorSpy).toHaveBeenCalled();
+    const calls = JSON.stringify(errorSpy.mock.calls);
+    expect(calls).not.toContain("gho_abcdef1234567890123456");
+    expect(calls).not.toContain("secret-token");
+    expect(calls).toContain("[redacted");
+    errorSpy.mockRestore();
+  });
+});

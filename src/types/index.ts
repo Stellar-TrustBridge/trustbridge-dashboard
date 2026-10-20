@@ -105,7 +105,9 @@ export type AuditAction =
   | "checklist.update"
   | "network_config_mismatch_detected"
   | "contract.sync"
-  | "profile.privacy_updated";
+  | "profile.privacy_updated"
+  | "dispute.resolve"
+  | "dispute.status_change";
 
 export interface AuditLogEntry {
   id: string;

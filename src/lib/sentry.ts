@@ -55,7 +55,7 @@ const REDACTION_RULES: ReadonlyArray<{ pattern: RegExp; replacement: string }> =
   // GitHub fine-grained PATs: github_pat_<22>_<59>
   { pattern: /\bgithub_pat_[A-Za-z0-9_]{20,}/g, replacement: "[redacted:github-token]" },
   // Classic/OAuth/app tokens: ghp_, gho_, ghu_, ghs_, ghr_
-  { pattern: /\bgh[pousr]_[A-Za-z0-9]{20,}/g, replacement: "[redacted:github-token]" },
+  { pattern: /\bgh[pousr]_[A-Za-z0-9_]{20,}/g, replacement: "[redacted:github-token]" },
   // Stellar public keys (G…) and secret seeds (S…). Both are 56-char base32.
   // Secrets must never appear anywhere; public G-addresses are personal data
   // that ties a GitHub identity to an on-chain balance, so they go too.
@@ -252,6 +252,11 @@ let cachedClient: SentryClient | null = null;
 export function getSentryClient(): SentryClient {
   if (!cachedClient) cachedClient = resolveClient();
   return cachedClient;
+}
+
+/** Reset cached client for testing. */
+export function _resetSentryClient(): void {
+  cachedClient = null;
 }
 
 // ---------------------------------------------------------------------------

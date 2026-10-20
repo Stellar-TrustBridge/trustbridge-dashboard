@@ -9,6 +9,7 @@ import { decryptToken, encryptToken } from "@/lib/token-crypto";
 import { recordTokenAudit } from "@/lib/token-audit";
 import { recordAuditLog } from "@/lib/audit";
 import { generateCsrfToken } from "@/lib/csrf";
+import { redactString, redactValue } from "@/lib/sentry";
 
 async function isOrgMember(accessToken: string, org: string): Promise<boolean> {
   try {
@@ -149,110 +150,121 @@ export const authOptions: NextAuthOptions = {
   },
   callbacks: {
     async jwt({ token, account, profile }) {
-      if (account?.provider === "github" && profile) {
-        const githubId = profile.id?.toString();
-        const githubUsername = profile.login;
+      try {
+        if (account?.provider === "github" && profile) {
+          const githubId = profile.id?.toString();
+          const githubUsername = profile.login;
 
-        if (githubId && githubUsername) {
-          let encryptedAccessToken: string | null = null;
-          if (account.access_token) {
-            try {
-              encryptedAccessToken = encryptToken(account.access_token);
-            } catch (error) {
-              console.error("Failed to encrypt GitHub access token", error);
-            }
-          }
-
-          const user = await prisma.user.upsert({
-            where: { githubId },
-            create: {
-              githubId,
-              githubUsername,
-              name: profile.name ?? null,
-              email: profile.email ?? null,
-              image: profile.image ?? null,
-              accessToken: encryptedAccessToken,
-            },
-            update: {
-              githubUsername,
-              name: profile.name ?? null,
-              email: profile.email ?? null,
-              image: profile.image ?? null,
-              accessToken: encryptedAccessToken,
-            },
-          });
-
-          await recordTokenAudit(
-            user.id,
-            encryptedAccessToken
-              ? "token_encrypted_at_signin"
-              : "token_encryption_skipped",
-            Boolean(encryptedAccessToken)
-          );
-
-          token.sub = user.id;
-          token.githubUsername = githubUsername;
-
-          const maintainerOrg = process.env.GITHUB_MAINTAINER_ORG?.trim();
-          if (maintainerOrg && account.access_token) {
-            let isMaintainer = await isOrgMember(
-              account.access_token,
-              maintainerOrg
-            );
-
-            const maintainerTeam = process.env.GITHUB_MAINTAINER_TEAM?.trim();
-            if (isMaintainer && maintainerTeam) {
-              const isOnTeam = await isTeamMember(
-                account.access_token,
-                maintainerOrg,
-                maintainerTeam,
-                githubUsername
-              );
-
-              if (!isOnTeam) {
-                isMaintainer = false;
-                await recordAuditLog({
-                  action: "maintainer_access_denied_team",
-                  actorId: user.id,
-                  actorLogin: githubUsername,
-                  metadata: { team: maintainerTeam },
-                });
+          if (githubId && githubUsername) {
+            let encryptedAccessToken: string | null = null;
+            if (account.access_token) {
+              try {
+                encryptedAccessToken = encryptToken(account.access_token);
+              } catch (error) {
+                console.error(
+                  "Failed to encrypt GitHub access token",
+                  error instanceof Error ? redactString(error.message) : "Encryption error"
+                );
               }
             }
 
-            token.isMaintainer = isMaintainer;
+            const user = await prisma.user.upsert({
+              where: { githubId },
+              create: {
+                githubId,
+                githubUsername,
+                name: profile.name ?? null,
+                email: profile.email ?? null,
+                image: profile.image ?? null,
+                accessToken: encryptedAccessToken,
+              },
+              update: {
+                githubUsername,
+                name: profile.name ?? null,
+                email: profile.email ?? null,
+                image: profile.image ?? null,
+                accessToken: encryptedAccessToken,
+              },
+            });
 
-            // Resolve fine-grained RBAC role
-            const role = await resolveRole(account.access_token, githubUsername);
-            token.role = role ?? undefined;
+            await recordTokenAudit(
+              user.id,
+              encryptedAccessToken
+                ? "token_encrypted_at_signin"
+                : "token_encryption_skipped",
+              Boolean(encryptedAccessToken)
+            );
 
-            // Audit role denial for non-org members who attempt sign-in
-            if (!role && !isMaintainer) {
-              await recordAuditLog({
-                action: "rbac_role_denied",
-                actorId: user.id,
-                actorLogin: githubUsername,
-                metadata: { reason: "not_org_member" },
-              });
-            }
+            token.sub = user.id;
+            token.githubUsername = githubUsername;
 
-            // Multi-org: populate all orgs the maintainer belongs to so the
-            // org-switcher can show them. Non-maintainers get an empty list.
-            if (isMaintainer) {
-              const availableOrgs = await resolveAvailableOrgs(account.access_token);
-              token.availableOrgs = availableOrgs;
-              // Default active org: first matched org, or the legacy single-org env var.
-              token.maintainerOrgId =
-                availableOrgs[0] ?? maintainerOrg ?? "default";
-            } else {
-              token.availableOrgs = [];
-              token.maintainerOrgId = "default";
+            const maintainerOrg = process.env.GITHUB_MAINTAINER_ORG?.trim();
+            if (maintainerOrg && account.access_token) {
+              let isMaintainer = await isOrgMember(
+                account.access_token,
+                maintainerOrg
+              );
+
+              const maintainerTeam = process.env.GITHUB_MAINTAINER_TEAM?.trim();
+              if (isMaintainer && maintainerTeam) {
+                const isOnTeam = await isTeamMember(
+                  account.access_token,
+                  maintainerOrg,
+                  maintainerTeam,
+                  githubUsername
+                );
+
+                if (!isOnTeam) {
+                  isMaintainer = false;
+                  await recordAuditLog({
+                    action: "maintainer_access_denied_team",
+                    actorId: user.id,
+                    actorLogin: githubUsername,
+                    metadata: { team: maintainerTeam },
+                  });
+                }
+              }
+
+              token.isMaintainer = isMaintainer;
+
+              // Resolve fine-grained RBAC role
+              const role = await resolveRole(account.access_token, githubUsername);
+              token.role = role ?? undefined;
+
+              // Audit role denial for non-org members who attempt sign-in
+              if (!role && !isMaintainer) {
+                await recordAuditLog({
+                  action: "rbac_role_denied",
+                  actorId: user.id,
+                  actorLogin: githubUsername,
+                  metadata: { reason: "not_org_member" },
+                });
+              }
+
+              // Multi-org: populate all orgs the maintainer belongs to so the
+              // org-switcher can show them. Non-maintainers get an empty list.
+              if (isMaintainer) {
+                const availableOrgs = await resolveAvailableOrgs(account.access_token);
+                token.availableOrgs = availableOrgs;
+                // Default active org: first matched org, or the legacy single-org env var.
+                token.maintainerOrgId =
+                  availableOrgs[0] ?? maintainerOrg ?? "default";
+              } else {
+                token.availableOrgs = [];
+                token.maintainerOrgId = "default";
+              }
             }
           }
         }
-      }
 
-      return token;
+        return token;
+      } catch (error) {
+        console.error(
+          "[auth] GitHub OAuth callback error:",
+          error instanceof Error ? redactString(error.message) : "OAuth error"
+        );
+        throw new Error("OAuthCallbackError");
+      }
     },
     async session({ session, token }) {
       if (session.user) {
@@ -267,6 +279,25 @@ export const authOptions: NextAuthOptions = {
         }
       }
       return session;
+    },
+  },
+  logger: {
+    error(code, metadata) {
+      console.error(
+        `[next-auth][error][${code}]`,
+        redactValue(metadata)
+      );
+    },
+    warn(code) {
+      console.warn(`[next-auth][warn][${code}]`);
+    },
+    debug(code, metadata) {
+      if (process.env.NODE_ENV === "development") {
+        console.debug(
+          `[next-auth][debug][${code}]`,
+          redactValue(metadata)
+        );
+      }
     },
   },
   pages: {
@@ -303,7 +334,7 @@ export async function getDecryptedGithubAccessToken(
       userId,
       "token_decrypt_failed",
       false,
-      error instanceof Error ? error.message : "Unknown decrypt error"
+      error instanceof Error ? redactString(error.message) : "Unknown decrypt error"
     );
     return null;
   }

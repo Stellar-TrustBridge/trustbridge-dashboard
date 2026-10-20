@@ -40,6 +40,7 @@ beyond the opaque session identifier.
 - **Rotation** on privilege change (e.g. sign-in, password change) prevents
   session fixation.
 - **Server-side revocation** ensures sign-out is effective immediately.
+- **Redacted OAuth error surfaces** ensure that GitHub OAuth tokens (`gho_`, `ghp_`, `access_token`), authorization codes, and credentials are scrubbed via `redactValue` / `redactString` before reaching error logs, NextAuth callbacks, or user-facing error queries. Database and crypto errors in the JWT callback fail gracefully without propagating token data.
 
 ## Configuration
 

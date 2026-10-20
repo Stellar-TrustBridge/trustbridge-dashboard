@@ -1,3 +1,4 @@
+/** @vitest-environment jsdom */
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useJobProgress } from "@/lib/use-job-progress";
@@ -251,5 +252,238 @@ describe("useJobProgress hook", () => {
       vi.advanceTimersByTime(2000);
     });
     expect(MockEventSource.instances).toHaveLength(1);
+  });
+
+  describe("SSE reconnect backoff progression", () => {
+    it("follows exponential backoff delays with default options", () => {
+      const { result } = renderHook(() => useJobProgress());
+
+      act(() => {
+        result.current.startProgress("job-backoff-1");
+      });
+
+      expect(MockEventSource.instances).toHaveLength(1);
+
+      // --- Disconnect 1: attempt 1 delay = 1000 * 1.5^0 = 1000ms
+      act(() => {
+        MockEventSource.instances[0].simulateError();
+      });
+      expect(result.current.isReconnecting).toBe(true);
+      expect(result.current.reconnectAttempt).toBe(1);
+
+      // At 999ms: not yet reconnected
+      act(() => {
+        vi.advanceTimersByTime(999);
+      });
+      expect(MockEventSource.instances).toHaveLength(1);
+
+      // At 1000ms: reconnected
+      act(() => {
+        vi.advanceTimersByTime(1);
+      });
+      expect(MockEventSource.instances).toHaveLength(2);
+
+      // --- Disconnect 2: attempt 2 delay = 1000 * 1.5^1 = 1500ms
+      act(() => {
+        MockEventSource.instances[1].simulateError();
+      });
+      expect(result.current.isReconnecting).toBe(true);
+      expect(result.current.reconnectAttempt).toBe(2);
+
+      // At 1499ms: not yet reconnected
+      act(() => {
+        vi.advanceTimersByTime(1499);
+      });
+      expect(MockEventSource.instances).toHaveLength(2);
+
+      // At 1500ms: reconnected
+      act(() => {
+        vi.advanceTimersByTime(1);
+      });
+      expect(MockEventSource.instances).toHaveLength(3);
+
+      // --- Disconnect 3: attempt 3 delay = 1000 * 1.5^2 = 2250ms
+      act(() => {
+        MockEventSource.instances[2].simulateError();
+      });
+      expect(result.current.isReconnecting).toBe(true);
+      expect(result.current.reconnectAttempt).toBe(3);
+
+      // At 2249ms: not yet reconnected
+      act(() => {
+        vi.advanceTimersByTime(2249);
+      });
+      expect(MockEventSource.instances).toHaveLength(3);
+
+      // At 2250ms: reconnected
+      act(() => {
+        vi.advanceTimersByTime(1);
+      });
+      expect(MockEventSource.instances).toHaveLength(4);
+
+      // Attempt 4 exceeds default maxAttempts (3) -> enters terminal error state
+      act(() => {
+        MockEventSource.instances[3].simulateError();
+      });
+      expect(result.current.isStreaming).toBe(false);
+      expect(result.current.isReconnecting).toBe(false);
+      expect(result.current.error).toContain("Failed to reconnect after 3 attempts");
+    });
+
+    it("caps exponential backoff delay at 10,000ms", () => {
+      const { result } = renderHook(() =>
+        useJobProgress({ maxReconnectAttempts: 5, reconnectDelayMs: 4000 })
+      );
+
+      act(() => {
+        result.current.startProgress("job-cap");
+      });
+
+      // Attempt 1: 4000ms
+      act(() => {
+        MockEventSource.instances[0].simulateError();
+      });
+      act(() => {
+        vi.advanceTimersByTime(4000);
+      });
+      expect(MockEventSource.instances).toHaveLength(2);
+
+      // Attempt 2: 4000 * 1.5 = 6000ms
+      act(() => {
+        MockEventSource.instances[1].simulateError();
+      });
+      act(() => {
+        vi.advanceTimersByTime(6000);
+      });
+      expect(MockEventSource.instances).toHaveLength(3);
+
+      // Attempt 3: 4000 * 2.25 = 9000ms
+      act(() => {
+        MockEventSource.instances[2].simulateError();
+      });
+      act(() => {
+        vi.advanceTimersByTime(9000);
+      });
+      expect(MockEventSource.instances).toHaveLength(4);
+
+      // Attempt 4: 4000 * 3.375 = 13500ms -> capped at 10000ms
+      act(() => {
+        MockEventSource.instances[3].simulateError();
+      });
+      expect(result.current.reconnectAttempt).toBe(4);
+
+      act(() => {
+        vi.advanceTimersByTime(9999);
+      });
+      expect(MockEventSource.instances).toHaveLength(4);
+
+      act(() => {
+        vi.advanceTimersByTime(1);
+      });
+      expect(MockEventSource.instances).toHaveLength(5);
+    });
+
+    it("resets backoff attempt counter and delay upon receiving any valid event", () => {
+      const { result } = renderHook(() =>
+        useJobProgress({ maxReconnectAttempts: 3, reconnectDelayMs: 1000 })
+      );
+
+      act(() => {
+        result.current.startProgress("job-reset");
+      });
+
+      // Disconnect -> attempt 1
+      act(() => {
+        MockEventSource.instances[0].simulateError();
+      });
+      expect(result.current.reconnectAttempt).toBe(1);
+
+      // Reconnect after 1000ms
+      act(() => {
+        vi.advanceTimersByTime(1000);
+      });
+      expect(MockEventSource.instances).toHaveLength(2);
+
+      // Simulate a progress message
+      act(() => {
+        MockEventSource.instances[1].simulateMessage({
+          type: "processing",
+          jobId: "job-reset",
+        });
+      });
+
+      expect(result.current.reconnectAttempt).toBe(0);
+      expect(result.current.isReconnecting).toBe(false);
+
+      // A subsequent disconnect should restart at attempt 1 (1000ms), not attempt 2 (1500ms)
+      act(() => {
+        MockEventSource.instances[1].simulateError();
+      });
+      expect(result.current.reconnectAttempt).toBe(1);
+
+      act(() => {
+        vi.advanceTimersByTime(999);
+      });
+      expect(MockEventSource.instances).toHaveLength(2);
+
+      act(() => {
+        vi.advanceTimersByTime(1);
+      });
+      expect(MockEventSource.instances).toHaveLength(3);
+    });
+
+    it("cancels pending backoff timer on unmount", () => {
+      const { result, unmount } = renderHook(() =>
+        useJobProgress({ maxReconnectAttempts: 3, reconnectDelayMs: 1000 })
+      );
+
+      act(() => {
+        result.current.startProgress("job-unmount");
+      });
+
+      act(() => {
+        MockEventSource.instances[0].simulateError();
+      });
+      expect(result.current.isReconnecting).toBe(true);
+
+      unmount();
+
+      act(() => {
+        vi.advanceTimersByTime(5000);
+      });
+      expect(MockEventSource.instances).toHaveLength(1);
+    });
+
+    it("switches to new job immediately and cancels pending backoff timer for old job", () => {
+      const { result } = renderHook(() =>
+        useJobProgress({ maxReconnectAttempts: 3, reconnectDelayMs: 2000 })
+      );
+
+      act(() => {
+        result.current.startProgress("job-old");
+      });
+
+      act(() => {
+        MockEventSource.instances[0].simulateError();
+      });
+      expect(result.current.isReconnecting).toBe(true);
+
+      // Switch to a new job while backoff timer is running
+      act(() => {
+        result.current.startProgress("job-new");
+      });
+
+      expect(result.current.activeJobId).toBe("job-new");
+      expect(result.current.isReconnecting).toBe(false);
+      expect(result.current.reconnectAttempt).toBe(0);
+      expect(MockEventSource.instances).toHaveLength(2);
+      expect(MockEventSource.instances[1].url).toContain("jobId=job-new");
+
+      // Advance the old backoff timer (2000ms) - should not trigger a reconnect for job-old
+      act(() => {
+        vi.advanceTimersByTime(3000);
+      });
+      expect(MockEventSource.instances).toHaveLength(2);
+    });
   });
 });

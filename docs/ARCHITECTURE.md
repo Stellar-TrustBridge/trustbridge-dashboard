@@ -386,6 +386,16 @@ This is intentionally read-only and additive — it surfaces the misconfiguratio
 
 ---
 
+## Dispute resolution & audit trail
+
+Maintainers manage contributor disputes via `/api/disputes`. When a dispute status changes (e.g. from `OPEN` to `VALIDATED` or `REJECTED`), a structured audit entry (`dispute.resolve`) is persisted through `recordAuditLog()` (`src/lib/audit.ts`).
+
+- **Route:** `PATCH /api/disputes` requires maintainer session and same-origin CSRF checks.
+- **Audit Action:** `dispute.resolve` captures `actorId`, `targetId` (dispute ID), `targetLabel` (registration ID), and metadata (`status`, `previousStatus`, `resolvedAt`).
+- **Telemetry:** Closes `trackServerDisputeClosed` upon initial transition away from `OPEN`.
+
+---
+
 ## Future: Soroban registry
 
 This section covers the full lifecycle of Soroban integration: the read path that ships today, and the write-through path that is designed but intentionally **not yet implemented**.

@@ -24,6 +24,8 @@ import {
 import { WaveReadinessBar } from "@/components/WaveReadinessBar";
 import { HorizonLatencyChart } from "@/components/HorizonLatencyChart";
 import { AddressAnomalyBanner } from "@/components/AddressAnomalyBanner";
+import { MetricsSkeleton } from "@/components/MetricsSkeleton";
+import { MetricsEmptyState } from "@/components/MetricsEmptyState";
 import type { HorizonLatencyStats } from "@/lib/stats";
 import type { AnomalyStatus } from "@/lib/address-anomaly";
 
@@ -151,12 +153,7 @@ export default function MetricsPage() {
   });
 
   if (metricsQuery.isLoading) {
-    return (
-      <div className="flex items-center justify-center py-20 text-muted-foreground">
-        <Loader2 className="mr-2 h-5 w-5 animate-spin" />
-        Loading metrics…
-      </div>
-    );
+    return <MetricsSkeleton />;
   }
 
   if (metricsQuery.isError) {
@@ -170,9 +167,50 @@ export default function MetricsPage() {
     );
   }
 
-  const data = metricsQuery.data!;
-  const { contributors, audit, circuitBreaker, rateLimit, config } = data;
-  const auditEntries = Object.entries(audit.byAction).sort((a, b) => b[1] - a[1]);
+  const data = metricsQuery.data ?? ({} as Partial<MetricsResponse>);
+  const contributors = data.contributors ?? {
+    total: 0,
+    ready: 0,
+    readyPercent: 0,
+    byStatus: { ready: 0, low_reserve: 0, not_ready: 0 },
+  };
+  const audit = data.audit ?? {
+    recentEntries: 0,
+    byAction: {},
+    latestAt: null,
+  };
+  const circuitBreaker = data.circuitBreaker ?? {
+    state: "CLOSED",
+    failureCount: 0,
+    successCount: 0,
+    lastFailureTime: null,
+    totalTrips: 0,
+    recentTrips: [],
+    processLocal: true,
+  };
+  const rateLimit = data.rateLimit ?? {
+    activeIdentifiers: 0,
+    totalAllowed: 0,
+    totalBlocked: 0,
+    processLocal: true,
+  };
+  const config = data.config ?? {
+    rateLimitWindowMs: 60000,
+    rateLimitMaxRequests: 100,
+    circuitBreakerFailureThreshold: 5,
+    circuitBreakerSuccessThreshold: 2,
+    circuitBreakerRecoveryMs: 30000,
+    staleCsvMaxAgeMs: 86400000,
+    horizonUrl: "https://horizon.stellar.org",
+    sorobanContractConfigured: false,
+  };
+
+  const auditEntries = Object.entries(audit.byAction ?? {}).sort((a, b) => b[1] - a[1]);
+  const isEntirelyEmpty =
+    contributors.total === 0 &&
+    auditEntries.length === 0 &&
+    circuitBreaker.totalTrips === 0 &&
+    rateLimit.totalAllowed === 0;
 
   return (
     <div
@@ -203,8 +241,175 @@ export default function MetricsPage() {
         </Button>
       </div>
 
+      {isEntirelyEmpty && (
+        <MetricsEmptyState
+          onRefresh={() => metricsQuery.refetch()}
+          isRefreshing={metricsQuery.isFetching}
+        />
+      )}
+
       {/* ── Security Anomaly Alert ────────────────────────────── */}
       <AddressAnomalyBanner status={data.addressAnomaly} />
+
+      {/* ── Circuit Breaker Live Status ────────────────────────── */}
+      <Card className="mb-6" data-testid="metrics-circuit-breaker">
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <CardTitle className="flex items-center gap-2">
+              <Zap className="h-5 w-5" />
+              Horizon circuit breaker
+            </CardTitle>
+            <CircuitBreakerStateBadge state={circuitBreaker.state} />
+          </div>
+          <CardDescription>
+            Protects Horizon from being hammered during outages.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
+            <div className="rounded-lg border border-border-strong px-4 py-4">
+              <p className="text-xs text-muted-foreground">State</p>
+              <p className="mt-1 font-mono text-sm font-semibold">
+                {circuitBreaker.state}
+              </p>
+            </div>
+            <div className="rounded-lg border border-border-strong px-4 py-4">
+              <p className="text-xs text-muted-foreground">Total trips</p>
+              <p className="mt-1 text-2xl font-bold tabular-nums">
+                {circuitBreaker.totalTrips}
+              </p>
+            </div>
+            <div className="rounded-lg border border-border-strong px-4 py-4">
+              <p className="text-xs text-muted-foreground">Current failures</p>
+              <p className="mt-1 text-2xl font-bold tabular-nums">
+                {circuitBreaker.failureCount}
+              </p>
+            </div>
+            <div className="rounded-lg border border-border-strong px-4 py-4">
+              <p className="text-xs text-muted-foreground">Last failure</p>
+              <p className="mt-1 text-sm font-medium">
+                {formatTimestamp(circuitBreaker.lastFailureTime)}
+              </p>
+            </div>
+          </div>
+
+          <div>
+            <h4 className="mb-2 text-sm font-semibold">Recent trips</h4>
+            {(circuitBreaker.recentTrips ?? []).length === 0 ? (
+              <p className="text-sm text-muted-foreground" data-testid="trips-empty-state">
+                No trips recorded in this process run.
+              </p>
+            ) : (
+              <div
+                className="overflow-x-auto"
+                data-testid="metrics-circuit-breaker-trips"
+              >
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-border-strong text-left text-xs text-muted-foreground">
+                      <th className="pb-2 font-medium">Tripped at</th>
+                      <th className="pb-2 font-medium">Failures</th>
+                      <th className="pb-2 font-medium">Recovered at</th>
+                      <th className="pb-2 font-medium">Downtime</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(circuitBreaker.recentTrips ?? [])
+                      .slice()
+                      .reverse()
+                      .map((trip, idx) => (
+                        <tr
+                          key={`${trip.trippedAt}-${idx}`}
+                          className="border-b border-border-strong last:border-0"
+                        >
+                          <td className="py-3 font-mono text-xs">
+                            {new Date(trip.trippedAt).toLocaleString()}
+                          </td>
+                          <td className="py-3 tabular-nums">
+                            {trip.failureCountAtTrip}
+                          </td>
+                          <td className="py-3 font-mono text-xs">
+                            {trip.recoveredAt
+                              ? new Date(trip.recoveredAt).toLocaleString()
+                              : (
+                                <Badge variant="destructive" className="text-xs">
+                                  Still open
+                                </Badge>
+                              )}
+                          </td>
+                          <td className="py-3 tabular-nums">
+                            {trip.recoveredAt
+                              ? `${Math.round((trip.recoveredAt - trip.trippedAt) / 1000)}s`
+                              : `${Math.round((Date.now() - trip.trippedAt) / 1000)}s*`}
+                          </td>
+                        </tr>
+                      ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          <ProcessLocalNote />
+        </CardContent>
+      </Card>
+
+      {/* ── Rate Limit Status ──────────────────────────────────── */}
+      <Card className="mb-6" data-testid="metrics-rate-limit">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <ShieldCheck className="h-5 w-5" />
+            Rate limiting
+          </CardTitle>
+          <CardDescription>
+            Per-IP request throttling for the check endpoint.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+            <div className="rounded-lg border border-emerald-300 bg-emerald-50 px-4 py-4 dark:border-emerald-600 dark:bg-emerald-950/40">
+              <p className="text-xs text-emerald-700 dark:text-emerald-300">
+                Requests allowed
+              </p>
+              <p className="mt-1 text-2xl font-bold tabular-nums text-emerald-700 dark:text-emerald-300">
+                {rateLimit.totalAllowed.toLocaleString()}
+              </p>
+            </div>
+            <div className="rounded-lg border border-red-300 bg-red-50 px-4 py-4 dark:border-red-600 dark:bg-red-950/40">
+              <p className="text-xs text-red-700 dark:text-red-300">
+                Requests blocked
+              </p>
+              <p className="mt-1 text-2xl font-bold tabular-nums text-red-700 dark:text-red-300">
+                {rateLimit.totalBlocked.toLocaleString()}
+              </p>
+            </div>
+            <div className="rounded-lg border border-border-strong px-4 py-4">
+              <p className="text-xs text-muted-foreground">
+                Active clients (window)
+              </p>
+              <p className="mt-1 text-2xl font-bold tabular-nums">
+                {rateLimit.activeIdentifiers.toLocaleString()}
+              </p>
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-border-strong px-3 py-3">
+            <div className="flex items-center justify-between text-sm">
+              <span className="text-muted-foreground">
+                Window: {msToSeconds(config.rateLimitWindowMs)}s · Max: {config.rateLimitMaxRequests} req
+              </span>
+              <span className="font-mono text-xs text-muted-foreground">
+                Block rate:{" "}
+                {rateLimit.totalAllowed + rateLimit.totalBlocked > 0
+                  ? `${((rateLimit.totalBlocked / (rateLimit.totalAllowed + rateLimit.totalBlocked)) * 100).toFixed(1)}%`
+                  : "0%"}
+              </span>
+            </div>
+          </div>
+
+          <ProcessLocalNote />
+        </CardContent>
+      </Card>
 
       {/* ── Contributor readiness ─────────────────────────────── */}
       <Card className="mb-6">
@@ -219,36 +424,51 @@ export default function MetricsPage() {
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
-          <WaveReadinessBar
-            readyCount={contributors.ready}
-            totalCount={contributors.total}
-          />
-          <div className="grid grid-cols-1 gap-3 text-center sm:grid-cols-3 sm:gap-4">
-            <div className="min-h-11 rounded-lg border border-emerald-300 bg-emerald-50 px-4 py-4 dark:border-emerald-600 dark:bg-emerald-950/40">
-              <p className="text-2xl font-bold text-emerald-700 dark:text-emerald-300">
-                {contributors.byStatus.ready}
-              </p>
-              <p className="mt-1 text-xs text-emerald-700 dark:text-emerald-200">
-                Ready
+          {contributors.total === 0 ? (
+            <div
+              className="rounded-lg border border-dashed py-8 text-center text-sm text-muted-foreground"
+              data-testid="readiness-empty-state"
+            >
+              <Users className="mx-auto mb-2 h-6 w-6 text-muted-foreground/60" />
+              <p className="font-medium">No registered contributors yet</p>
+              <p className="mt-1 text-xs">
+                Once contributors register their Stellar addresses, readiness metrics will appear here.
               </p>
             </div>
-            <div className="min-h-11 rounded-lg border border-amber-300 bg-amber-50 px-4 py-4 dark:border-amber-600 dark:bg-amber-950/40">
-              <p className="text-2xl font-bold text-amber-700 dark:text-amber-300">
-                {contributors.byStatus.low_reserve}
-              </p>
-              <p className="mt-1 text-xs text-amber-700 dark:text-amber-200">
-                Low reserve
-              </p>
-            </div>
-            <div className="min-h-11 rounded-lg border border-red-300 bg-red-50 px-4 py-4 dark:border-red-600 dark:bg-red-950/40">
-              <p className="text-2xl font-bold text-red-700 dark:text-red-300">
-                {contributors.byStatus.not_ready}
-              </p>
-              <p className="mt-1 text-xs text-red-700 dark:text-red-200">
-                Not ready
-              </p>
-            </div>
-          </div>
+          ) : (
+            <>
+              <WaveReadinessBar
+                readyCount={contributors.ready}
+                totalCount={contributors.total}
+              />
+              <div className="grid grid-cols-1 gap-3 text-center sm:grid-cols-3 sm:gap-4">
+                <div className="min-h-11 rounded-lg border border-emerald-300 bg-emerald-50 px-4 py-4 dark:border-emerald-600 dark:bg-emerald-950/40">
+                  <p className="text-2xl font-bold text-emerald-700 dark:text-emerald-300">
+                    {contributors.byStatus.ready}
+                  </p>
+                  <p className="mt-1 text-xs text-emerald-700 dark:text-emerald-200">
+                    Ready
+                  </p>
+                </div>
+                <div className="min-h-11 rounded-lg border border-amber-300 bg-amber-50 px-4 py-4 dark:border-amber-600 dark:bg-amber-950/40">
+                  <p className="text-2xl font-bold text-amber-700 dark:text-amber-300">
+                    {contributors.byStatus.low_reserve}
+                  </p>
+                  <p className="mt-1 text-xs text-amber-700 dark:text-amber-200">
+                    Low reserve
+                  </p>
+                </div>
+                <div className="min-h-11 rounded-lg border border-red-300 bg-red-50 px-4 py-4 dark:border-red-600 dark:bg-red-950/40">
+                  <p className="text-2xl font-bold text-red-700 dark:text-red-300">
+                    {contributors.byStatus.not_ready}
+                  </p>
+                  <p className="mt-1 text-xs text-red-700 dark:text-red-200">
+                    Not ready
+                  </p>
+                </div>
+              </div>
+            </>
+          )}
         </CardContent>
       </Card>
 
@@ -272,7 +492,7 @@ export default function MetricsPage() {
         </CardHeader>
         <CardContent>
           {auditEntries.length === 0 ? (
-            <p className="text-sm text-muted-foreground">
+            <p className="text-sm text-muted-foreground" data-testid="audit-empty-state">
               No audit events recorded yet.
             </p>
           ) : (
