@@ -40,7 +40,30 @@ export async function recordAuditLog(input: RecordAuditInput): Promise<void> {
 }
 
 /**
- * Persist a maintainer action to the audit log, surfacing failures.
+ * Record a pubnet/testnet switch performed from settings.
+ *
+ * Wraps {@link recordAuditLog} with the canonical action name and a stable
+ * metadata shape so the network switch trail stays consistent across call
+ * sites. Best-effort like the underlying helper.
+ */
+export async function recordNetworkSwitchAudit(input: {
+  actorId?: string | null;
+  actorLogin?: string | null;
+  fromNetwork: string;
+  toNetwork: string;
+  confirmed: boolean;
+}): Promise<void> {
+  await recordAuditLog({
+    action: "settings.network.switch",
+    actorId: input.actorId ?? null,
+    actorLogin: input.actorLogin ?? null,
+    targetId: input.toNetwork,
+    targetLabel: input.toNetwork,
+    metadata: {
+      fromNetwork: input.fromNetwork,
+      toNetwork: input.toNetwork,
+      confirmed: input.confirmed,
+* Persist a maintainer action to the audit log, surfacing failures.
  *
  * Unlike {@link recordAuditLog}, this variant rejects when the audit write
  * fails. Use it for privileged flows (e.g. ban appeal notes) where an

@@ -20,7 +20,15 @@ import { useEffect, useState } from "react";
  *   connectivity state rather than a site-wide alert.
  * - `aria-live="polite"` so screen readers announce the banner without
  *   interrupting current reading.
- * - `forceOffline` lets Storybook/tests render the offline state
+ *
+ * Offline queue behavior (see docs/PWA.md):
+ * - While offline, recheck actions are queued locally (persisted) instead of
+ *   being submitted, so contributors do not double-submit.
+ * - On reconnect the queue is flushed in FIFO order, deduped by recheck id,
+ *   and failed entries are retried with a clear, stable error surfaced.
+ * - The banner copy below reflects this so users know their pending rechecks
+ *   will be sent automatically once the connection returns.
+* - `forceOffline` lets Storybook/tests render the offline state
  *   deterministically without depending on the real `navigator.onLine`.
  */
 export interface OfflineBannerProps {
@@ -64,7 +72,8 @@ export function OfflineBanner({ forceOffline }: OfflineBannerProps = {}) {
       <WifiOff className="h-4 w-4 shrink-0" aria-hidden="true" />
       <span>
         You&apos;re offline. Live Horizon data and Stellar checks are unavailable
-        until your connection is restored.
+        until your connection is restored. Pending rechecks are queued and will
+        be sent automatically when you&apos;re back online.
       </span>
     </div>
   );

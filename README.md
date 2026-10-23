@@ -485,6 +485,8 @@ This project is licensed under the [MIT License](LICENSE).
 
 ## Handsoff notes
 
+<!-- handsoff-issue-603 -->
+- #603: Add Playwright test for dispute create and resolve happy path
 <!-- handsoff-issue-593 -->
 - #593: Add notifications preference persistence and mute-window tests
 
