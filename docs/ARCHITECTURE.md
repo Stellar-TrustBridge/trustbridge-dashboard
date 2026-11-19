@@ -541,3 +541,17 @@ CORS configuration is tested in `tests/unit/cors.test.ts`:
 - [Environment variables](./ENVIRONMENT.md)
 - [Deployment](./DEPLOYMENT.md)
 - [Contributing](./CONTRIBUTING.md)
+
+---
+
+## Appendix: Action cache key composition (#686)
+
+`GET /api/actions/lookup` now keys its 30-second in-process cache with
+`action-lookup:<orgId>:<network>:<address>:<assetCode>:<assetIssuer>` via
+`buildActionLookupCacheKey()` in `src/lib/action-lookup.ts`. Org comes from a
+validated `?org=` parameter (allow-listed against the configured orgs) or
+`GITHUB_MAINTAINER_ORG` (fallback `default`); network is derived from the
+normalized resolved Horizon and Soroban RPC URLs. All components are escaped,
+so no org/network can bleed into another's cached result. Public CORS,
+rate-limit headers, the 30 s TTL and its `Cache-Control` headers are unchanged.
+See [ACTION_LOOKUP_CACHE.md](./ACTION_LOOKUP_CACHE.md).

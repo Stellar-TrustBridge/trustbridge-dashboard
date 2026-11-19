@@ -336,3 +336,29 @@ export const recheckLockCache = new CacheStore<RecheckLockEntry>(parseRecheckIde
 export function buildRecheckLockKey(scope: "batch" | "single", id: string = "all"): string {
   return `recheck:lock:${scope}:${id}`;
 }
+
+/**
+ * Parse the CHECKLIST_IDEMPOTENCY_TTL_MS environment variable.
+ * Controls how long a keyed `PATCH /api/register/checklist` response is
+ * replayed to duplicate submits (default 5 minutes).
+ */
+export function parseChecklistIdempotencyTtl(): number {
+  const raw = process.env.CHECKLIST_IDEMPOTENCY_TTL_MS;
+  if (!raw) return 5 * 60_000;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 5 * 60_000;
+}
+
+/** A captured HTTP response used to replay an idempotent checklist PATCH. */
+export interface ChecklistIdempotencyEntry {
+  status: number;
+  body: unknown;
+}
+
+/**
+ * Dedicated cache for org/user-scoped checklist idempotency keys.
+ * Stores the exact JSON body and status of the first successful PATCH so a
+ * double-click or retry within the TTL returns the same response.
+ */
+export const checklistIdempotencyCache =
+  new CacheStore<ChecklistIdempotencyEntry>(parseChecklistIdempotencyTtl());

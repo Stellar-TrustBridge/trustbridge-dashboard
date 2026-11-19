@@ -153,3 +153,14 @@ Run `npx prisma generate` then `npm run build`.
 - [Deploy to Vercel](./DEPLOYMENT.md)
 - [Understand the architecture](./ARCHITECTURE.md)
 - [Contribute](./CONTRIBUTING.md)
+
+---
+
+## Appendix: Checklist idempotency keys (#688)
+
+`PATCH /api/register/checklist` accepts an optional `Idempotency-Key` header
+(8–128 chars, `[A-Za-z0-9_-]`) for retry-safe double submits. Keys are scoped
+by org and user; the first successful response is replayed for **5 minutes**
+(default; override with `CHECKLIST_IDEMPOTENCY_TTL_MS` in milliseconds) with
+`X-Idempotent-Replay: true`. Requests without the header behave as before.
+See [CHECKLIST_IDEMPOTENCY.md](./CHECKLIST_IDEMPOTENCY.md).

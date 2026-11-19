@@ -1,9 +1,20 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { buildActionLookupResult } from "@/lib/action-lookup";
-import { buildCacheKey, buildLookupCacheHeaders, verificationCache } from "@/lib/cache";
+import {
+  ACTION_LOOKUP_CACHE_TTL_MS,
+  buildActionLookupCacheKey,
+  buildActionLookupResult,
+  normalizeActionLookupNetwork,
+  resolveActionLookupOrgScope,
+} from "@/lib/action-lookup";
+import { getAllowedMaintainerOrgs } from "@/lib/auth";
+import { buildLookupCacheHeaders, verificationCache } from "@/lib/cache";
 import { DEFAULT_ASSET } from "@/lib/constants";
 import { checkStellarAddress } from "@/lib/horizon";
+import {
+  resolveHorizonUrl,
+  resolveSorobanRpcUrl,
+} from "@/lib/network-config";
 import { isValidStellarAddress } from "@/lib/stellar";
 import { publicOptionsResponse, withPublicCors } from "@/lib/public-cors";
 import {
@@ -17,7 +28,7 @@ export const dynamic = "force-dynamic";
 
 // Short TTL: fresh enough for the registration wizard, long enough to
 // absorb bursts against Horizon rate limits.
-const LOOKUP_CACHE_TTL_MS = 30_000;
+const LOOKUP_CACHE_TTL_MS = ACTION_LOOKUP_CACHE_TTL_MS;
 
 /** Generous limit for the public lookup endpoint (60 req/min default). */
 const LOOKUP_MAX_REQUESTS = 60;
@@ -59,7 +70,26 @@ export async function GET(request: NextRequest) {
     request.nextUrl.searchParams.get("asset_issuer")?.trim() ||
     DEFAULT_ASSET.issuer;
 
-  const cacheKey = buildCacheKey("action-lookup", address, assetCode, assetIssuer);
+  // #686: scope every cached result by tenant and network so two orgs (or two
+  // Stellar networks) checking the same address can never share an entry.
+  const orgId = resolveActionLookupOrgScope(
+    request.nextUrl.searchParams.get("org"),
+    {
+      configuredOrg: process.env.GITHUB_MAINTAINER_ORG,
+      allowedOrgs: getAllowedMaintainerOrgs(),
+    }
+  );
+  const network = normalizeActionLookupNetwork(
+    resolveHorizonUrl(),
+    resolveSorobanRpcUrl()
+  );
+  const cacheKey = buildActionLookupCacheKey({
+    orgId,
+    network,
+    address,
+    assetCode,
+    assetIssuer,
+  });
 
   try {
     const result = await verificationCache.getOrCompute(

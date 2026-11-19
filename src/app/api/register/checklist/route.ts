@@ -2,6 +2,11 @@ import { getServerSession } from "next-auth";
 import { NextRequest, NextResponse } from "next/server";
 
 import { authOptions } from "@/lib/auth";
+import {
+  buildCacheKey,
+  buildNoCacheControl,
+  checklistIdempotencyCache,
+} from "@/lib/cache";
 import { assertSameOrigin } from "@/lib/csrf";
 import { prisma } from "@/lib/prisma";
 import {
@@ -24,6 +29,25 @@ const KNOWN_CHECKLIST_KEYS: Array<OnboardingChecklistKey> = [
   "addressRegistered",
   "readinessConfirmed",
 ];
+
+/** Idempotency support for double-clicks/retries of the checklist PATCH. */
+const IDEMPOTENCY_KEY_HEADER = "idempotency-key";
+/** 8–128 chars: UUIDs, hashes and opaque client-generated tokens all fit. */
+const IDEMPOTENCY_KEY_REGEX = /^[A-Za-z0-9_-]{8,128}$/;
+
+/** Org + user + client key, escaped so no component can spoof a separator. */
+function buildChecklistIdempotencyCacheKey(
+  orgId: string,
+  userId: string,
+  key: string
+): string {
+  return buildCacheKey(
+    "checklist:idem",
+    encodeURIComponent(orgId),
+    encodeURIComponent(userId),
+    key
+  );
+}
 
 /** GET /api/register/checklist — return the user's persisted checklist state. */
 export async function GET() {
@@ -164,6 +188,45 @@ export async function PATCH(request: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
+  // Idempotency is opt-in: requests without a key keep the existing behavior.
+  const rawIdempotencyKey = request.headers
+    .get(IDEMPOTENCY_KEY_HEADER)
+    ?.trim();
+  let idempotencyKey: string | null = null;
+  let idempotencyCacheKey: string | null = null;
+
+  if (rawIdempotencyKey !== undefined) {
+    if (!IDEMPOTENCY_KEY_REGEX.test(rawIdempotencyKey)) {
+      return NextResponse.json(
+        {
+          error:
+            "Idempotency-Key must be 8-128 characters of [A-Za-z0-9_-]",
+        },
+        { status: 400 }
+      );
+    }
+
+    idempotencyKey = rawIdempotencyKey;
+    const orgId = session.user.maintainerOrgId?.trim() || "default";
+    idempotencyCacheKey = buildChecklistIdempotencyCacheKey(
+      orgId,
+      session.user.id,
+      idempotencyKey
+    );
+
+    const replay = checklistIdempotencyCache.get(idempotencyCacheKey);
+    if (replay) {
+      return NextResponse.json(replay.body, {
+        status: replay.status,
+        headers: {
+          "Idempotency-Key": idempotencyKey,
+          "X-Idempotent-Replay": "true",
+          "Cache-Control": buildNoCacheControl(),
+        },
+      });
+    }
+  }
+
   let body: unknown;
   try {
     body = await request.json();
@@ -238,5 +301,20 @@ export async function PATCH(request: NextRequest) {
     );
   }
 
-  return NextResponse.json({ success: true, checklistCompleted: merged });
+  const responseBody = { success: true as const, checklistCompleted: merged };
+
+  if (idempotencyCacheKey && idempotencyKey) {
+    checklistIdempotencyCache.set(idempotencyCacheKey, {
+      status: 200,
+      body: responseBody,
+    });
+    return NextResponse.json(responseBody, {
+      headers: {
+        "Idempotency-Key": idempotencyKey,
+        "Cache-Control": buildNoCacheControl(),
+      },
+    });
+  }
+
+  return NextResponse.json(responseBody);
 }
