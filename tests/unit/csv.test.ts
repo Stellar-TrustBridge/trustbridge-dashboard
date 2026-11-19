@@ -36,6 +36,46 @@ describe("CSV helpers", () => {
   });
 });
 
+describe("CSV formula injection guards", () => {
+  it.each([
+    ['=IMPORTXML("http://evil")', `"'=IMPORTXML(""http://evil"")"`],
+    ["+cmd|' /C calc'!A0", `"'+cmd|' /C calc'!A0"`],
+    ["-cmd", `"'-cmd"`],
+    ["@SUM(1,2)", `"'@SUM(1,2)"`],
+    ["  =2+3", `"'  =2+3"`],
+    ["\t=cmd", `"'\t=cmd"`],
+    ["\r=cmd", `"'\r=cmd"`],
+    ["\u0000=cmd", `"'\u0000=cmd"`],
+  ])("neutralizes %s", (input, expected) => {
+    expect(escapeCsvCell(input)).toBe(expected);
+  });
+
+  it("does not mangle genuine numeric values", () => {
+    expect(escapeCsvCell(-12.5)).toBe('"-12.5"');
+    expect(escapeCsvCell("-1e3")).toBe('"-1e3"');
+    expect(escapeCsvCell("100.5")).toBe('"100.5"');
+    expect(escapeCsvCell(0)).toBe('"0"');
+  });
+
+  it("keeps quote escaping and null/undefined behaviour", () => {
+    expect(escapeCsvCell('=CMD("x")')).toBe(`"'=CMD(""x"")"`);
+    expect(escapeCsvCell(null)).toBe('""');
+    expect(escapeCsvCell(undefined)).toBe('""');
+  });
+
+  it("applies guards to every cell in buildCsv", () => {
+    const csv = buildCsv(
+      ["username", "note"],
+      [
+        ["=IMPORTXML(x)", "+cmd"],
+        ["alice", "-cmd"],
+      ]
+    );
+    expect(csv).toContain('"\'=IMPORTXML(x)","\'+cmd"');
+    expect(csv).toContain('"alice","\'-cmd"');
+  });
+});
+
 describe("JSON helpers", () => {
   it("builds JSON from headers and rows", () => {
     const json = buildJson(

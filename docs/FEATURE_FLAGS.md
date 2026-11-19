@@ -148,6 +148,7 @@ FEATURE_FLAG_FREEZE_WINDOW=off
 | `maintenance_mode` | `false` | ✅ | Composes with the `MAINTENANCE` env var (see [DEPLOYMENT.md](./DEPLOYMENT.md#maintenance-mode)); disables the `/register` form | `src/lib/maintenance.ts`, `src/app/register/` |
 | `otel_traces` | `false` | — | Opt-in tracing; composes with `OTEL_TRACES_ENABLED` (see [ENVIRONMENT.md](./ENVIRONMENT.md#opentelemetry-tracing-issue-203)) | `src/lib/tracing.ts` |
 | `freeze_window` | `true` | ✅ | Enforces wave freeze-window blocking on mutating APIs. When OFF, freeze-window helpers never block requests regardless of `FREEZE_WINDOW_*` env vars. | `src/lib/freeze-window.ts` |
+| `analytics` | `true` | — | Emit privacy-safe analytics. Always killed by `ANALYTICS_OPT_OUT` / `NEXT_PUBLIC_ANALYTICS_OPT_OUT`; opt-in controlled by `ANALYTICS_ENABLED` / `NEXT_PUBLIC_ANALYTICS_ENABLED`. Browser adapters use the env-only policy (`FEATURE_FLAG_ANALYTICS`), server callers can use `isAnalyticsEnabledForServer()` for the DB-aware flag. | `src/lib/analytics-policy.ts`, `src/lib/analytics.ts`, `src/lib/feature-flags.ts` |
 
 ### Two existing risky features are now gated (issue #201)
 

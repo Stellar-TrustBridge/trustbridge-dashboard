@@ -151,6 +151,7 @@ describe("getAllFeatureFlags", () => {
     const keys = all.map((f) => f.key).sort();
     expect(keys).toEqual(
       [
+        "analytics",
         "batch_recheck",
         "dlq_retry",
         "freeze_window",

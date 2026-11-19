@@ -4,7 +4,7 @@
 |-----|-------------|
 | [SETUP.md](./SETUP.md) | Local development setup |
 | [ENVIRONMENT.md](./ENVIRONMENT.md) | Environment variable reference |
-| [DOCKER_COMPOSE.md](./DOCKER_COMPOSE.md) | PostgreSQL + app Compose stack |
+| [DOCKER_COMPOSE.md](./DOCKER_COMPOSE.md) | Full local stack: web app, PostgreSQL + seed, Adminer, mock Horizon (ports 3000/5432/8080/8089) |
 | [ARCHITECTURE.md](./ARCHITECTURE.md) | System design, data flow, auth |
 | [PROJECT_STRUCTURE.md](./PROJECT_STRUCTURE.md) | Directory layout |
 | [DEPLOYMENT.md](./DEPLOYMENT.md) | Vercel / production deploy |
@@ -19,6 +19,8 @@
 | [LOGGING_AND_PAGINATION.md](./LOGGING_AND_PAGINATION.md) | Logging and cursor pagination |
 | [PERFORMANCE_TESTING.md](./PERFORMANCE_TESTING.md) | k6 smoke tests and load testing guide |
 | [PWA.md](./PWA.md) | PWA manifest, service worker shell caching, offline banner, security notes |
+| [SECURITY_POLINRIDER.md](./SECURITY_POLINRIDER.md) | Malware scan policy and webhook secret rotation runbook |
+| [CRON_EXPORT.md](./CRON_EXPORT.md) | Nightly treasury CSV export and CSV escaping rules |
 
 ## i18n pattern (#515)
 

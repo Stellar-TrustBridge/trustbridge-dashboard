@@ -1,33 +1,11 @@
-/**
- * Analytics adapter for TrustBridge Dashboard.
- *
- * Provides a simple interface for tracking product events.
- * Defaults to a no-op when no analytics key is configured.
- *
- * Supported adapters:
- * - PostHog (if POSTHOG_API_KEY is set)
- * - Console logging (fallback for development)
- * - No-op (default when no key is configured)
- *
- * Environment variables:
- * - NEXT_PUBLIC_POSTHOG_API_KEY — enables PostHog in the browser
- * - NEXT_PUBLIC_POSTHOG_HOST   — optional PostHog ingestion host (browser)
- * - POSTHOG_API_KEY            — enables PostHog on the server (Node.js API routes)
- * - POSTHOG_HOST               — optional PostHog ingestion host (server)
- *
- * When neither key is set the adapter is a no-op; no events are sent and no
- * errors are raised. Set DEBUG=true to see console-logged events in development.
- */
+import {
+  isAnalyticsEnabled,
+  sanitizeAnalyticsProperties,
+  sanitizeIdentify,
+  type EventType,
+} from "@/lib/analytics-policy";
 
-export type EventType =
-  | "registration_created"
-  | "registration_updated"
-  | "recheck_completed"
-  | "batch_recheck_started"
-  | "csv_exported"
-  | "soroban_mirror_completed"
-  | "dispute_opened"
-  | "dispute_closed";
+export type { EventType } from "@/lib/analytics-policy";
 
 export interface AnalyticsEvent {
   type: EventType;
@@ -41,40 +19,31 @@ interface AnalyticsAdapter {
   reset(): void;
 }
 
-/**
- * No-op adapter — used when no analytics key is configured.
- */
 class NoOpAdapter implements AnalyticsAdapter {
-  track(): void {
-    // No-op
-  }
-  identify(): void {
-    // No-op
-  }
-  reset(): void {
-    // No-op
-  }
+  track(): void {}
+  identify(): void {}
+  reset(): void {}
 }
 
-/**
- * Console adapter — logs events to the console for development.
- */
 class ConsoleAdapter implements AnalyticsAdapter {
   track(event: EventType, properties?: Record<string, unknown>): void {
-    console.log(`[Analytics] ${event}`, properties);
+    if (!isAnalyticsEnabled()) return;
+    console.log(`[Analytics] ${event}`, sanitizeAnalyticsProperties(event, properties));
   }
+
   identify(userId: string, properties?: Record<string, unknown>): void {
-    console.log(`[Analytics] identify: ${userId}`, properties);
+    if (!isAnalyticsEnabled()) return;
+    const sanitized = sanitizeIdentify(userId, properties);
+    if (!sanitized) return;
+    console.log(`[Analytics] identify: ${sanitized.distinctId}`, sanitized.properties);
   }
+
   reset(): void {
+    if (!isAnalyticsEnabled()) return;
     console.log("[Analytics] reset");
   }
 }
 
-/**
- * PostHog adapter — sends events to PostHog.
- * Requires POSTHOG_API_KEY and optionally POSTHOG_HOST.
- */
 class PostHogAdapter implements AnalyticsAdapter {
   private apiKey: string;
   private host: string;
@@ -87,7 +56,6 @@ class PostHogAdapter implements AnalyticsAdapter {
 
   private async init(): Promise<void> {
     if (this.initialized) return;
-
     try {
       const posthog = await import("posthog-js").then((m) => m.default);
       posthog.init(this.apiKey, {
@@ -103,26 +71,31 @@ class PostHogAdapter implements AnalyticsAdapter {
   }
 
   async track(event: EventType, properties?: Record<string, unknown>): Promise<void> {
+    if (!isAnalyticsEnabled()) return;
     await this.init();
     try {
       const posthog = await import("posthog-js").then((m) => m.default);
-      posthog.capture(event, properties);
+      posthog.capture(event, sanitizeAnalyticsProperties(event, properties));
     } catch {
       // Silently ignore — analytics should never block the user
     }
   }
 
   async identify(userId: string, properties?: Record<string, unknown>): Promise<void> {
+    if (!isAnalyticsEnabled()) return;
+    const sanitized = sanitizeIdentify(userId, properties);
+    if (!sanitized) return;
     await this.init();
     try {
       const posthog = await import("posthog-js").then((m) => m.default);
-      posthog.identify(userId, properties);
+      posthog.identify(sanitized.distinctId, sanitized.properties);
     } catch {
       // Silently ignore
     }
   }
 
   async reset(): Promise<void> {
+    if (!isAnalyticsEnabled()) return;
     try {
       const posthog = await import("posthog-js").then((m) => m.default);
       posthog.reset();
@@ -132,34 +105,19 @@ class PostHogAdapter implements AnalyticsAdapter {
   }
 }
 
-/**
- * Get the analytics adapter instance.
- * Returns a no-op adapter when no key is configured.
- */
 function getAnalyticsAdapter(): AnalyticsAdapter {
-  if (typeof window === "undefined") {
-    // Server-side: no-op
-    return new NoOpAdapter();
-  }
+  if (typeof window === "undefined") return new NoOpAdapter();
 
   const posthogKey = process.env.NEXT_PUBLIC_POSTHOG_API_KEY?.trim();
   if (posthogKey) {
     return new PostHogAdapter(posthogKey, process.env.NEXT_PUBLIC_POSTHOG_HOST?.trim());
   }
-
-  // Development fallback: console logging
-  if (process.env.NODE_ENV === "development") {
-    return new ConsoleAdapter();
-  }
-
+  if (process.env.NODE_ENV === "development") return new ConsoleAdapter();
   return new NoOpAdapter();
 }
 
 const adapter = getAnalyticsAdapter();
 
-/**
- * Track a registration event.
- */
 export function trackRegistrationCreated(properties?: {
   userId?: string;
   stellarAddress?: string;
@@ -167,9 +125,6 @@ export function trackRegistrationCreated(properties?: {
   adapter.track("registration_created", properties);
 }
 
-/**
- * Track a registration update event.
- */
 export function trackRegistrationUpdated(properties?: {
   userId?: string;
   stellarAddress?: string;
@@ -178,9 +133,6 @@ export function trackRegistrationUpdated(properties?: {
   adapter.track("registration_updated", properties);
 }
 
-/**
- * Track a recheck completion event.
- */
 export function trackRecheckCompleted(properties?: {
   totalChecked?: number;
   changed?: number;
@@ -189,27 +141,18 @@ export function trackRecheckCompleted(properties?: {
   adapter.track("recheck_completed", properties);
 }
 
-/**
- * Track a batch recheck start event.
- */
 export function trackBatchRecheckStarted(properties?: {
   totalRegistrations?: number;
 }): void {
   adapter.track("batch_recheck_started", properties);
 }
 
-/**
- * Track a CSV export event.
- */
 export function trackCsvExported(properties?: {
   rowCount?: number;
 }): void {
   adapter.track("csv_exported", properties);
 }
 
-/**
- * Track a Soroban mirror completion event.
- */
 export function trackSorobanMirrorCompleted(properties?: {
   success?: boolean;
   txHash?: string;
@@ -218,35 +161,14 @@ export function trackSorobanMirrorCompleted(properties?: {
   adapter.track("soroban_mirror_completed", properties);
 }
 
-/**
- * Identify a user for analytics.
- */
 export function identifyUser(userId: string, properties?: Record<string, unknown>): void {
   adapter.identify(userId, properties);
 }
 
-/**
- * Reset analytics state (e.g., on logout).
- */
 export function resetAnalytics(): void {
   adapter.reset();
 }
 
-// ---------------------------------------------------------------------------
-// Server-side analytics
-// ---------------------------------------------------------------------------
-
-/**
- * Lightweight server-side adapter.
- *
- * Uses the PostHog Events API (server-to-server) when POSTHOG_API_KEY is set,
- * falls back to console logging in development, and is a no-op otherwise.
- * Never throws — analytics must not affect request latency or correctness.
- *
- * Issue #516 — identify() attaches maintainerOrgId as a PostHog group property
- * when present, enabling org-scoped analytics for multi-tenant deployments.
- * Stellar addresses and access tokens are never sent.
- */
 class ServerPostHogAdapter implements AnalyticsAdapter {
   private readonly apiKey: string;
   private readonly host: string;
@@ -257,110 +179,75 @@ class ServerPostHogAdapter implements AnalyticsAdapter {
   }
 
   track(event: EventType, properties?: Record<string, unknown>): void {
+    if (!isAnalyticsEnabled()) return;
+    const safe = sanitizeAnalyticsProperties(event, properties);
     const body = JSON.stringify({
       api_key: this.apiKey,
       event,
-      distinct_id: (properties?.userId as string | undefined) ?? "server",
-      properties: { ...properties, $lib: "trustbridge-server" },
+      distinct_id: typeof safe.userId === "string" ? safe.userId : "server",
+      properties: { ...safe, $lib: "trustbridge-server" },
       timestamp: new Date().toISOString(),
     });
 
-    // Fire-and-forget — do not await, do not throw
     fetch(`${this.host}/capture/`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body,
-    }).catch(() => {
-      // Silently ignore network errors — analytics must never affect the app
-    });
+    }).catch(() => {});
   }
 
-  /**
-   * Issue #516 — server-side identify with org scope.
-   *
-   * Sends a PostHog `$identify` event attaching the user to their maintainer
-   * org via a `$groups` property so PostHog dashboards can filter by
-   * organisation without exposing PII.
-   *
-   * Rules:
-   *   - Anonymous / empty userId → no-op (no pollution of the identify stream)
-   *   - Never sends stellarAddress, publicKey, or any access token
-   *   - maintainerOrgId attached to both `$set` and `$groups` when present
-   */
   identify(userId: string, properties?: Record<string, unknown>): void {
-    if (!userId || userId === "anonymous") return;
-
-    const maintainerOrgId = properties?.maintainerOrgId as string | undefined;
+    if (!isAnalyticsEnabled()) return;
+    const sanitized = sanitizeIdentify(userId, properties);
+    if (!sanitized) return;
 
     const payload: Record<string, unknown> = {
       api_key: this.apiKey,
       event: "$identify",
-      distinct_id: userId,
-      $set: {
-        // Safe properties only — no tokens, no Stellar addresses.
-        ...(maintainerOrgId ? { maintainerOrgId } : {}),
-        ...(properties?.githubUsername ? { githubUsername: properties.githubUsername } : {}),
-        ...(properties?.role ? { role: properties.role } : {}),
-        $lib: "trustbridge-server",
-      },
+      distinct_id: sanitized.distinctId,
+      $set: { ...sanitized.properties, $lib: "trustbridge-server" },
       timestamp: new Date().toISOString(),
     };
 
-    // Attach org group when maintainerOrgId is present so PostHog can
-    // aggregate events by organisation in group analytics dashboards.
-    if (maintainerOrgId) {
-      payload.$groups = { organisation: maintainerOrgId };
+    const org = sanitized.properties.maintainerOrgId;
+    if (typeof org === "string" && org) {
+      payload.$groups = { organisation: org };
     }
 
     fetch(`${this.host}/capture/`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
-    }).catch(() => {
-      // Never throw — analytics must not block requests
-    });
+    }).catch(() => {});
   }
 
-  reset(): void {
-    // No-op on the server
-  }
+  reset(): void {}
 }
 
 function getServerAnalyticsAdapter(): AnalyticsAdapter {
   const posthogKey = process.env.POSTHOG_API_KEY?.trim();
   if (posthogKey) {
-    return new ServerPostHogAdapter(
-      posthogKey,
-      process.env.POSTHOG_HOST?.trim()
-    );
+    return new ServerPostHogAdapter(posthogKey, process.env.POSTHOG_HOST?.trim());
   }
-
-  if (process.env.NODE_ENV === "development") {
-    return new ConsoleAdapter();
-  }
-
+  if (process.env.NODE_ENV === "development") return new ConsoleAdapter();
   return new NoOpAdapter();
 }
 
-// Lazily initialised — only constructed when first used in a server context.
 let _serverAdapter: AnalyticsAdapter | null = null;
 function serverAdapter(): AnalyticsAdapter {
   if (!_serverAdapter) _serverAdapter = getServerAnalyticsAdapter();
   return _serverAdapter;
 }
 
-function trackServerEvent(event: EventType, properties?: Record<string, unknown>): void {
+export function trackServerEvent(event: EventType, properties?: Record<string, unknown>): void {
   try {
+    if (!isAnalyticsEnabled()) return;
     serverAdapter().track(event, properties);
   } catch {
     // Analytics must never affect request handling.
   }
 }
 
-/**
- * Track a registration event from a server-side API route.
- * No-op when POSTHOG_API_KEY is not set.
- */
 export function trackServerRegistrationCreated(properties?: {
   userId?: string;
   stellarAddress?: string;
@@ -368,10 +255,6 @@ export function trackServerRegistrationCreated(properties?: {
   trackServerEvent("registration_created", properties);
 }
 
-/**
- * Track a registration update event from a server-side API route.
- * No-op when POSTHOG_API_KEY is not set.
- */
 export function trackServerRegistrationUpdated(properties?: {
   userId?: string;
   stellarAddress?: string;
@@ -380,10 +263,6 @@ export function trackServerRegistrationUpdated(properties?: {
   trackServerEvent("registration_updated", properties);
 }
 
-/**
- * Track a CSV export event from a server-side API route or cron job.
- * No-op when POSTHOG_API_KEY is not set.
- */
 export function trackServerCsvExported(properties?: {
   rowCount?: number;
   triggeredBy?: string;
@@ -391,10 +270,6 @@ export function trackServerCsvExported(properties?: {
   trackServerEvent("csv_exported", properties);
 }
 
-/**
- * Track a batch recheck start from a server-side API route.
- * No-op when POSTHOG_API_KEY is not set.
- */
 export function trackServerBatchRecheckStarted(properties?: {
   totalRegistrations?: number;
   initiatedBy?: string;
@@ -402,7 +277,6 @@ export function trackServerBatchRecheckStarted(properties?: {
   trackServerEvent("batch_recheck_started", properties);
 }
 
-/** Track a dispute opening from a server-side API route. */
 export function trackServerDisputeOpened(properties?: {
   userId?: string;
   disputeId?: string;
@@ -413,7 +287,6 @@ export function trackServerDisputeOpened(properties?: {
   trackServerEvent("dispute_opened", properties);
 }
 
-/** Track the first transition of a dispute from OPEN to a terminal status. */
 export function trackServerDisputeClosed(properties?: {
   userId?: string;
   disputeId?: string;
@@ -422,16 +295,6 @@ export function trackServerDisputeClosed(properties?: {
   trackServerEvent("dispute_closed", properties);
 }
 
-/**
- * Identify a maintainer session on the server with org scope (issue #516).
- *
- * Call this from:
- *   - NextAuth `signIn` / `jwt` callbacks after a successful session is established
- *   - API-key authenticated routes (pass the key's owning org as maintainerOrgId)
- *
- * Safe properties only — never pass Stellar addresses or access tokens.
- * No-op when POSTHOG_API_KEY is not set or when userId is absent/anonymous.
- */
 export function identifyServerUser(
   userId: string,
   properties?: {
@@ -440,5 +303,8 @@ export function identifyServerUser(
     role?: string;
   },
 ): void {
+  if (!isAnalyticsEnabled()) return;
   serverAdapter().identify(userId, properties);
 }
+
+export { hashIdentifier, isAnalyticsEnabled } from "@/lib/analytics-policy";

@@ -1,3 +1,5 @@
+import { escapeCsvCell } from "@/lib/csv";
+
 export type DiffChangeType = "added" | "removed" | "address_changed" | "unchanged";
 
 export interface SnapshotRow {
@@ -246,15 +248,6 @@ export function buildDiffCsv(
     "newReadiness",
   ];
 
-  function escape(value: unknown): string {
-    const str = value === null || value === undefined ? "" : String(value);
-    const needsQuote =
-      /[",\n\r=+\-@\t]/.test(str) ||
-      /^[0-9a-zA-Z]{20,}$/.test(str);
-    const safe = str.replace(/"/g, '""');
-    return needsQuote ? `"${safe}"` : safe;
-  }
-
   function row(e: DiffEntry): string[] {
     return [
       e.change,
@@ -274,7 +267,7 @@ export function buildDiffCsv(
     for (const e of diff.unchanged) lines.push(row(e));
   }
 
-  return lines.map((l) => l.map(escape).join(",")).join("\n") + "\n";
+  return lines.map((l) => l.map(escapeCsvCell).join(",")).join("\n") + "\n";
 }
 
 export { MAX_FILE_SIZE_BYTES };

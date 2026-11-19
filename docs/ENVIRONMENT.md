@@ -377,6 +377,7 @@ PostHog project API key for browser analytics. When set, the dashboard tracks ke
 
 - **Optional.** When unset, analytics events are silently ignored (no-op) or logged to console in development.
 - **Security:** This is a public key (prefixed with `NEXT_PUBLIC_`) — PostHog project API keys are safe to expose in the browser.
+- All events are gated and sanitized by `src/lib/analytics-policy.ts`. See [Analytics opt-out and event schema](#analytics-opt-out-and-event-schema-issue-678) below.
 
 ### `NEXT_PUBLIC_POSTHOG_HOST`
 
@@ -410,7 +411,36 @@ PostHog ingestion host for server-side events. Defaults to `https://app.posthog.
 | `$set.role` | e.g. `"maintainer"` (optional) |
 | `$groups.organisation` | PostHog group key for org-level aggregation |
 
-**Never** pass `stellarAddress`, `accessToken`, or any secret to this function.
+`distinct_id` and `githubUsername` are now one-way hashed by the shared policy; raw user IDs and GitHub logins are never transmitted.
+
+**Never** pass `stellarAddress`, `accessToken`, `email`, notes, tokens or any secret to this function — unknown keys are dropped by the schema in every adapter.
+
+### Analytics opt-out and event schema (issue #678)
+
+`src/lib/analytics-policy.ts` is shared by browser and server analytics. It is evaluated at emit time (no restart-time caching beyond module construction) and applies to `PostHogAdapter`, `ConsoleAdapter`, `ServerPostHogAdapter`, `trackServerEvent()` and `identifyServerUser()`.
+
+Resolution order for the kill switches:
+
+1. `ANALYTICS_OPT_OUT` or `NEXT_PUBLIC_ANALYTICS_OPT_OUT` set to a truthy value disables **all** emits, regardless of keys or flags.
+2. `ANALYTICS_ENABLED` / `NEXT_PUBLIC_ANALYTICS_ENABLED` — explicit opt-in/opt-out (truthy: `1`, `true`, `on`, `yes`, `enabled`; falsy: `0`, `false`, `off`, `no`, `disabled`; case-insensitive, trimmed; unrecognised values ignored).
+3. `FEATURE_FLAG_ANALYTICS` / `NEXT_PUBLIC_FEATURE_FLAG_ANALYTICS` — env override for the `analytics` feature flag (see [FEATURE_FLAGS.md](./FEATURE_FLAGS.md)). Database flag values are honoured on the server via `isAnalyticsEnabledForServer()`.
+4. Default: analytics enabled when a key is configured. Without a key the adapters remain no-ops (console logging in development).
+
+`ANALYTICS_HASH_SALT` optionally salts the deterministic one-way identifier hash (`anon_<16 hex>`). Changing the salt breaks continuity of hashed IDs; keep it stable per deployment.
+
+| Event | Allowed properties | Notes |
+|---|---|---|
+| `registration_created` | `userId` (hashed) | Stellar addresses are always dropped |
+| `registration_updated` | `userId` (hashed), `fieldsChanged` (allowlisted field-name strings only) | Field values are never sent |
+| `recheck_completed` | `totalChecked`, `changed`, `durationMs` (numbers) | Aggregate counters only |
+| `batch_recheck_started` | `totalRegistrations` (number), `initiatedBy` (hashed) | — |
+| `csv_exported` | `rowCount` (number), `triggeredBy` (hashed) | — |
+| `soroban_mirror_completed` | `success` (boolean), `durationMs` (number) | Transaction hashes are dropped |
+| `dispute_opened` | `userId`, `disputeId`, `registrationId` (hashed), `actorRole` (enum), `hasProof` (boolean) | — |
+| `dispute_closed` | `userId`, `disputeId` (hashed), `status` (`VALIDATED`/`REJECTED`) | — |
+| `$identify` | `distinct_id` (hashed `userId`), `$set.maintainerOrgId`, `$set.githubUsername` (hashed), `$set.role` | `$groups.organisation` uses the org slug for group analytics |
+
+Unknown properties are dropped. Property names containing email/token/secret/password/note/address/public key/seed/phone/cookie/authorization are rejected, as are values that look like an email, Stellar G/S address or access token.
 
 ### `CONTRACT_SYNC_MIN_INTERVAL_MS`
 

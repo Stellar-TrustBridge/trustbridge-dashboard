@@ -202,6 +202,16 @@ describe("verifyWebhookSignature (github-org-membership) — timing-safe compare
     const payload = Buffer.from("{}");
     expect(verifyWebhookSignature(payload.toString("utf8"), "").ok).toBe(false);
   });
+
+  it("rejects a signature made with the rotated-out secret", () => {
+    const payload = Buffer.from('{"action":"member_added"}');
+    const oldSignature = hmacSha256("rotated-out-secret", payload);
+    vi.stubEnv(GH_SECRET_ENV, "current-secret");
+
+    const result = verifyWebhookSignature(payload.toString("utf8"), oldSignature);
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/mismatch/i);
+  });
 });
 
 // ── TrustBridge-action webhook ───────────────────────────────────────────────

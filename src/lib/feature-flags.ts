@@ -1,5 +1,6 @@
 import "server-only";
 
+import { isAnalyticsEnabled } from "@/lib/analytics-policy";
 import { prisma } from "@/lib/prisma";
 
 /**
@@ -31,7 +32,8 @@ export type FeatureFlagKey =
   | "dlq_retry"
   | "maintenance_mode"
   | "otel_traces"
-  | "freeze_window";
+  | "freeze_window"
+  | "analytics";
 
 interface FlagDefinition {
   description: string;
@@ -79,6 +81,12 @@ export const FEATURE_FLAGS: Record<FeatureFlagKey, FlagDefinition> = {
       "Enforce wave freeze-window blocking on mutating APIs. When OFF, freeze-window helpers never block requests regardless of FREEZE_WINDOW_* env vars.",
     default: true,
     risky: true,
+  },
+  analytics: {
+    description:
+      "Emit privacy-safe product analytics. Killed globally by ANALYTICS_OPT_OUT / NEXT_PUBLIC_ANALYTICS_OPT_OUT and opt-in-controlled by ANALYTICS_ENABLED / NEXT_PUBLIC_ANALYTICS_ENABLED.",
+    default: true,
+    risky: false,
   },
 };
 
@@ -140,6 +148,11 @@ async function readDbFlags(): Promise<Map<string, boolean> | null> {
     dbCache = { flags: null, expiresAt: now + Math.min(cacheTtlMs(), 5_000) };
     return null;
   }
+}
+
+export async function isAnalyticsEnabledForServer(): Promise<boolean> {
+  if (!isAnalyticsEnabled()) return false;
+  return isFeatureEnabled("analytics");
 }
 
 export type FlagSource = "env" | "db" | "default" | "fail-closed";

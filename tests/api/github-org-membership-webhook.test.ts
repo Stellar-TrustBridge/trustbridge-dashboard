@@ -30,6 +30,9 @@ import { recordAuditLog } from "@/lib/audit";
 import {
   verifyWebhookSignature,
   processGithubOrgMembershipEvent,
+  isCachedOrgMember,
+  resetOrgMembershipCache,
+  resetWebhookDeliveryCache,
   type GithubOrgMembershipPayload,
 } from "@/lib/github-org-membership-webhook";
 
@@ -55,11 +58,16 @@ function makePayload(
   };
 }
 
-function webhookRequest(body: string, sig: string | null): NextRequest {
+function webhookRequest(
+  body: string,
+  sig: string | null,
+  deliveryId?: string
+): NextRequest {
   const headers: Record<string, string> = {
     "content-type": "application/json",
   };
   if (sig !== null) headers["x-hub-signature-256"] = sig;
+  if (deliveryId) headers["x-github-delivery"] = deliveryId;
   return new NextRequest(
     "http://localhost:3000/api/webhooks/github-org-membership",
     { method: "POST", headers, body }
@@ -72,15 +80,29 @@ const sameOriginHeaders: Record<string, string> = {
   "content-type": "application/json",
 };
 
-function replayRequest(body: unknown, headers?: Record<string, string>): NextRequest {
+function replayRequest(
+  body: unknown,
+  headers?: Record<string, string>,
+  options: { sign?: boolean; deliveryId?: string } = {}
+): NextRequest {
+  const rawBody = JSON.stringify(body);
+  const requestHeaders: Record<string, string> = { ...sameOriginHeaders, ...headers };
+  if (options.sign !== false) {
+    requestHeaders["x-hub-signature-256"] = sign(rawBody);
+  }
+  if (options.deliveryId) {
+    requestHeaders["x-github-delivery"] = options.deliveryId;
+  }
   return new NextRequest(
     "http://localhost:3000/api/webhooks/github-org-membership/replay",
-    { method: "POST", headers: headers ?? sameOriginHeaders, body: JSON.stringify(body) }
+    { method: "POST", headers: requestHeaders, body: rawBody }
   );
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
+  resetWebhookDeliveryCache();
+  resetOrgMembershipCache();
   process.env.GITHUB_WEBHOOK_SECRET = TEST_SECRET;
 });
 
@@ -193,6 +215,36 @@ describe("POST /api/webhooks/github-org-membership", () => {
     expect(res.status).toBe(401);
   });
 
+  it("includes the delivery id in audit metadata", async () => {
+    vi.mocked(prisma.user.upsert).mockResolvedValue({} as any);
+    vi.mocked(recordAuditLog).mockResolvedValue({} as any);
+
+    const body = JSON.stringify(makePayload("member_added"));
+    const res = await webhookPOST(webhookRequest(body, sign(body), "delivery-42"));
+    expect(res.status).toBe(200);
+    expect(recordAuditLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        metadata: expect.objectContaining({ deliveryId: "delivery-42" }),
+      })
+    );
+    expect(isCachedOrgMember("octocat")).toBe(true);
+  });
+
+  it("does not reprocess a duplicate delivery id", async () => {
+    vi.mocked(prisma.user.upsert).mockResolvedValue({} as any);
+    vi.mocked(recordAuditLog).mockResolvedValue({} as any);
+
+    const body = JSON.stringify(makePayload("member_added"));
+    const first = await webhookPOST(webhookRequest(body, sign(body), "delivery-dup"));
+    const second = await webhookPOST(webhookRequest(body, sign(body), "delivery-dup"));
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect((await second.json()).duplicate).toBe(true);
+    expect(prisma.user.upsert).toHaveBeenCalledTimes(1);
+    expect(recordAuditLog).toHaveBeenCalledTimes(1);
+  });
+
   it("returns 200 and processes a valid signed payload", async () => {
     vi.mocked(prisma.user.upsert).mockResolvedValue({} as any);
     vi.mocked(recordAuditLog).mockResolvedValue({} as any);
@@ -238,19 +290,89 @@ describe("POST /api/webhooks/github-org-membership/replay", () => {
     expect(res.status).toBe(403);
   });
 
-  it("returns 200 and processes the replayed payload for a maintainer", async () => {
+  it("returns 401 when the replay signature is missing", async () => {
+    vi.mocked(getServerSession).mockResolvedValue({
+      user: { id: "user-1", isMaintainer: true },
+    } as any);
+
+    const r = replayRequest(makePayload(), undefined, { sign: false });
+    const res = await replayPOST(r);
+    expect(res.status).toBe(401);
+    expect(prisma.user.upsert).not.toHaveBeenCalled();
+  });
+
+  it("returns 401 when the replay signature is invalid", async () => {
+    vi.mocked(getServerSession).mockResolvedValue({
+      user: { id: "user-1", isMaintainer: true },
+    } as any);
+
+    const r = replayRequest(
+      makePayload(),
+      { "x-hub-signature-256": sign("tampered-body") },
+      { sign: false }
+    );
+    const res = await replayPOST(r);
+    expect(res.status).toBe(401);
+    expect(prisma.user.upsert).not.toHaveBeenCalled();
+  });
+
+  it("returns 200 and processes the signed replayed payload for a maintainer", async () => {
     vi.mocked(getServerSession).mockResolvedValue({
       user: { id: "user-1", isMaintainer: true },
     } as any);
     vi.mocked(prisma.user.upsert).mockResolvedValue({} as any);
     vi.mocked(recordAuditLog).mockResolvedValue({} as any);
 
-    const r = replayRequest(makePayload("member_added"));
+    const r = replayRequest(
+      makePayload("member_added"),
+      undefined,
+      { deliveryId: "replay-delivery-1" }
+    );
     const res = await replayPOST(r);
     expect(res.status).toBe(200);
     const json = await res.json();
     expect(json.ok).toBe(true);
     expect(json.replayed).toBe(true);
     expect(json.handled).toBe(true);
+    expect(json.deliveryId).toBe("replay-delivery-1");
+    expect(recordAuditLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        metadata: expect.objectContaining({ deliveryId: "replay-delivery-1" }),
+      })
+    );
+  });
+
+  it("does not reprocess a replay with a duplicate delivery id", async () => {
+    vi.mocked(getServerSession).mockResolvedValue({
+      user: { id: "user-1", isMaintainer: true },
+    } as any);
+    vi.mocked(prisma.user.upsert).mockResolvedValue({} as any);
+    vi.mocked(recordAuditLog).mockResolvedValue({} as any);
+
+    const first = await replayPOST(
+      replayRequest(makePayload(), undefined, { deliveryId: "replay-dup" })
+    );
+    const second = await replayPOST(
+      replayRequest(makePayload(), undefined, { deliveryId: "replay-dup" })
+    );
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect((await second.json()).duplicate).toBe(true);
+    expect(prisma.user.upsert).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("org membership cache", () => {
+  it("updates membership flags for add/invite/remove", async () => {
+    vi.mocked(prisma.user.upsert).mockResolvedValue({} as any);
+    vi.mocked(recordAuditLog).mockResolvedValue({} as any);
+
+    await processGithubOrgMembershipEvent(makePayload("member_added", "Octocat"));
+    expect(isCachedOrgMember("octocat")).toBe(true);
+    await processGithubOrgMembershipEvent(makePayload("member_invited", "octocat"));
+    expect(isCachedOrgMember("OCTOCAT")).toBe(true);
+    await processGithubOrgMembershipEvent(makePayload("member_removed", "octocat"));
+    expect(isCachedOrgMember("octocat")).toBe(false);
+    expect(isCachedOrgMember("unknown-user")).toBeUndefined();
   });
 });

@@ -13,6 +13,25 @@ to the configured treasury address.
 The export never throws — all database or email-transport failures are caught,
 recorded in the audit log, and surfaced via a structured result object.
 
+## CSV escaping rules (formula injection)
+
+All CSV paths — nightly treasury export, `/api/treasury/export`, the browser
+contributor export, and snapshot diffs — use `escapeCsvCell()` in
+`src/lib/csv.ts`. Every cell is wrapped in double quotes and internal quotes are
+doubled. A leading apostrophe (`'`) is prepended when the first non-whitespace,
+non-control character is one of the spreadsheet formula operators `= + - @`
+(tab and carriage return are treated as operators too, including after leading
+whitespace/control characters). This stops Excel, LibreOffice and Sheets from
+evaluating attacker-controlled usernames, notes, Horizon debug summaries, proof
+challenges or diff fields as formulas (for example `=IMPORTXML(...)`, `+cmd`,
+`-cmd`, `@SUM(...)`).
+
+Genuine numeric values are not mangled: `-12.5`, `100.5`, `0` and scientific
+notation are exported unchanged. Apostrophe-prefixed cells may display the
+apostrophe in a text editor; that is intentional — it is a neutralisation marker,
+not data loss. JSON exports are unaffected and remain raw JSON values. Treat
+export files as sensitive PII regardless of escaping.
+
 ---
 
 ## Quick setup

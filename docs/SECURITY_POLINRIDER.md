@@ -114,6 +114,21 @@ Self-test **must fail the nested scan** (exit 0 from self-test wrapper means fix
 - Binary packing / novel obfuscators may evade static markers — treat unexpected `folderOpen` tasks and text “fonts” as high signal.
 - Scanner does not rotate credentials or quarantine developer machines. If you opened an infected tree in VS Code with auto-tasks enabled, treat the machine as compromised and rotate secrets from a clean device.
 
+## Webhook secret rotation runbook
+
+`GITHUB_WEBHOOK_SECRET` protects both `POST /api/webhooks/github-org-membership` and the maintainer replay route. Verification uses a single secret read from the environment at request time, so rotation needs a short coordinated window:
+
+1. Generate a replacement from a clean device: `openssl rand -base64 32`.
+2. Deploy the new value as `GITHUB_WEBHOOK_SECRET` (server-only; never `NEXT_PUBLIC_*`). Both the ingestion and replay routes pick it up immediately.
+3. In GitHub → Organization Settings → Webhooks → the membership webhook, replace the secret with the same value. Deliveries signed with the old secret receive HTTP `401` (`Signature mismatch`) until GitHub switches over.
+4. Re-send a test `member_added` delivery from GitHub and confirm HTTP `200` plus a `webhook.github_org_membership.*` audit entry containing the delivery id.
+5. Re-sign any payloads kept for replay — signatures made with the retired secret are rejected. See [MAINTAINER_WORKFLOW.md](./MAINTAINER_WORKFLOW.md#replaying-a-github-org-membership-webhook).
+6. Delete the old secret from the previous deployment's environment and from any password manager entry once traffic has switched.
+
+Rotation does **not** retroactively invalidate already-processed deliveries: the 24h replay guard is an in-process `CacheStore`, so a process restart clears it. No signature or secret is written to the audit log.
+
+For a PolinRider-related compromise, rotate this secret together with GitHub/npm/cloud tokens in step 2 of [Credential exposure](#credential-exposure).
+
 ## Credential exposure
 
 This tooling **does not** rotate credentials. If malware was confirmed on a machine that had GitHub/npm/cloud access:

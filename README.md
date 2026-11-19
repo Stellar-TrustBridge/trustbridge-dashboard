@@ -211,6 +211,7 @@ Full index: [docs/README.md](./docs/README.md)
 - **`src/lib/cron-export.ts`** automates nightly contributor CSV dumps for treasury payout operations during Waves. Trigger with `POST /api/cron/export` (maintainer session or `Authorization: Bearer $CRON_SECRET`).
 - Checks contributor staleness against `STALE_CSV_MAX_AGE_MS` (default 24h), attaches the full CSV dataset, emails the destination configured via `TREASURY_EXPORT_EMAIL`, and records an audit log entry (`export.cron`).
 - Rate-limited via `CRON_EXPORT_MIN_INTERVAL_MS` (default 60s) to prevent spamming destinations, and never throws unhandled errors. Check the last run status via `GET /api/cron/export`.
+- **CSV formula-injection guards** — Every CSV path (nightly export, `/api/treasury/export`, browser contributor export, snapshot diffs) uses `escapeCsvCell()` in `src/lib/csv.ts`: cells are quoted, internal quotes doubled, and cells beginning with `= + - @` (or leading whitespace/control characters followed by one) get a leading apostrophe so spreadsheets treat them as text. Genuine numbers such as `-12.5` are preserved. See [docs/CRON_EXPORT.md](./docs/CRON_EXPORT.md#csv-escaping-rules-formula-injection).
 
 ### Resilience
 
@@ -256,9 +257,9 @@ The dashboard listens for GitHub organization membership changes via webhook at 
    - Secret: The same secret from step 1
    - Events: Select "Organization" and check "Member"
 
-The webhook endpoint returns HTTP 202 (Accepted) after signature verification, including processing failures, to prevent GitHub retry storms. Invalid or missing signatures return HTTP 401; an unset or blank `GITHUB_WEBHOOK_SECRET` returns HTTP 503. Processing failures are captured in Sentry, and recognized membership changes for registered users produce audit entries.
+The webhook verifies `X-Hub-Signature-256` against the raw body with `GITHUB_WEBHOOK_SECRET` and returns HTTP `200` on success (`400` for malformed JSON). Missing, invalid, or unconfigured-secret requests return HTTP `401` — there is no skip path. Delivery ids from `X-GitHub-Delivery` are recorded in the audit metadata and deduplicated for 24h **per process**; a repeated delivery returns `200 { duplicate: true }` without reprocessing. Recognized membership changes also update an in-process membership cache after verification.
 
-Admins can replay a membership payload with `POST /api/webhooks/github-org-membership/replay`. Replay requires an admin session (HTTP 403 otherwise). When `GITHUB_WEBHOOK_SECRET` is configured, include a valid `X-Hub-Signature-256` HMAC for the exact request body; invalid or missing signatures return HTTP 401. When the secret is unset or blank, this admin-only replay endpoint skips signature verification to allow manual recovery. Successful processing returns HTTP 200 with `status` and `event`; malformed JSON returns HTTP 400. Preserve `X-GitHub-Delivery` when replaying to retain the original delivery ID in the membership audit entry.
+Maintainers can replay a membership payload with `POST /api/webhooks/github-org-membership/replay`. Replay requires a same-origin request, a maintainer session (HTTP `403` otherwise) **and** a valid `X-Hub-Signature-256` HMAC over the exact raw body; missing/invalid signatures return HTTP `401` even for maintainers. Successful processing returns HTTP `200` with `ok`, `replayed`, `handled`, `action`, `login` and `deliveryId`; malformed JSON returns HTTP `400`. Forward `X-GitHub-Delivery` to retain the delivery id in audit metadata. See [the replay procedure](./docs/MAINTAINER_WORKFLOW.md#replaying-a-github-org-membership-webhook) and [secret rotation](./docs/SECURITY_POLINRIDER.md#webhook-secret-rotation-runbook).
 
 ### Security
 

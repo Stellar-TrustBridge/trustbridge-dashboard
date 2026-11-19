@@ -41,17 +41,33 @@ npm install
 
 ## 3. Set up PostgreSQL
 
-### Option A: Docker
+### Option A: Docker Compose (recommended)
+
+Use the full local stack from the repo root — PostgreSQL 16, Adminer, mock Horizon and the Next.js app:
 
 ```bash
-docker run --name trustbridge-pg \
-  -e POSTGRES_PASSWORD=postgres \
-  -e POSTGRES_DB=trustbridge \
-  -p 5432:5432 \
-  -d postgres:16
+docker compose up -d --build
 ```
 
-`DATABASE_URL=postgresql://postgres:postgres@localhost:5432/trustbridge`
+Credentials match `docker-compose.yml`: database `trustbridge_dashboard`, admin role `trustbridge` / `trustbridge-dev-password`, restricted app role `trustbridge_app` / `trustbridge-app-dev-password`. For host-side `npm run dev`:
+
+```bash
+DATABASE_URL="postgresql://trustbridge:trustbridge-dev-password@localhost:5432/trustbridge_dashboard?schema=public"
+```
+
+For the application, use the restricted role with the RLS tenant setting:
+
+```bash
+DATABASE_URL="postgresql://trustbridge_app:trustbridge-app-dev-password@localhost:5432/trustbridge_dashboard?schema=public&options=-c%20app.maintainer_org_id%3Ddefault"
+```
+
+Optional mock Horizon (bundled in Compose, host port `8089`):
+
+```bash
+NEXT_PUBLIC_HORIZON_URL=http://localhost:8089 npm run dev
+```
+
+See [DOCKER_COMPOSE.md](./DOCKER_COMPOSE.md) for migrations, seed data, URLs, and troubleshooting.
 
 ### Option B: Neon / Supabase
 

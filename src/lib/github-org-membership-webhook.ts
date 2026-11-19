@@ -2,6 +2,7 @@ import "server-only";
 
 import { createHmac, timingSafeEqual } from "node:crypto";
 
+import { CacheStore } from "@/lib/cache";
 import { prisma } from "@/lib/prisma";
 import { recordAuditLog } from "@/lib/audit";
 
@@ -31,6 +32,73 @@ export interface ProcessEventResult {
   handled: boolean;
   action: string;
   login: string | null;
+  deliveryId?: string | null;
+  duplicate?: boolean;
+}
+
+const WEBHOOK_DELIVERY_TTL_MS = 24 * 60 * 60 * 1000;
+
+export const webhookDeliveryCache = new CacheStore<{
+  deliveryId: string;
+  processedAt: number;
+}>(WEBHOOK_DELIVERY_TTL_MS);
+
+function normalizeDeliveryId(deliveryId: string | null | undefined): string | null {
+  const normalized = deliveryId?.trim();
+  return normalized || null;
+}
+
+function deliveryCacheKey(deliveryId: string): string {
+  return `github-org-membership:delivery:${deliveryId}`;
+}
+
+export function isDuplicateWebhookDelivery(
+  deliveryId: string | null | undefined,
+): boolean {
+  const normalized = normalizeDeliveryId(deliveryId);
+  if (!normalized) return false;
+  return webhookDeliveryCache.get(deliveryCacheKey(normalized)) !== null;
+}
+
+export function markWebhookDeliveryProcessed(
+  deliveryId: string | null | undefined,
+): void {
+  const normalized = normalizeDeliveryId(deliveryId);
+  if (!normalized) return;
+  webhookDeliveryCache.set(deliveryCacheKey(normalized), {
+    deliveryId: normalized,
+    processedAt: Date.now(),
+  });
+}
+
+export function resetWebhookDeliveryCache(): void {
+  webhookDeliveryCache.clear();
+}
+
+const orgMembershipCache = new Map<string, boolean>();
+
+function normalizeLogin(login: string): string {
+  return login.trim().toLowerCase();
+}
+
+export function isCachedOrgMember(login: string): boolean | undefined {
+  return orgMembershipCache.get(normalizeLogin(login));
+}
+
+export function updateOrgMembershipCache(
+  action: OrgMembershipAction | string,
+  login: string | null | undefined,
+): void {
+  if (!login?.trim()) return;
+  if (action === "member_added" || action === "member_invited") {
+    orgMembershipCache.set(normalizeLogin(login), true);
+  } else if (action === "member_removed") {
+    orgMembershipCache.set(normalizeLogin(login), false);
+  }
+}
+
+export function resetOrgMembershipCache(): void {
+  orgMembershipCache.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -105,12 +173,20 @@ export function verifyWebhookSignature(
  * `handled: false`.
  */
 export async function processGithubOrgMembershipEvent(
-  payload: GithubOrgMembershipPayload
+  payload: GithubOrgMembershipPayload,
+  deliveryId?: string | null,
 ): Promise<ProcessEventResult> {
   const action = payload.action ?? "unknown";
   const login = payload.membership?.user?.login ?? null;
   const githubId = payload.membership?.user?.id?.toString() ?? null;
   const org = payload.organization?.login ?? null;
+  const delivery = normalizeDeliveryId(deliveryId);
+
+  if (isDuplicateWebhookDelivery(delivery)) {
+    return { handled: false, action, login, deliveryId: delivery, duplicate: true };
+  }
+  markWebhookDeliveryProcessed(delivery);
+  updateOrgMembershipCache(action, login);
 
   if (action === "member_added" || action === "member_invited") {
     if (login && githubId) {
@@ -132,10 +208,10 @@ export async function processGithubOrgMembershipEvent(
       action: `webhook.github_org_membership.${action}`,
       actorLogin: payload.sender?.login ?? null,
       targetLabel: login,
-      metadata: { org, role: payload.membership?.role ?? null },
+      metadata: { org, role: payload.membership?.role ?? null, deliveryId: delivery },
     });
 
-    return { handled: true, action, login };
+    return { handled: true, action, login, deliveryId: delivery };
   }
 
   if (action === "member_removed") {
@@ -143,10 +219,10 @@ export async function processGithubOrgMembershipEvent(
       action: "webhook.github_org_membership.member_removed",
       actorLogin: payload.sender?.login ?? null,
       targetLabel: login,
-      metadata: { org },
+      metadata: { org, deliveryId: delivery },
     });
 
-    return { handled: true, action, login };
+    return { handled: true, action, login, deliveryId: delivery };
   }
 
   // Unrecognised action — log for visibility, return unhandled.
@@ -154,8 +230,8 @@ export async function processGithubOrgMembershipEvent(
     action: "webhook.github_org_membership.unknown_action",
     actorLogin: payload.sender?.login ?? null,
     targetLabel: login,
-    metadata: { action, org },
+    metadata: { action, org, deliveryId: delivery },
   });
 
-  return { handled: false, action, login };
+  return { handled: false, action, login, deliveryId: delivery };
 }

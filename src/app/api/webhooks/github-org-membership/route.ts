@@ -35,7 +35,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: "Invalid JSON payload" }, { status: 400 });
   }
 
-  const result = await processGithubOrgMembershipEvent(payload);
+  const deliveryId = request.headers.get("x-github-delivery");
+  const result = await processGithubOrgMembershipEvent(payload, deliveryId);
 
   return NextResponse.json({ ok: true, ...result });
 }

@@ -88,7 +88,7 @@ Replay endpoints (admin-only):
 
 | Route | Method | Signature | Header |
 |-------|--------|-----------|--------|
-| `/api/webhooks/github-org-membership/replay` | POST | HMAC-SHA256 | `X-Hub-Signature-256` (admin-only; skipped if `GITHUB_WEBHOOK_SECRET` unset) |
+| `/api/webhooks/github-org-membership/replay` | POST | HMAC-SHA256 | `X-Hub-Signature-256` (maintainer-only, same-origin; required even when the secret is unset — requests then fail closed with `401`) |
 
 ---
 
@@ -228,7 +228,7 @@ No new environment variables are required for CSRF protection. The existing conf
 |----------|------|
 | `NEXTAUTH_SECRET` | Signs CSRF tokens and validates session; also used as fallback for `CSRF_SECRET` |
 | `CSRF_SECRET` | Optional alternative signing key for CSRF tokens (defaults to `NEXTAUTH_SECRET`) |
-| `GITHUB_WEBHOOK_SECRET` | Signs webhook `X-Hub-Signature-256` headers; if unset, replay endpoints skip signature verification |
+| `GITHUB_WEBHOOK_SECRET` | Signs webhook `X-Hub-Signature-256` headers; if unset, all webhook and replay verification fails closed with `401` |
 
 ---
 

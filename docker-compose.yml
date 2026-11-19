@@ -14,6 +14,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./docker/postgres/init-roles.sql:/docker-entrypoint-initdb.d/10-init-roles.sql:ro
+      - ./docker/postgres/seed.sql:/docker-entrypoint-initdb.d/20-seed.sql:ro
     healthcheck:
       test:
         - CMD-SHELL
@@ -34,6 +35,59 @@ services:
       - "8080:8080"
     environment:
       ADMINER_DEFAULT_SERVER: postgres
+    networks:
+      - trustbridge-network
+
+  horizon-mock:
+    image: wiremock/wiremock:3.6.0
+    container_name: trustbridge-dashboard-mock-horizon
+    ports:
+      - "8089:8080"
+    volumes:
+      - ./mock/horizon/mappings:/home/wiremock/mappings:ro
+    command:
+      - "--port=8080"
+      - "--verbose"
+      - "--max-request-journal=500"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/__admin/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    restart: "no"
+    networks:
+      - trustbridge-network
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_HORIZON_URL: http://localhost:8089
+        NEXT_PUBLIC_DEFAULT_ASSET_CODE: USDC
+        NEXT_PUBLIC_DEFAULT_ASSET_ISSUER: GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN
+    container_name: trustbridge-web
+    env_file:
+      - path: .env.local
+        required: false
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      NEXTAUTH_URL: http://localhost:3000
+      DATABASE_URL: "postgresql://trustbridge_app:trustbridge-app-dev-password@postgres:5432/trustbridge_dashboard?schema=public&options=-c%20app.maintainer_org_id%3Ddefault"
+      NEXT_PUBLIC_HORIZON_URL: http://localhost:8089
+      NEXT_PUBLIC_DEFAULT_ASSET_CODE: USDC
+      NEXT_PUBLIC_DEFAULT_ASSET_ISSUER: GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN
+      NEXT_PUBLIC_MIN_XLM_BALANCE: "1.5"
+      NEXT_PUBLIC_BASE_RESERVE_XLM: "0.5"
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      horizon-mock:
+        condition: service_healthy
     networks:
       - trustbridge-network
 

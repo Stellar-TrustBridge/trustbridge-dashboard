@@ -544,8 +544,53 @@ describe("snapshot-diff", () => {
       };
 
       const csv = buildDiffCsv(diffWithFormula);
-      // Formula-like strings should be quoted
-      expect(csv).toContain('"=IMPORTXML(GDXXXX)"');
+      expect(csv).toContain(`"'=IMPORTXML(GDXXXX)"`);
+    });
+
+    it("neutralizes all formula operators in diff fields", () => {
+      const base = sampleDiff.added[0];
+      const diff: DiffResult = {
+        ...sampleDiff,
+        added: [
+          { ...base, githubUsername: "+cmd", newAddress: "-cmd" },
+          { ...base, githubUsername: "@SUM(1,2)", newAddress: "  =2+3" },
+          { ...base, githubUsername: '\t=IMPORTXML("x")', newAddress: null },
+        ],
+      };
+
+      const csv = buildDiffCsv(diff);
+      expect(csv).toContain(`"'+cmd"`);
+      expect(csv).toContain(`"'-cmd"`);
+      expect(csv).toContain(`"'@SUM(1,2)"`);
+      expect(csv).toContain(`"'  =2+3"`);
+      expect(csv).toContain(`"'\t=IMPORTXML(""x"")"`);
+    });
+
+    it("quotes and escapes quotes and empty diff fields via the shared helper", () => {
+      const diff: DiffResult = {
+        ...sampleDiff,
+        added: [
+          {
+            ...sampleDiff.added[0],
+            githubUsername: 'alice"the=cmd',
+            newAddress: null,
+            newReadiness: null,
+          },
+        ],
+      };
+
+      const csv = buildDiffCsv(diff);
+      expect(csv).toContain('"alice""the=cmd"');
+      expect(csv).toContain('"",""');
+      expect(csv).toContain('"added"');
+    });
+
+    it("leaves genuine numeric diff values untouched", () => {
+      const diff: DiffResult = {
+        ...sampleDiff,
+        added: [{ ...sampleDiff.added[0], newAddress: "-12.5" }],
+      };
+      expect(buildDiffCsv(diff)).toContain('"-12.5"');
     });
   });
 });

@@ -1,15 +1,11 @@
-/**
- * Unit tests for analytics adapter selection (#302).
- *
- * Verifies that:
- * - the no-op adapter is selected when no key is configured
- * - the console adapter is selected in development without a key
- * - server-side track helpers never throw, regardless of env state
- * - all exported track functions are callable without errors
- */
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { describe, it, expect, vi, afterEach } from "vitest";
-import * as analyticsNS from "@/lib/analytics";
+import {
+  hashIdentifier,
+  isAnalyticsEnabled,
+  parseAnalyticsBool,
+  ANALYTICS_EVENT_TYPES,
+} from "@/lib/analytics-policy";
 
 vi.mock("posthog-js", () => ({
   default: {
@@ -20,384 +16,409 @@ vi.mock("posthog-js", () => ({
   },
 }));
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+const ENV_KEYS = [
+  "ANALYTICS_OPT_OUT",
+  "NEXT_PUBLIC_ANALYTICS_OPT_OUT",
+  "ANALYTICS_ENABLED",
+  "NEXT_PUBLIC_ANALYTICS_ENABLED",
+  "FEATURE_FLAG_ANALYTICS",
+  "NEXT_PUBLIC_FEATURE_FLAG_ANALYTICS",
+  "ANALYTICS_HASH_SALT",
+  "POSTHOG_API_KEY",
+  "POSTHOG_HOST",
+  "NEXT_PUBLIC_POSTHOG_API_KEY",
+  "NEXT_PUBLIC_POSTHOG_HOST",
+];
 
-/** Temporarily set process.env keys and restore them after the test. */
-function withEnv(overrides: Record<string, string | undefined>, fn: () => void) {
-  const saved: Record<string, string | undefined> = {};
-  for (const key of Object.keys(overrides)) {
-    saved[key] = process.env[key];
-    if (overrides[key] === undefined) {
-      delete process.env[key];
-    } else {
-      process.env[key] = overrides[key];
+type Overrides = Record<string, string | undefined>;
+
+async function withAnalytics<T>(
+  overrides: Overrides,
+  fn: (analytics: typeof import("@/lib/analytics")) => T | Promise<T>,
+): Promise<T> {
+  const saved = new Map<string, string | undefined>();
+  for (const key of ENV_KEYS) {
+    saved.set(key, process.env[key]);
+    delete process.env[key];
+  }
+  for (const [key, value] of Object.entries(overrides)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  vi.resetModules();
+  try {
+    const analytics = await import("@/lib/analytics");
+    return await fn(analytics);
+  } finally {
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
     }
+    vi.resetModules();
+  }
+}
+
+async function inBrowser<T>(
+  overrides: Overrides,
+  fn: (
+    analytics: typeof import("@/lib/analytics"),
+    posthog: typeof import("posthog-js"),
+  ) => T | Promise<T>,
+): Promise<T> {
+  vi.stubGlobal("window", {});
+  return withAnalytics(
+    { NEXT_PUBLIC_POSTHOG_API_KEY: "browser-key", ...overrides },
+    async (analytics) => {
+      const posthog = await import("posthog-js");
+      return fn(analytics, posthog);
+    },
+  );
+}
+
+function fetchRecorder() {
+  const bodies: string[] = [];
+  const spy = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+    bodies.push(String(init?.body ?? ""));
+    return new Response("{}", { status: 200 });
+  });
+  return { spy, bodies, payloads: () => bodies.map((body) => JSON.parse(body)) };
+}
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
+});
+
+describe("analytics policy", () => {
+  it("parses boolean env values safely", () => {
+    expect(parseAnalyticsBool(" ON ")).toBe(true);
+    expect(parseAnalyticsBool("Yes")).toBe(true);
+    expect(parseAnalyticsBool("1")).toBe(true);
+    expect(parseAnalyticsBool("off")).toBe(false);
+    expect(parseAnalyticsBool("DISABLED")).toBe(false);
+    expect(parseAnalyticsBool("maybe")).toBeUndefined();
+    expect(parseAnalyticsBool("")).toBeUndefined();
+    expect(parseAnalyticsBool(undefined)).toBeUndefined();
+  });
+
+  it("honours kill switches, opt-ins and the feature-flag env override", () => {
+    withEnv(isAnalyticsEnabled, { ANALYTICS_OPT_OUT: "1" }, false);
+    withEnv(isAnalyticsEnabled, { NEXT_PUBLIC_ANALYTICS_OPT_OUT: "true" }, false);
+    withEnv(isAnalyticsEnabled, { ANALYTICS_ENABLED: "false" }, false);
+    withEnv(isAnalyticsEnabled, { NEXT_PUBLIC_ANALYTICS_ENABLED: "0" }, false);
+    withEnv(isAnalyticsEnabled, { FEATURE_FLAG_ANALYTICS: "off" }, false);
+    withEnv(isAnalyticsEnabled, { NEXT_PUBLIC_FEATURE_FLAG_ANALYTICS: "no" }, false);
+    withEnv(isAnalyticsEnabled, { ANALYTICS_ENABLED: "yes" }, true);
+    withEnv(isAnalyticsEnabled, {}, true);
+    withEnv(isAnalyticsEnabled, { ANALYTICS_ENABLED: "nonsense" }, true);
+    withEnv(
+      isAnalyticsEnabled,
+      { ANALYTICS_ENABLED: "on", ANALYTICS_OPT_OUT: "yes" },
+      false,
+    );
+  });
+
+  it("hashes durable identifiers deterministically without the raw value", () => {
+    const hashed = hashIdentifier("alice");
+    expect(hashed).toMatch(/^anon_[0-9a-f]{16}$/);
+    expect(hashed).toBe(hashIdentifier("  ALICE  "));
+    expect(hashed).not.toContain("alice");
+    expect(hashIdentifier("")).toBe("");
+  });
+
+  it("publishes a schema for every event type", () => {
+    expect(ANALYTICS_EVENT_TYPES).toHaveLength(8);
+    expect(ANALYTICS_EVENT_TYPES).toContain("dispute_closed");
+  });
+});
+
+function withEnv(fn: () => boolean, overrides: Overrides, expected: boolean) {
+  const saved = new Map<string, string | undefined>();
+  for (const key of Object.keys(overrides)) {
+    saved.set(key, process.env[key]);
+    if (overrides[key] === undefined) delete process.env[key];
+    else process.env[key] = overrides[key];
   }
   try {
-    fn();
+    expect(fn()).toBe(expected);
   } finally {
-    for (const key of Object.keys(saved)) {
-      if (saved[key] === undefined) {
-        delete process.env[key];
-      } else {
-        process.env[key] = saved[key];
-      }
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
     }
   }
 }
 
-// ---------------------------------------------------------------------------
-// Adapter selection — server-side helpers
-// ---------------------------------------------------------------------------
-
-describe("analytics — server-side track helpers", () => {
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
-
-  it("trackServerRegistrationCreated does not throw without POSTHOG_API_KEY", () => {
-    withEnv({ POSTHOG_API_KEY: undefined }, () => {
-      // Re-require so the module picks up the cleared env.
-      // Because vitest caches modules we test the exported functions directly;
-      // they must not throw even with no key configured.
-      const { trackServerRegistrationCreated } = analyticsNS;
-      expect(() =>
-        trackServerRegistrationCreated({ userId: "u1", stellarAddress: "GABC" })
-      ).not.toThrow();
+describe("analytics — opt-out suppresses every emit path", () => {
+  it("browser PostHog emits nothing when opted out", async () => {
+    await inBrowser({ ANALYTICS_OPT_OUT: "1" }, async (analytics, posthog) => {
+      analytics.trackRegistrationCreated({ userId: "user-1", stellarAddress: "GABC" });
+      analytics.identifyUser("user-1", { githubUsername: "alice" });
+      analytics.resetAnalytics();
+      expect(posthog.default.init).not.toHaveBeenCalled();
+      expect(posthog.default.capture).not.toHaveBeenCalled();
+      expect(posthog.default.identify).not.toHaveBeenCalled();
+      expect(posthog.default.reset).not.toHaveBeenCalled();
     });
   });
 
-  it("trackServerRegistrationUpdated does not throw without POSTHOG_API_KEY", () => {
-    withEnv({ POSTHOG_API_KEY: undefined }, () => {
-      const { trackServerRegistrationUpdated } = analyticsNS;
-      expect(() =>
-        trackServerRegistrationUpdated({
-          userId: "u1",
-          fieldsChanged: ["stellarAddress"],
-        })
-      ).not.toThrow();
-    });
-  });
 
-  it("trackServerCsvExported does not throw without POSTHOG_API_KEY", () => {
-    withEnv({ POSTHOG_API_KEY: undefined }, () => {
-      const { trackServerCsvExported } = analyticsNS;
-      expect(() =>
-        trackServerCsvExported({ rowCount: 42, triggeredBy: "maintainer" })
-      ).not.toThrow();
-    });
-  });
-
-  it("trackServerBatchRecheckStarted does not throw without POSTHOG_API_KEY", () => {
-    withEnv({ POSTHOG_API_KEY: undefined }, () => {
-      const { trackServerBatchRecheckStarted } = analyticsNS;
-      expect(() =>
-        trackServerBatchRecheckStarted({ totalRegistrations: 10, initiatedBy: "u1" })
-      ).not.toThrow();
-    });
-  });
-
-  it("server track helpers accept undefined properties without throwing", () => {
-    const { trackServerRegistrationCreated, trackServerRegistrationUpdated, trackServerCsvExported, trackServerBatchRecheckStarted, trackServerDisputeOpened, trackServerDisputeClosed } = analyticsNS;
-
-    expect(() => trackServerRegistrationCreated()).not.toThrow();
-    expect(() => trackServerRegistrationUpdated()).not.toThrow();
-    expect(() => trackServerCsvExported()).not.toThrow();
-    expect(() => trackServerBatchRecheckStarted()).not.toThrow();
-    expect(() => trackServerDisputeOpened()).not.toThrow();
-    expect(() => trackServerDisputeClosed()).not.toThrow();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Adapter selection — client-side helpers
-// ---------------------------------------------------------------------------
-
-describe("analytics — client-side track helpers", () => {
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
-
-  it("trackRegistrationCreated does not throw", () => {
-    const { trackRegistrationCreated } = analyticsNS;
-    expect(() =>
-      trackRegistrationCreated({ userId: "u1", stellarAddress: "GABC" })
-    ).not.toThrow();
-  });
-
-  it("trackRegistrationUpdated does not throw", () => {
-    const { trackRegistrationUpdated } = analyticsNS;
-    expect(() =>
-      trackRegistrationUpdated({ userId: "u1", fieldsChanged: ["stellarAddress"] })
-    ).not.toThrow();
-  });
-
-  it("trackBatchRecheckStarted does not throw", () => {
-    const { trackBatchRecheckStarted } = analyticsNS;
-    expect(() =>
-      trackBatchRecheckStarted({ totalRegistrations: 5 })
-    ).not.toThrow();
-  });
-
-  it("trackCsvExported does not throw", () => {
-    const { trackCsvExported } = analyticsNS;
-    expect(() => trackCsvExported({ rowCount: 99 })).not.toThrow();
-  });
-
-  it("trackRecheckCompleted does not throw", () => {
-    const { trackRecheckCompleted } = analyticsNS;
-    expect(() =>
-      trackRecheckCompleted({ totalChecked: 10, changed: 2, durationMs: 1500 })
-    ).not.toThrow();
-  });
-
-  it("identifyUser does not throw", () => {
-    const { identifyUser } = analyticsNS;
-    expect(() => identifyUser("user-123", { plan: "free" })).not.toThrow();
-  });
-
-  it("resetAnalytics does not throw", () => {
-    const { resetAnalytics } = analyticsNS;
-    expect(() => resetAnalytics()).not.toThrow();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// No-op guard — console adapter must not be used in test (NODE_ENV=test)
-// ---------------------------------------------------------------------------
-
-describe("analytics — adapter selection guards", () => {
-  it("does not log to console in test environment (no adapter side-effects)", () => {
-    const consoleSpy = vi.spyOn(console, "log");
-    const { trackRegistrationCreated } = analyticsNS;
-    trackRegistrationCreated({ userId: "u1" });
-    // In test env (NODE_ENV=test) neither ConsoleAdapter nor PostHogAdapter
-    // should be selected — the call must be a no-op.
-    expect(consoleSpy).not.toHaveBeenCalledWith(
-      expect.stringContaining("[Analytics]"),
-      expect.anything()
-    );
-  });
-
-  it("exports all expected server-track symbols", () => {
-    const analytics = analyticsNS;
-    expect(typeof analytics.trackServerRegistrationCreated).toBe("function");
-    expect(typeof analytics.trackServerRegistrationUpdated).toBe("function");
-    expect(typeof analytics.trackServerCsvExported).toBe("function");
-    expect(typeof analytics.trackServerBatchRecheckStarted).toBe("function");
-    expect(typeof analytics.trackServerDisputeOpened).toBe("function");
-    expect(typeof analytics.trackServerDisputeClosed).toBe("function");
-  });
-
-  it("exports all expected client-track symbols", () => {
-    const analytics = analyticsNS;
-    expect(typeof analytics.trackRegistrationCreated).toBe("function");
-    expect(typeof analytics.trackRegistrationUpdated).toBe("function");
-    expect(typeof analytics.trackBatchRecheckStarted).toBe("function");
-    expect(typeof analytics.trackCsvExported).toBe("function");
-    expect(typeof analytics.trackRecheckCompleted).toBe("function");
-    expect(typeof analytics.identifyUser).toBe("function");
-    expect(typeof analytics.resetAnalytics).toBe("function");
-  });
-
-  it("selects the console adapter in development when no browser key is configured", async () => {
+  it("console adapter emits nothing when opted out", async () => {
+    const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     const originalNodeEnv = process.env.NODE_ENV;
     process.env.NODE_ENV = "development";
-    delete process.env.NEXT_PUBLIC_POSTHOG_API_KEY;
     vi.stubGlobal("window", {});
-    vi.resetModules();
-
-    const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
-    const { trackRegistrationCreated } = await import("@/lib/analytics");
-    trackRegistrationCreated({ userId: "development-user" });
-
-    expect(consoleSpy).toHaveBeenCalledWith(
-      "[Analytics] registration_created",
-      { userId: "development-user" }
-    );
-
-    consoleSpy.mockRestore();
-    vi.unstubAllGlobals();
-    process.env.NODE_ENV = originalNodeEnv;
+    try {
+      await withAnalytics(
+        { ANALYTICS_OPT_OUT: "true" },
+        async ({ trackRegistrationCreated, identifyUser }) => {
+          trackRegistrationCreated({ userId: "user-1" });
+          identifyUser("user-1", { githubUsername: "alice" });
+        },
+      );
+    } finally {
+      process.env.NODE_ENV = originalNodeEnv;
+    }
+    expect(consoleSpy).not.toHaveBeenCalled();
   });
 
-  it("selects PostHog in the browser when a key is configured", async () => {
-    const originalNodeEnv = process.env.NODE_ENV;
-    process.env.NODE_ENV = "production";
-    process.env.NEXT_PUBLIC_POSTHOG_API_KEY = "test-key";
-    vi.stubGlobal("window", {});
-    vi.resetModules();
+  it("server track and identify emit nothing via trackServerEvent path", async () => {
+    const recorder = fetchRecorder();
+    await withAnalytics(
+      { POSTHOG_API_KEY: "server-key", NEXT_PUBLIC_ANALYTICS_OPT_OUT: "1" },
+      async ({ trackServerEvent, identifyServerUser }) => {
+        trackServerEvent("registration_created", { userId: "user-1" });
+        identifyServerUser("user-1", { maintainerOrgId: "org-1" });
+      },
+    );
+    expect(recorder.spy).not.toHaveBeenCalled();
+  });
 
-    const posthog = await import("posthog-js");
-    const { trackRegistrationCreated } = await import("@/lib/analytics");
-    trackRegistrationCreated({ userId: "posthog-user" });
+  it("identifyServerUser emits nothing when opted out directly", async () => {
+    const recorder = fetchRecorder();
+    await withAnalytics(
+      { POSTHOG_API_KEY: "server-key", ANALYTICS_OPT_OUT: "1" },
+      ({ identifyServerUser }) => {
+        identifyServerUser("user-1", { maintainerOrgId: "org-1" });
+      },
+    );
+    expect(recorder.spy).not.toHaveBeenCalled();
+  });
 
-    await vi.waitFor(() => {
-      expect(posthog.default.init).toHaveBeenCalledWith(
-        "test-key",
-        expect.objectContaining({ autocapture: false })
-      );
-      expect(posthog.default.capture).toHaveBeenCalledWith(
-        "registration_created",
-        { userId: "posthog-user" }
-      );
-    });
-
-    delete process.env.NEXT_PUBLIC_POSTHOG_API_KEY;
-    vi.unstubAllGlobals();
-    process.env.NODE_ENV = originalNodeEnv;
+  it("a disabled feature flag env override suppresses emits", async () => {
+    const recorder = fetchRecorder();
+    await withAnalytics(
+      { POSTHOG_API_KEY: "server-key", FEATURE_FLAG_ANALYTICS: "off" },
+      ({ trackServerCsvExported }) => {
+        trackServerCsvExported({ rowCount: 10 });
+      },
+    );
+    expect(recorder.spy).not.toHaveBeenCalled();
   });
 });
 
-// ---------------------------------------------------------------------------
-// Issue #516 — identifyServerUser with org scope
-// ---------------------------------------------------------------------------
-
-describe("analytics — identifyServerUser (issue #516)", () => {
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
-
-  it("identifyServerUser is exported", () => {
-    const analytics = analyticsNS;
-    expect(typeof analytics.identifyServerUser).toBe("function");
-  });
-
-  it("identifyServerUser does not throw when POSTHOG_API_KEY is absent", () => {
-    withEnv({ POSTHOG_API_KEY: undefined }, () => {
-      const { identifyServerUser } = analyticsNS;
-      expect(() =>
-        identifyServerUser("user-123", { maintainerOrgId: "org-abc" })
-      ).not.toThrow();
-    });
-  });
-
-  it("identifyServerUser is a no-op for anonymous userId", () => {
-    const fetchSpy = vi
-      .spyOn(global, "fetch")
-      .mockResolvedValue(new Response("{}", { status: 200 }));
-
-    withEnv({ POSTHOG_API_KEY: "test-key" }, () => {
-      vi.resetModules();
-      const { identifyServerUser } = analyticsNS;
-      identifyServerUser("anonymous", { maintainerOrgId: "org-abc" });
-    });
-
-    expect(fetchSpy).not.toHaveBeenCalled();
-    fetchSpy.mockRestore();
-  });
-
-  it("identifyServerUser is a no-op for empty userId", () => {
-    const fetchSpy = vi
-      .spyOn(global, "fetch")
-      .mockResolvedValue(new Response("{}", { status: 200 }));
-
-    withEnv({ POSTHOG_API_KEY: "test-key" }, () => {
-      vi.resetModules();
-      const { identifyServerUser } = analyticsNS;
-      identifyServerUser("", { maintainerOrgId: "org-abc" });
-    });
-
-    expect(fetchSpy).not.toHaveBeenCalled();
-    fetchSpy.mockRestore();
-  });
-
-  it("identifyServerUser sends $identify event with maintainerOrgId and $groups", async () => {
-    const bodies: string[] = [];
-    const fetchSpy = vi
-      .spyOn(global, "fetch")
-      .mockImplementation(async (_url, init) => {
-        bodies.push(init?.body as string);
-        return new Response("{}", { status: 200 });
+describe("analytics — no-PII event schema", () => {
+  it("browser capture drops raw identifiers, addresses and unknown properties", async () => {
+    await inBrowser({}, async ({ trackRegistrationCreated }, posthog) => {
+      trackRegistrationCreated({
+        userId: "user-123",
+        stellarAddress: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
       });
 
-    withEnv({ POSTHOG_API_KEY: "server-key", POSTHOG_HOST: undefined }, () => {});
-    {
-      // Fresh module evaluation so the lazy server adapter picks up the key
-      // (it is cached per module instance). Env must stay set until after
-      // the call, so withEnv cannot wrap the async import — manage it here.
-      const prevKey = process.env.POSTHOG_API_KEY;
-      const prevHost = process.env.POSTHOG_HOST;
-      process.env.POSTHOG_API_KEY = "server-key";
-      delete process.env.POSTHOG_HOST;
-      vi.resetModules();
-      try {
-        const { identifyServerUser } = await import("@/lib/analytics");
+      await vi.waitFor(() => {
+        expect(posthog.default.capture).toHaveBeenCalledTimes(1);
+      });
+      const [event, properties] = (posthog.default.capture as any).mock.calls[0];
+      expect(event).toBe("registration_created");
+      expect(properties).toEqual({ userId: hashIdentifier("user-123") });
+      expect(JSON.stringify(properties)).not.toContain("stellarAddress");
+      expect(JSON.stringify(properties)).not.toContain("GAAAAAAAA");
+    });
+  });
+
+  it("browser identify hashes userId and githubUsername", async () => {
+    await inBrowser({}, async ({ identifyUser }, posthog) => {
+      identifyUser("user-456", {
+        githubUsername: "alice",
+        maintainerOrgId: "stellar-org",
+        role: "maintainer",
+        email: "alice@example.com",
+        notes: "private note",
+      });
+
+      await vi.waitFor(() => {
+        expect(posthog.default.identify).toHaveBeenCalledTimes(1);
+      });
+      const [distinctId, properties] = (posthog.default.identify as any).mock.calls[0];
+      expect(distinctId).toBe(hashIdentifier("user-456"));
+      expect(properties).toEqual({
+        maintainerOrgId: "stellar-org",
+        githubUsername: hashIdentifier("alice"),
+        role: "maintainer",
+      });
+      expect(JSON.stringify(properties)).not.toContain("alice");
+      expect(JSON.stringify(properties)).not.toContain("example.com");
+    });
+  });
+
+  it("console adapter logs only sanitized properties", async () => {
+    const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const originalNodeEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = "development";
+    vi.stubGlobal("window", {});
+    try {
+      await withAnalytics({}, async ({ trackServerEvent }) => {
+        trackServerEvent("registration_created", {
+          userId: "dev-user",
+          stellarAddress: "GSECRET",
+          email: "dev@example.com",
+        });
+      });
+    } finally {
+      process.env.NODE_ENV = originalNodeEnv;
+    }
+    expect(consoleSpy).toHaveBeenCalledWith("[Analytics] registration_created", {
+      userId: hashIdentifier("dev-user"),
+    });
+  });
+
+  it("server track sanitizes properties and uses the hashed id as distinct_id", async () => {
+    const recorder = fetchRecorder();
+    await withAnalytics(
+      { POSTHOG_API_KEY: "server-key" },
+      ({ trackServerRegistrationCreated }) => {
+        trackServerRegistrationCreated({
+          userId: "user-789",
+          stellarAddress: "GSECRETADDRESS",
+        });
+      },
+    );
+
+    expect(recorder.spy).toHaveBeenCalledTimes(1);
+    const payload = recorder.payloads()[0];
+    expect(payload.event).toBe("registration_created");
+    expect(payload.distinct_id).toBe(hashIdentifier("user-789"));
+    expect(payload.properties).toEqual({
+      userId: hashIdentifier("user-789"),
+      $lib: "trustbridge-server",
+    });
+    const raw = JSON.stringify(payload);
+    expect(raw).not.toContain("user-789");
+    expect(raw).not.toContain("GSECRETADDRESS");
+    expect(raw).not.toContain("stellarAddress");
+  });
+
+  it("applies the allowlist to every event type", async () => {
+    const recorder = fetchRecorder();
+    const inputs: Record<string, Record<string, unknown>> = {
+      registration_created: { userId: "u1", stellarAddress: "GSECRET" },
+      registration_updated: {
+        userId: "u2",
+        fieldsChanged: ["profile", "stellarAddress", "notes"],
+      },
+      recheck_completed: { totalChecked: 10, changed: 2, durationMs: 1500, notes: "x" },
+      batch_recheck_started: { totalRegistrations: 5, initiatedBy: "u3" },
+      csv_exported: { rowCount: 42, triggeredBy: "u4" },
+      soroban_mirror_completed: { success: true, durationMs: 12, txHash: "secret-hash" },
+      dispute_opened: {
+        userId: "u5",
+        disputeId: "d1",
+        registrationId: "r1",
+        actorRole: "maintainer",
+        hasProof: true,
+        note: "private",
+      },
+      dispute_closed: { userId: "u6", disputeId: "d2", status: "VALIDATED", email: "a@b.co" },
+    };
+
+    await withAnalytics({ POSTHOG_API_KEY: "server-key" }, async ({ trackServerEvent }) => {
+      for (const event of ANALYTICS_EVENT_TYPES) {
+        trackServerEvent(event, inputs[event]);
+      }
+    });
+
+    const payloads = recorder.payloads();
+    expect(payloads).toHaveLength(ANALYTICS_EVENT_TYPES.length);
+    for (const payload of payloads) {
+      const raw = JSON.stringify(payload);
+      expect(raw).not.toMatch(/GSECRET|a@b\.co|secret-hash|private|"notes"|"email"/);
+    }
+    expect(payloads.find((p) => p.event === "recheck_completed").properties).toMatchObject({
+      totalChecked: 10,
+      changed: 2,
+      durationMs: 1500,
+    });
+    expect(payloads.find((p) => p.event === "registration_updated").properties.fieldsChanged).toEqual([
+      "profile",
+    ]);
+    expect(payloads.find((p) => p.event === "dispute_closed").properties.status).toBe("VALIDATED");
+  });
+
+  it("server identify hashes durable identifiers and keeps org scope", async () => {
+    const recorder = fetchRecorder();
+    await withAnalytics(
+      { POSTHOG_API_KEY: "server-key" },
+      ({ identifyServerUser }) => {
         identifyServerUser("user-456", {
           maintainerOrgId: "org-stellar",
           githubUsername: "alice",
+          role: "maintainer",
         });
-      } finally {
-        if (prevKey === undefined) delete process.env.POSTHOG_API_KEY;
-        else process.env.POSTHOG_API_KEY = prevKey;
-        if (prevHost === undefined) delete process.env.POSTHOG_HOST;
-        else process.env.POSTHOG_HOST = prevHost;
-      }
-    }
+      },
+    );
 
-    await new Promise((r) => setTimeout(r, 0));
-
-    expect(fetchSpy).toHaveBeenCalledTimes(1);
-    const payload = JSON.parse(bodies[0]);
+    const payload = recorder.payloads()[0];
     expect(payload.event).toBe("$identify");
-    expect(payload.distinct_id).toBe("user-456");
-    expect(payload.$set).toMatchObject({ maintainerOrgId: "org-stellar" });
-    expect(payload.$groups).toEqual({ organisation: "org-stellar" });
-    // Must NOT include stellarAddress or tokens
-    expect(JSON.stringify(payload)).not.toContain("stellarAddress");
-    expect(JSON.stringify(payload)).not.toContain("accessToken");
-
-    fetchSpy.mockRestore();
-  });
-
-  it("identifyServerUser omits $groups when no maintainerOrgId", async () => {
-    const bodies: string[] = [];
-    const fetchSpy = vi
-      .spyOn(global, "fetch")
-      .mockImplementation(async (_url, init) => {
-        bodies.push(init?.body as string);
-        return new Response("{}", { status: 200 });
-      });
-
-    withEnv({ POSTHOG_API_KEY: "server-key-2" }, () => {});
-    {
-      const prevKey = process.env.POSTHOG_API_KEY;
-      process.env.POSTHOG_API_KEY = "server-key-2";
-      vi.resetModules();
-      try {
-        const { identifyServerUser } = await import("@/lib/analytics");
-        identifyServerUser("user-789", { role: "maintainer" });
-      } finally {
-        if (prevKey === undefined) delete process.env.POSTHOG_API_KEY;
-        else process.env.POSTHOG_API_KEY = prevKey;
-      }
-    }
-
-    await new Promise((r) => setTimeout(r, 0));
-
-    expect(fetchSpy).toHaveBeenCalledTimes(1);
-    const payload = JSON.parse(bodies[0]);
-    expect(payload.event).toBe("$identify");
-    expect(payload.$groups).toBeUndefined();
-
-    fetchSpy.mockRestore();
-  });
-
-  it("PostHog downtime does not block requests (fetch rejection is swallowed)", () => {
-    const fetchSpy = vi
-      .spyOn(global, "fetch")
-      .mockRejectedValue(new Error("Network error"));
-
-    withEnv({ POSTHOG_API_KEY: "server-key-3" }, () => {
-      vi.resetModules();
-      const { identifyServerUser } = analyticsNS;
-      expect(() =>
-        identifyServerUser("user-abc", { maintainerOrgId: "org-x" })
-      ).not.toThrow();
+    expect(payload.distinct_id).toBe(hashIdentifier("user-456"));
+    expect(payload.$set).toEqual({
+      maintainerOrgId: "org-stellar",
+      githubUsername: hashIdentifier("alice"),
+      role: "maintainer",
+      $lib: "trustbridge-server",
     });
+    expect(payload.$groups).toEqual({ organisation: "org-stellar" });
+    expect(JSON.stringify(payload)).not.toContain("alice");
+    expect(JSON.stringify(payload)).not.toContain("user-456");
+  });
 
-    fetchSpy.mockRestore();
+  it("identifyServerUser is a no-op for anonymous or empty ids", async () => {
+    const recorder = fetchRecorder();
+    await withAnalytics({ POSTHOG_API_KEY: "server-key" }, ({ identifyServerUser }) => {
+      identifyServerUser("anonymous", { maintainerOrgId: "org-1" });
+      identifyServerUser("", { maintainerOrgId: "org-1" });
+    });
+    expect(recorder.spy).not.toHaveBeenCalled();
+  });
+
+  it("identifyServerUser omits $groups without an org and never throws on fetch failure", async () => {
+    const recorder = fetchRecorder();
+    await withAnalytics({ POSTHOG_API_KEY: "server-key" }, ({ identifyServerUser }) => {
+      identifyServerUser("user-789", { role: "maintainer" });
+    });
+    expect(recorder.payloads()[0].$groups).toBeUndefined();
+
+    recorder.spy.mockRejectedValue(new Error("Network error"));
+    await withAnalytics({ POSTHOG_API_KEY: "server-key" }, ({ identifyServerUser }) => {
+      expect(() => identifyServerUser("user-abc", { maintainerOrgId: "org-x" })).not.toThrow();
+    });
+  });
+
+  it("server track helpers remain callable with no key configured", async () => {
+    await withAnalytics({}, (analytics) => {
+      expect(() => analytics.trackServerRegistrationCreated()).not.toThrow();
+      expect(() => analytics.trackServerRegistrationUpdated()).not.toThrow();
+      expect(() => analytics.trackServerCsvExported()).not.toThrow();
+      expect(() => analytics.trackServerBatchRecheckStarted()).not.toThrow();
+      expect(() => analytics.trackServerDisputeOpened()).not.toThrow();
+      expect(() => analytics.trackServerDisputeClosed()).not.toThrow();
+      expect(() => analytics.trackRegistrationCreated()).not.toThrow();
+      expect(() => analytics.trackRegistrationUpdated()).not.toThrow();
+      expect(() => analytics.trackBatchRecheckStarted()).not.toThrow();
+      expect(() => analytics.trackCsvExported()).not.toThrow();
+      expect(() => analytics.trackRecheckCompleted()).not.toThrow();
+      expect(() => analytics.trackSorobanMirrorCompleted()).not.toThrow();
+      expect(() => analytics.resetAnalytics()).not.toThrow();
+    });
   });
 });

@@ -1,5 +1,23 @@
+const FORMULA_OPERATORS = new Set(["=", "+", "-", "@", "\t", "\r"]);
+const LEADING_NOISE = /[\s\u0000-\u001f\ufeff]/;
+const NUMERIC = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;
+
+export function neutralizeCsvFormula(value: string): string {
+  if (!value) return value;
+
+  let index = 0;
+  while (index < value.length && LEADING_NOISE.test(value[index])) index++;
+  const first = value[index];
+  if (!first || !FORMULA_OPERATORS.has(first)) return value;
+  if (NUMERIC.test(value.trim())) return value;
+
+  return `'${value}`;
+}
+
 export function escapeCsvCell(value: unknown): string {
-  return `"${String(value ?? "").replace(/"/g, '""')}"`;
+  const raw = value === null || value === undefined ? "" : String(value);
+  const safe = neutralizeCsvFormula(raw);
+  return `"${safe.replace(/"/g, '""')}"`;
 }
 
 export function buildCsv(headers: string[], rows: unknown[][]): string {
