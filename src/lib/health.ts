@@ -16,7 +16,12 @@
  * crashing. (#538)
  */
 
-import { getContractSyncHealth } from "@/lib/contract-sync";
+import {
+  getContractSyncHealth,
+  getContractSyncLagState,
+  type ContractSyncLagReason,
+  type ContractSyncLagStatus,
+} from "@/lib/contract-sync";
 import { prisma } from "@/lib/prisma";
 import { buildStalenessSummary } from "@/lib/stale-export";
 import { toContributorRow } from "@/lib/registrations";
@@ -54,9 +59,27 @@ export interface HealthResponse {
       status: HealthStatus;
       lastRunAt: string | null;
       lastError?: string;
+      /**
+       * Synchronization lag (issue #659). `status` mirrors the overall
+       * health vocabulary (`ok` / `degraded`) so consumers can branch on it
+       * without knowing the lag domain; `lagStatus` and `reason` carry the
+       * precise contract-sync codes documented in `docs/ARCHITECTURE.md`.
+       */
+      lag: ContractSyncLagCheck;
     };
   };
   version: string;
+}
+
+export interface ContractSyncLagCheck {
+  status: HealthStatus;
+  lagStatus: ContractSyncLagStatus;
+  reason: ContractSyncLagReason;
+  sinceLastSuccessMs: number | null;
+  sinceLastCursorAdvanceMs: number | null;
+  thresholdMs: number;
+  stallThresholdMs: number;
+  cursor: string | null;
 }
 
 /**
@@ -83,6 +106,57 @@ function asNumber(value: unknown): number {
 
 function asString(value: unknown, fallback = ""): string {
   return typeof value === "string" ? value : fallback;
+}
+
+const LAG_STATUSES: readonly ContractSyncLagStatus[] = ["ok", "lagging", "stalled"];
+const LAG_REASONS: readonly ContractSyncLagReason[] = [
+  "ok",
+  "no_data",
+  "never_succeeded",
+  "sync_delayed",
+  "sync_stalled",
+  "cursor_stalled",
+  "not_configured",
+];
+
+/**
+ * Normalize an unknown `checks.contractSync.lag` payload. Missing or
+ * malformed fields fall back to neutral values (`ok` / `no_data`) so a
+ * partial payload still renders without crashing, matching the rest of
+ * `parseHealthResponse`.
+ */
+function parseContractSyncLag(value: unknown): ContractSyncLagCheck {
+  const record = asRecord(value);
+  const lagStatusRaw = record?.lagStatus;
+  const lagStatus: ContractSyncLagStatus =
+    typeof lagStatusRaw === "string" && (LAG_STATUSES as readonly string[]).includes(lagStatusRaw)
+      ? (lagStatusRaw as ContractSyncLagStatus)
+      : "ok";
+  const reasonRaw = record?.reason;
+  const reason: ContractSyncLagReason =
+    typeof reasonRaw === "string" && (LAG_REASONS as readonly string[]).includes(reasonRaw)
+      ? (reasonRaw as ContractSyncLagReason)
+      : "no_data";
+
+  const derivedStatus: HealthStatus = lagStatus === "ok" ? "ok" : "degraded";
+
+  return {
+    status: record && isHealthStatus(record.status) ? record.status : derivedStatus,
+    lagStatus,
+    reason,
+    sinceLastSuccessMs:
+      typeof record?.sinceLastSuccessMs === "number" && Number.isFinite(record.sinceLastSuccessMs)
+        ? record.sinceLastSuccessMs
+        : null,
+    sinceLastCursorAdvanceMs:
+      typeof record?.sinceLastCursorAdvanceMs === "number" &&
+      Number.isFinite(record.sinceLastCursorAdvanceMs)
+        ? record.sinceLastCursorAdvanceMs
+        : null,
+    thresholdMs: asNumber(record?.thresholdMs),
+    stallThresholdMs: asNumber(record?.stallThresholdMs),
+    cursor: typeof record?.cursor === "string" ? record.cursor : null,
+  };
 }
 
 /**
@@ -150,6 +224,7 @@ export function parseHealthResponse(payload: unknown): HealthResponse | null {
             ? contractSync.lastRunAt
             : null,
         ...(contractSyncError ? { lastError: contractSyncError } : {}),
+        lag: parseContractSyncLag(contractSync?.lag),
       },
     },
     version: asString(root.version, "unknown"),
@@ -256,8 +331,14 @@ async function probeQueue(): Promise<DependencyProbe> {
 /**
  * Run all health checks and return a typed HealthResponse.
  * Called server-side by both the API route and the status page.
+ *
+ * `options.now` injects the clock used for contract-sync lag evaluation so
+ * tests can exercise lag/stall states without waiting on real time (issue
+ * #659).
  */
-export async function runHealthChecks(): Promise<HealthResponse> {
+export async function runHealthChecks(
+  options: { now?: number } = {}
+): Promise<HealthResponse> {
   const timestamp = new Date().toISOString();
   const version = process.env.npm_package_version ?? "0.1.0";
 
@@ -313,10 +394,16 @@ export async function runHealthChecks(): Promise<HealthResponse> {
     }
   }
 
-  // Contract sync status
+  // Contract sync status + lag (issue #659). A lagging or stalled sync
+  // degrades this check (and, through it, the overall status) even when the
+  // most recent run itself succeeded.
   const lastSync = getContractSyncHealth();
+  const lag = getContractSyncLagState({ now: options.now ?? Date.now() });
+  const lagHealthStatus: HealthStatus = lag.status === "ok" ? "ok" : "degraded";
   const contractSyncStatus: HealthStatus =
-    lastSync?.status === "error" ? "degraded" : "ok";
+    lastSync?.status === "error" || lagHealthStatus === "degraded"
+      ? "degraded"
+      : "ok";
 
   // Overall status
   let overallStatus: HealthStatus = "ok";
@@ -345,6 +432,16 @@ export async function runHealthChecks(): Promise<HealthResponse> {
         status: contractSyncStatus,
         lastRunAt: lastSync?.startedAt ?? null,
         ...(lastSync?.errors?.length ? { lastError: lastSync.errors.join("; ") } : {}),
+        lag: {
+          status: lagHealthStatus,
+          lagStatus: lag.status,
+          reason: lag.reason,
+          sinceLastSuccessMs: lag.sinceLastSuccessMs,
+          sinceLastCursorAdvanceMs: lag.sinceLastCursorAdvanceMs,
+          thresholdMs: lag.thresholdMs,
+          stallThresholdMs: lag.stallThresholdMs,
+          cursor: lag.cursor,
+        },
       },
     },
     version,

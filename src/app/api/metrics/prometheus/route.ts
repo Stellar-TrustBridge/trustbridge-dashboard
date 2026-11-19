@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { requireOperator } from "@/lib/api-auth";
+import { getContractSyncAlertMetrics, getContractSyncLagState } from "@/lib/contract-sync";
 import { getHorizonCircuitBreakerMetrics } from "@/lib/horizon";
 import { getRateLimitMetrics } from "@/lib/rate-limit";
 import { getContributors } from "@/lib/registrations";
@@ -76,6 +77,8 @@ export async function GET(request: NextRequest) {
 
   const circuitBreaker = getHorizonCircuitBreakerMetrics();
   const rateLimit = getRateLimitMetrics();
+  const contractLag = getContractSyncLagState();
+  const contractAlerts = getContractSyncAlertMetrics();
   const { contributors } = await getContributors();
   const readiness = summarizeContributors(contributors);
   const staleness = buildStalenessSummary(contributors);
@@ -189,7 +192,77 @@ export async function GET(request: NextRequest) {
     },
   ];
 
-  const body = formatPrometheus(metrics);
+  // Contract sync lag (issue #659). -1 seconds means "no observation yet".
+  const lagStatusValue =
+    contractLag.status === "ok" ? 0 : contractLag.status === "lagging" ? 1 : 2;
+  const lagMetrics: PrometheusMetric[] = [
+    {
+      name: "trustbridge_contract_sync_lag_status",
+      help: "Contract sync lag status: 0=ok 1=lagging 2=stalled (see reason label semantics in docs/ARCHITECTURE.md)",
+      type: "gauge",
+      samples: [
+        { labels: { reason: contractLag.reason }, value: lagStatusValue },
+      ],
+    },
+    {
+      name: "trustbridge_contract_sync_since_last_success_seconds",
+      help: "Seconds since the last fully successful contract sync, or -1 if none in this process",
+      type: "gauge",
+      samples: [
+        {
+          value:
+            contractLag.sinceLastSuccessMs === null
+              ? -1
+              : Math.round(contractLag.sinceLastSuccessMs / 1000),
+        },
+      ],
+    },
+    {
+      name: "trustbridge_contract_sync_since_last_cursor_advance_seconds",
+      help: "Seconds since the observed Soroban RPC cursor last advanced, or -1 if none observed",
+      type: "gauge",
+      samples: [
+        {
+          value:
+            contractLag.sinceLastCursorAdvanceMs === null
+              ? -1
+              : Math.round(contractLag.sinceLastCursorAdvanceMs / 1000),
+        },
+      ],
+    },
+    {
+      name: "trustbridge_contract_sync_lag_threshold_seconds",
+      help: "Configured contract sync lag threshold in seconds (CONTRACT_SYNC_LAG_THRESHOLD_MS)",
+      type: "gauge",
+      samples: [{ value: Math.round(contractLag.thresholdMs / 1000) }],
+    },
+    {
+      name: "trustbridge_contract_sync_stall_threshold_seconds",
+      help: "Configured contract sync stall threshold in seconds (CONTRACT_SYNC_STALL_THRESHOLD_MS)",
+      type: "gauge",
+      samples: [{ value: Math.round(contractLag.stallThresholdMs / 1000) }],
+    },
+    {
+      name: "trustbridge_contract_sync_last_success_timestamp_seconds",
+      help: "Unix timestamp of the last fully successful contract sync, or 0 if none in this process",
+      type: "gauge",
+      samples: [
+        {
+          value: contractLag.lastSuccessAt
+            ? Math.floor(Date.parse(contractLag.lastSuccessAt) / 1000)
+            : 0,
+        },
+      ],
+    },
+    {
+      name: "trustbridge_contract_sync_lag_alerts_total",
+      help: "Contract sync lag alerts successfully delivered since process start (process-local)",
+      type: "counter",
+      samples: [{ value: contractAlerts.sentCount }],
+    },
+  ];
+
+  const body = formatPrometheus([...metrics, ...lagMetrics]);
 
   return new NextResponse(body, {
     status: 200,

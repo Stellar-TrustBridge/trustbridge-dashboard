@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GET } from "@/app/api/health/route";
 
 // ---------------------------------------------------------------------------
@@ -27,6 +27,7 @@ vi.stubGlobal("fetch", mockFetch);
 
 import { prisma } from "@/lib/prisma";
 import { buildStalenessSummary } from "@/lib/stale-export";
+import { parseHealthResponse, runHealthChecks } from "@/lib/health";
 import type { HealthResponse } from "@/app/api/health/route";
 
 // ---------------------------------------------------------------------------
@@ -234,5 +235,94 @@ describe("GET /api/health", () => {
     const res = await GET();
     const json: HealthResponse = await res.json();
     expect(json.checks.database.error).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Contract sync lag (issue #659)
+// ---------------------------------------------------------------------------
+describe("contract sync lag in health checks", () => {
+  const STALL_MS = 60 * 60 * 1000;
+
+  beforeEach(() => {
+    mockProbesOk();
+    vi.mocked(prisma.$queryRaw).mockResolvedValue([{ "?column?": 1 }]);
+    vi.mocked(prisma.registration.findMany).mockResolvedValue([] as never);
+    vi.mocked(buildStalenessSummary).mockReturnValue(freshSummary());
+  });
+
+  it("keeps contract sync ok within the grace period (no successful run yet)", async () => {
+    const json = await runHealthChecks({ now: Date.now() + 1_000 });
+
+    expect(json.checks.contractSync.lag).toMatchObject({
+      status: "ok",
+      lagStatus: "ok",
+      reason: "no_data",
+    });
+    expect(json.checks.contractSync.status).toBe("ok");
+    expect(json.status).toBe("ok");
+  });
+
+  it("degrades overall health when no sync has succeeded past the stall threshold", async () => {
+    const json = await runHealthChecks({ now: Date.now() + STALL_MS + 60_000 });
+
+    expect(json.checks.contractSync.lag.lagStatus).toBe("stalled");
+    expect(json.checks.contractSync.lag.reason).toBe("never_succeeded");
+    expect(json.checks.contractSync.lag.stallThresholdMs).toBe(STALL_MS);
+    expect(json.checks.contractSync.status).toBe("degraded");
+    expect(json.status).toBe("degraded");
+    expect(json.checks.database.status).toBe("ok");
+  });
+
+  it("parseHealthResponse preserves a well-formed lag block", () => {
+    const parsed = parseHealthResponse({
+      status: "degraded",
+      timestamp: "2026-01-01T00:00:00.000Z",
+      checks: {
+        contractSync: {
+          status: "degraded",
+          lastRunAt: "2026-01-01T00:00:00.000Z",
+          lag: {
+            status: "degraded",
+            lagStatus: "lagging",
+            reason: "sync_delayed",
+            sinceLastSuccessMs: 1_200_000,
+            sinceLastCursorAdvanceMs: null,
+            thresholdMs: 900_000,
+            stallThresholdMs: 3_600_000,
+            cursor: "ledger-7",
+          },
+        },
+      },
+      version: "0.1.0",
+    });
+
+    expect(parsed?.checks.contractSync.lag).toEqual({
+      status: "degraded",
+      lagStatus: "lagging",
+      reason: "sync_delayed",
+      sinceLastSuccessMs: 1_200_000,
+      sinceLastCursorAdvanceMs: null,
+      thresholdMs: 900_000,
+      stallThresholdMs: 3_600_000,
+      cursor: "ledger-7",
+    });
+  });
+
+  it("parseHealthResponse coerces a payload without a lag block to ok", () => {
+    const parsed = parseHealthResponse({
+      status: "ok",
+      timestamp: "2026-01-01T00:00:00.000Z",
+      checks: { contractSync: { status: "ok", lastRunAt: null } },
+      version: "0.1.0",
+    });
+
+    expect(parsed?.checks.contractSync.lag).toMatchObject({
+      status: "ok",
+      lagStatus: "ok",
+      reason: "no_data",
+      sinceLastSuccessMs: null,
+      cursor: null,
+    });
   });
 });

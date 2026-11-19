@@ -160,6 +160,20 @@ describe("Prometheus metrics endpoint", () => {
       expect(body).toMatch(/^trustbridge_circuit_breaker_state 0$/m);
     });
 
+    it("exports contract sync lag metrics (issue #659)", async () => {
+      const resp = await prometheusRoute.GET(buildRequest());
+      const body = await resp.text();
+
+      expect(body).toContain("# HELP trustbridge_contract_sync_lag_status");
+      // Fresh process, no successful sync yet → 0=ok, no observations (-1).
+      expect(body).toMatch(/^trustbridge_contract_sync_lag_status\{reason="no_data"\} 0$/m);
+      expect(body).toMatch(/^trustbridge_contract_sync_since_last_success_seconds -1$/m);
+      expect(body).toMatch(/^trustbridge_contract_sync_since_last_cursor_advance_seconds -1$/m);
+      expect(body).toMatch(/^trustbridge_contract_sync_lag_threshold_seconds 900$/m);
+      expect(body).toMatch(/^trustbridge_contract_sync_stall_threshold_seconds 3600$/m);
+      expect(body).toMatch(/^trustbridge_contract_sync_lag_alerts_total 0$/m);
+    });
+
     it("includes counter metrics for trips and rate limit counts", async () => {
       const resp = await prometheusRoute.GET(buildRequest());
       const body = await resp.text();

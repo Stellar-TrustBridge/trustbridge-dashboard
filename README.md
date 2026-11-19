@@ -198,13 +198,14 @@ Full index: [docs/README.md](./docs/README.md)
 | `/api/actions/lookup` | GET | Cached Horizon readiness lookup + wizard `nextAction` guidance, `?address=G...` — **publicly cached** (30 s TTL) |
 | `/api/soroban/events` | GET | Recent events for `SOROBAN_CONTRACT_ID` (maintainer only) |
 | `/api/settings/network` | GET | Resolved Horizon/Soroban network + mismatch warnings (maintainer only) |
-| `/api/contract-sync` | GET/POST | GET: last sync result (public). POST: trigger a contract-to-Postgres sync (maintainer session or `CRON_SECRET`) |
+| `/api/contract-sync` | GET/POST | GET: last sync result + `lag` state (public). POST: trigger a contract-to-Postgres sync (maintainer session or `CRON_SECRET`) |
 | `/api/cron/export` | GET/POST | GET: last export result (public). POST: trigger an automated nightly treasury CSV dump (maintainer session or `CRON_SECRET`) |
 
 ### Contract-to-Postgres sync job
 
 - **`src/lib/contract-sync.ts`** re-syncs Postgres registration state against Horizon-verified funded/trustline/balance state, intended to be driven by a scheduler (e.g. Vercel Cron) rather than a maintainer clicking "recheck all". Trigger with `POST /api/contract-sync` (maintainer session, or a scheduler presenting `Authorization: Bearer $CRON_SECRET`); read the last run via `GET /api/contract-sync` or the `contractSync` block of `/api/health`.
 - Rate-limited via `CONTRACT_SYNC_MIN_INTERVAL_MS` (default 60s) so a mis-configured scheduler can't fan out into repeated full-table Horizon sweeps, and never throws — Horizon/RPC outages and DB errors are captured in the result instead of raising a 500.
+- **Lag monitoring (issue #659):** the last successful run and the observed Soroban RPC cursor are tracked in-process; when progress ages past `CONTRACT_SYNC_LAG_THRESHOLD_MS` (15 min) or `CONTRACT_SYNC_STALL_THRESHOLD_MS` (60 min), the state is surfaced in `GET /api/health` (`checks.contractSync.lag`), `GET /api/contract-sync` (`lag`) and `/api/metrics/prometheus`, and an optional maintainer webhook (`CONTRACT_SYNC_ALERT_WEBHOOK_URL`) is notified once per stall episode. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#lag-monitoring-health--alerts-issue-659).
 
 ### Nightly treasury CSV export cron
 

@@ -52,6 +52,10 @@ vi.mock("stellar-sdk", () => ({
 import { recordAuditLog } from "@/lib/audit";
 import { prisma } from "@/lib/prisma";
 import {
+  evaluateContractSyncLag,
+  getContractSyncAlertMetrics,
+  getContractSyncLagState,
+  getContractSyncLagThresholdMs,
   getContractSyncHealth,
   resetContractSyncState,
   syncContractToPostgres,
@@ -78,6 +82,11 @@ describe("contract-sync", () => {
     resetContractSyncState();
     delete process.env.CONTRACT_SYNC_MIN_INTERVAL_MS;
     delete process.env.SOROBAN_CONTRACT_ID;
+    delete process.env.CONTRACT_SYNC_LAG_THRESHOLD_MS;
+    delete process.env.CONTRACT_SYNC_STALL_THRESHOLD_MS;
+    delete process.env.CONTRACT_SYNC_ALERT_WEBHOOK_URL;
+    delete process.env.CONTRACT_SYNC_ALERT_COOLDOWN_MS;
+    delete process.env.CONTRACT_SYNC_ALERT_PAGERDUTY_KEY;
     mockContractCall.mockResolvedValue([]);
     mockScValToNative.mockReturnValue([]);
     vi.mocked(prisma.registration.findMany).mockResolvedValue([]);
@@ -88,6 +97,7 @@ describe("contract-sync", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    vi.unstubAllGlobals();
   });
 
   // ------------------------------------------------------------------
@@ -449,6 +459,319 @@ describe("contract-sync", () => {
 
       expect(result.status).toBe("error");
       expect(result.errors).toContain("RPC unavailable");
+    });
+  });
+
+  // ------------------------------------------------------------------
+  // Lag monitoring (issue #659): injected clocks + cursors only — these
+  // tests never touch a real RPC endpoint or wall-clock timers.
+  // ------------------------------------------------------------------
+
+  describe("lag monitoring", () => {
+    const LAG_MS = 15 * 60 * 1000;
+    const STALL_MS = 60 * 60 * 1000;
+    let now: number;
+    const clock = () => now;
+
+    beforeEach(() => {
+      now = Date.parse("2026-01-01T00:00:00.000Z");
+      process.env.CONTRACT_SYNC_MIN_INTERVAL_MS = "0";
+      process.env.SOROBAN_CONTRACT_ID = "CABC123";
+      // Reset again so `processStartedAt` lines up with the injected epoch.
+      resetContractSyncState();
+    });
+
+    async function runOk(cursor: string | null = null) {
+      return syncContractToPostgres({ now: clock, cursor });
+    }
+
+    it("reports ok progress right after a successful run", async () => {
+      const result = await runOk("ledger-100");
+
+      expect(result.status).toBe("ok");
+      const lag = getContractSyncLagState({ now });
+      expect(lag.status).toBe("ok");
+      expect(lag.reason).toBe("ok");
+      expect(lag.sinceLastSuccessMs).toBe(0);
+      expect(lag.cursor).toBe("ledger-100");
+      expect(lag.sinceLastCursorAdvanceMs).toBe(0);
+      expect(lag.thresholdMs).toBe(LAG_MS);
+      expect(lag.stallThresholdMs).toBe(STALL_MS);
+    });
+
+    it("flags sync_delayed once the lag threshold passes and sync_stalled past the stall threshold", async () => {
+      await runOk("ledger-100");
+
+      now += LAG_MS;
+      let lag = getContractSyncLagState({ now });
+      expect(lag.status).toBe("lagging");
+      expect(lag.reason).toBe("sync_delayed");
+      expect(lag.sinceLastSuccessMs).toBe(LAG_MS);
+
+      now += STALL_MS - LAG_MS; // total = stall threshold since last success
+      lag = getContractSyncLagState({ now });
+      expect(lag.status).toBe("stalled");
+      expect(lag.reason).toBe("sync_stalled");
+    });
+
+    it("flags a frozen RPC cursor as cursor_stalled even while runs keep succeeding", async () => {
+      await runOk("ledger-100");
+      now += 60 * 1000;
+      await runOk("ledger-100"); // cursor unchanged — run still succeeds
+
+      now += STALL_MS;
+      await runOk("ledger-100"); // runs are fresh, but the cursor has not moved
+      const lag = getContractSyncLagState({ now });
+      expect(lag.status).toBe("stalled");
+      expect(lag.reason).toBe("cursor_stalled");
+      expect(lag.cursor).toBe("ledger-100");
+      expect(lag.sinceLastSuccessMs).toBe(0);
+      expect(lag.sinceLastCursorAdvanceMs).toBe(60 * 1000 + STALL_MS);
+    });
+
+    it("recovers to ok when the cursor advances after a stall", async () => {
+      await runOk("ledger-100");
+      now += 60 * 1000;
+      await runOk("ledger-100");
+      now += STALL_MS;
+      await runOk("ledger-100");
+      expect(getContractSyncLagState({ now }).reason).toBe("cursor_stalled");
+
+      // RPC starts moving again: a new cursor value resets the stall clock.
+      now += 60 * 1000;
+      await runOk("ledger-200");
+      const lag = getContractSyncLagState({ now });
+      expect(lag.status).toBe("ok");
+      expect(lag.reason).toBe("ok");
+      expect(lag.sinceLastCursorAdvanceMs).toBe(0);
+      expect(lag.cursor).toBe("ledger-200");
+    });
+
+    it("recovers to ok when a successful run lands after a sync stall", async () => {
+      await runOk("ledger-100");
+      now += STALL_MS + LAG_MS;
+      expect(getContractSyncLagState({ now }).reason).toBe("sync_stalled");
+
+      await runOk("ledger-101");
+      const lag = getContractSyncLagState({ now });
+      expect(lag.status).toBe("ok");
+      expect(lag.reason).toBe("ok");
+      expect(lag.sinceLastSuccessMs).toBe(0);
+    });
+
+    it("reports never_succeeded once the process is older than the stall threshold with no success", () => {
+      const lag = getContractSyncLagState({ now: Date.now() + STALL_MS + 60_000 });
+      expect(lag.status).toBe("stalled");
+      expect(lag.reason).toBe("never_succeeded");
+      expect(lag.lastSuccessAt).toBeNull();
+    });
+
+    it("treats an unconfigured contract as intentionally idle, not stalled", async () => {
+      delete process.env.SOROBAN_CONTRACT_ID;
+
+      const result = await syncContractToPostgres({ now: clock });
+      expect(result.failureMode).toBe("contract_not_configured");
+
+      const lag = getContractSyncLagState({ now: now + STALL_MS * 2 });
+      expect(lag.status).toBe("ok");
+      expect(lag.reason).toBe("not_configured");
+    });
+
+    it("falls back to documented defaults when the threshold configuration is invalid", () => {
+      process.env.CONTRACT_SYNC_LAG_THRESHOLD_MS = "not-a-number";
+      process.env.CONTRACT_SYNC_STALL_THRESHOLD_MS = "-5";
+      expect(getContractSyncLagThresholdMs()).toBe(LAG_MS);
+      expect(getContractSyncLagState({ now }).stallThresholdMs).toBe(STALL_MS);
+    });
+
+    it("does not record progress when the Postgres merge fails", async () => {
+      await runOk("ledger-100");
+      now += 60 * 1000;
+      vi.mocked(prisma.registration.findMany).mockRejectedValue(new Error("db down"));
+
+      const result = await syncContractToPostgres({ now: clock, cursor: "ledger-101" });
+      expect(result.status).toBe("error");
+
+      // The failed run must not refresh progress: the lag clock keeps ticking
+      // from the last fully successful run.
+      now += STALL_MS;
+      const lag = getContractSyncLagState({ now });
+      expect(lag.status).toBe("stalled");
+      expect(lag.reason).toBe("sync_stalled");
+      expect(lag.sinceLastSuccessMs).toBe(60_000 + STALL_MS);
+      vi.mocked(prisma.registration.findMany).mockResolvedValue([]);
+    });
+
+    describe("maintainer alerts", () => {
+      const WEBHOOK = "https://hooks.example.test/contract-sync";
+      let fetchMock: ReturnType<typeof vi.fn>;
+
+      beforeEach(() => {
+        process.env.CONTRACT_SYNC_ALERT_WEBHOOK_URL = WEBHOOK;
+        process.env.CONTRACT_SYNC_ALERT_COOLDOWN_MS = "1000";
+        fetchMock = vi.fn(async () => ({ ok: true }) as Response);
+        vi.stubGlobal("fetch", fetchMock);
+      });
+
+      it("notifies once per stall episode and stays silent while the stall persists", async () => {
+        // Runs keep succeeding but the RPC cursor never advances: after the
+        // stall threshold the state flips to cursor_stalled and alerts once.
+        await runOk("ledger-100");
+        now += 60_000;
+        await runOk("ledger-100");
+        expect(getContractSyncLagState({ now }).status).toBe("ok");
+
+        now += STALL_MS;
+        await runOk("ledger-100");
+        expect(getContractSyncLagState({ now }).reason).toBe("cursor_stalled");
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(getContractSyncAlertMetrics().sentCount).toBe(1);
+
+        // Sustained stall: further runs in the same episode stay silent.
+        now += 60_000;
+        await runOk("ledger-100");
+        now += 60_000;
+        await runOk("ledger-100");
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(getContractSyncAlertMetrics().sentCount).toBe(1);
+      });
+
+      it("alerts when repeated failing runs leave the sync stalled", async () => {
+        await runOk("ledger-100");
+
+        // RPC starts failing: no further progress is recorded.
+        mockContractCall.mockImplementation(() => {
+          throw new Error("RPC unavailable");
+        });
+        now += STALL_MS + 1000;
+        const result = await syncContractToPostgres({ now: clock });
+        expect(result.status).toBe("error");
+
+        expect(getContractSyncLagState({ now }).reason).toBe("sync_stalled");
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+
+        const payload = fetchMock.mock.calls[0][1]?.body
+          ? JSON.parse(fetchMock.mock.calls[0][1].body as string)
+          : null;
+        expect(payload).toMatchObject({
+          source: "trustbridge-contract-sync",
+          status: "stalled",
+          reason: "sync_stalled",
+        });
+        expect(payload.text).toContain("🚨");
+      });
+
+      it("closes the episode on recovery so a later stall notifies again", async () => {
+        await runOk("ledger-100");
+        now += 60_000;
+        await runOk("ledger-100");
+        now += STALL_MS;
+        await runOk("ledger-100"); // cursor_stalled → first alert
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+
+        // Recovery: the cursor advances, closing the episode.
+        now += 1000;
+        await runOk("ledger-200");
+        expect(getContractSyncLagState({ now }).status).toBe("ok");
+
+        // New stall, past the alert cooldown: a second notification is sent.
+        now += STALL_MS + 2000;
+        await runOk("ledger-200");
+        expect(getContractSyncLagState({ now }).reason).toBe("cursor_stalled");
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+        expect(getContractSyncAlertMetrics().sentCount).toBe(2);
+      });
+
+      it("never throws and throttles retries when webhook delivery fails", async () => {
+        vi.spyOn(console, "error").mockImplementation(() => {});
+        fetchMock.mockRejectedValue(new Error("webhook unreachable"));
+
+        await runOk("ledger-100");
+        now += 60_000;
+        await runOk("ledger-100");
+        now += STALL_MS;
+
+        await expect(syncContractToPostgres({ now: clock, cursor: "ledger-100" })).resolves.toMatchObject({
+          status: "ok",
+        });
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(getContractSyncAlertMetrics().sentCount).toBe(0);
+
+        // Inside the cooldown: no second delivery attempt.
+        now += 500;
+        await syncContractToPostgres({ now: clock, cursor: "ledger-100" });
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+
+        // Past the cooldown: the failed episode is retried.
+        now += 1000;
+        await syncContractToPostgres({ now: clock, cursor: "ledger-100" });
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+      });
+
+      it("treats a non-OK webhook response as a failed delivery", async () => {
+        fetchMock.mockResolvedValue({ ok: false, status: 500 } as Response);
+
+        await runOk("ledger-100");
+        now += 60_000;
+        await runOk("ledger-100");
+        now += STALL_MS;
+        await runOk("ledger-100");
+
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(getContractSyncAlertMetrics().sentCount).toBe(0);
+        expect(getContractSyncAlertMetrics().lastSentAt).toBeNull();
+      });
+
+      it("does not alert when no webhook is configured", async () => {
+        delete process.env.CONTRACT_SYNC_ALERT_WEBHOOK_URL;
+
+        await runOk("ledger-100");
+        now += 60_000;
+        await runOk("ledger-100");
+        now += STALL_MS;
+        await runOk("ledger-100");
+
+        expect(getContractSyncLagState({ now }).status).toBe("stalled");
+        expect(fetchMock).not.toHaveBeenCalled();
+        expect(getContractSyncAlertMetrics().sentCount).toBe(0);
+      });
+    });
+
+    describe("pure evaluation boundaries", () => {
+      const snapshotBase = {
+        processStartedAt: 1_000,
+        lastSuccessAt: null as number | null,
+        cursor: null as { value: string; advancedAt: number } | null,
+      };
+
+      it("is ok below the lag threshold, lagging exactly at it", () => {
+        const thresholds = { thresholdMs: LAG_MS, stallThresholdMs: STALL_MS };
+        const lastSuccessAt = 10_000;
+
+        expect(
+          evaluateContractSyncLag({ ...snapshotBase, now: 10_000 + LAG_MS - 1, lastSuccessAt }, thresholds).status
+        ).toBe("ok");
+        expect(
+          evaluateContractSyncLag({ ...snapshotBase, now: 10_000 + LAG_MS, lastSuccessAt }, thresholds).status
+        ).toBe("lagging");
+        expect(
+          evaluateContractSyncLag({ ...snapshotBase, now: 10_000 + STALL_MS, lastSuccessAt }, thresholds)
+        ).toMatchObject({ status: "stalled", reason: "sync_stalled" });
+      });
+
+      it("stays ok while the cursor advances within the stall window", () => {
+        const thresholds = { thresholdMs: LAG_MS, stallThresholdMs: STALL_MS };
+        const cursor = { value: "ledger-1", advancedAt: 20_000 };
+        const now = 20_000 + STALL_MS - 1;
+        const lastSuccessAt = now - 1; // recent success, frozen cursor
+
+        const lag = evaluateContractSyncLag(
+          { ...snapshotBase, now, lastSuccessAt, cursor },
+          thresholds
+        );
+        expect(lag).toMatchObject({ status: "ok", reason: "ok" });
+        expect(lag.sinceLastCursorAdvanceMs).toBe(STALL_MS - 1);
+      });
     });
   });
 });

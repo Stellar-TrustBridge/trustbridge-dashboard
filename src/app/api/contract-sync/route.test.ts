@@ -13,14 +13,27 @@ vi.mock("@/lib/api-auth", () => ({
 vi.mock("@/lib/contract-sync", () => ({
   syncContractToPostgres: vi.fn(),
   getContractSyncHealth: vi.fn(),
+  getContractSyncLagState: vi.fn(),
 }));
 
 import { requireMaintainerSession } from "@/lib/api-auth";
 import {
   getContractSyncHealth,
+  getContractSyncLagState,
   syncContractToPostgres,
 } from "@/lib/contract-sync";
 import { GET, POST } from "@/app/api/contract-sync/route";
+
+const LAG_OK = {
+  status: "ok" as const,
+  reason: "no_data" as const,
+  sinceLastSuccessMs: null,
+  sinceLastCursorAdvanceMs: null,
+  thresholdMs: 900000,
+  stallThresholdMs: 3600000,
+  cursor: null,
+  lastSuccessAt: null,
+};
 
 function post(headers: Record<string, string> = {}) {
   return new NextRequest("http://localhost:3000/api/contract-sync", {
@@ -113,12 +126,34 @@ describe("GET /api/contract-sync", () => {
       startedAt: "2026-07-27T00:00:00.000Z",
       durationMs: 12,
     });
+    vi.mocked(getContractSyncLagState).mockReturnValue(LAG_OK);
 
     const res = await GET();
     const json = await res.json();
 
     expect(res.status).toBe(200);
     expect(json.lastRun.status).toBe("ok");
+    expect(syncContractToPostgres).not.toHaveBeenCalled();
+  });
+
+  it("exposes the lag state so monitors can detect a stalled cursor (#659)", async () => {
+    vi.mocked(getContractSyncHealth).mockReturnValue(null);
+    vi.mocked(getContractSyncLagState).mockReturnValue({
+      ...LAG_OK,
+      status: "stalled",
+      reason: "sync_stalled",
+      sinceLastSuccessMs: 7200000,
+    });
+
+    const res = await GET();
+    const json = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(json.lag).toMatchObject({
+      status: "stalled",
+      reason: "sync_stalled",
+      sinceLastSuccessMs: 7200000,
+    });
     expect(syncContractToPostgres).not.toHaveBeenCalled();
   });
 });

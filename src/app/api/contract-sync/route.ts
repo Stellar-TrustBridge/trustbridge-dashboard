@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { isAuthorizedScheduler, requireMaintainerSession } from "@/lib/api-auth";
 import {
   getContractSyncHealth,
+  getContractSyncLagState,
   syncContractToPostgres,
 } from "@/lib/contract-sync";
 import { assertSameOrigin } from "@/lib/csrf";
@@ -46,11 +47,14 @@ export async function POST(request: NextRequest) {
 /**
  * GET /api/contract-sync
  *
- * Read-only status of the most recent sync run, for dashboards/monitoring.
+ * Read-only status of the most recent sync run plus the current lag state
+ * (`lag`, issue #659), for dashboards/monitoring.
  * Unauthenticated (no contributor PII — same posture as `/api/health`).
  */
 export async function GET() {
-  return withPublicCors(NextResponse.json({ lastRun: getContractSyncHealth() }));
+  return withPublicCors(
+    NextResponse.json({ lastRun: getContractSyncHealth(), lag: getContractSyncLagState() })
+  );
 }
 
 export function OPTIONS() {
