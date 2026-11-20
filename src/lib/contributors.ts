@@ -175,3 +175,29 @@ export function sortContributors(
 export function countReadyContributors(contributors: ContributorRow[]): number {
   return contributors.filter((row) => row.readiness === "ready").length;
 }
+
+// ── Duplicate wallet claim conflict (#694) ───────────────────────────────────
+//
+// One copy for every path that rejects a wallet already claimed by someone
+// else: POST /api/register (pre-check and P2002 race), the maintainer restore
+// route, and the register form's fallback in register-error.ts. Each rejection
+// from /api/register is also recorded as a RegistrationConflict that
+// maintainers review via GET /api/maintainer/conflicts — see
+// docs/MAINTAINER_WORKFLOW.md § "Duplicate Wallet Claim Conflicts".
+
+/** Machine-readable code; matches REGISTER_ERROR_CODES.addressTaken. */
+export const WALLET_CLAIM_CONFLICT_CODE = "ADDRESS_TAKEN" as const;
+
+/** User-facing copy: what happened, and the two next steps. */
+export const WALLET_CLAIM_CONFLICT_MESSAGE =
+  "That Stellar address is already registered to another contributor. " +
+  "Use a different wallet address, or contact a maintainer if you believe it is yours — " +
+  "the conflict has been logged for maintainer review.";
+
+/** JSON body for a 409 duplicate wallet claim response. */
+export function walletClaimConflictBody(): {
+  error: string;
+  code: typeof WALLET_CLAIM_CONFLICT_CODE;
+} {
+  return { error: WALLET_CLAIM_CONFLICT_MESSAGE, code: WALLET_CLAIM_CONFLICT_CODE };
+}

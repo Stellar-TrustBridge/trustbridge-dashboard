@@ -5,6 +5,7 @@ import { assertSameOrigin } from "@/lib/csrf";
 import { invalidateContributorListCaches } from "@/lib/cache-tags";
 import { recordAuditLog } from "@/lib/audit";
 import { prisma } from "@/lib/prisma";
+import { walletClaimConflictBody } from "@/lib/contributors";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -52,7 +53,7 @@ export async function POST(
   } catch (error) {
     if ((error as { code?: string }).code === "P2002") {
       return NextResponse.json(
-        { error: "This Stellar address is already actively registered" },
+        walletClaimConflictBody(),
         { status: 409 }
       );
     }

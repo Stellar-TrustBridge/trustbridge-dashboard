@@ -8,7 +8,11 @@ import {
   filterContributors,
   searchContributors,
   sortContributors,
+  WALLET_CLAIM_CONFLICT_CODE,
+  WALLET_CLAIM_CONFLICT_MESSAGE,
+  walletClaimConflictBody,
 } from "@/lib/contributors";
+import { mapRegisterError } from "@/lib/register-error";
 import type { ContributorRow } from "@/types";
 
 // ── Fixtures ──────────────────────────────────────────────────────────────
@@ -190,5 +194,43 @@ describe("CONTRIBUTOR_COLUMNS / defaultVisibleColumns", () => {
       expect(col.key).toBeTruthy();
       expect(col.label).toBeTruthy();
     }
+  });
+});
+
+// ── Duplicate wallet claim conflict copy (#694) ──────────────────────────────
+
+describe("wallet claim conflict copy", () => {
+  it("locks the user-facing message and its next steps", () => {
+    expect(WALLET_CLAIM_CONFLICT_MESSAGE).toMatchInlineSnapshot(
+      `"That Stellar address is already registered to another contributor. Use a different wallet address, or contact a maintainer if you believe it is yours — the conflict has been logged for maintainer review."`
+    );
+  });
+
+  it("builds the 409 response body with the ADDRESS_TAKEN code", () => {
+    expect(walletClaimConflictBody()).toEqual({
+      error: WALLET_CLAIM_CONFLICT_MESSAGE,
+      code: "ADDRESS_TAKEN",
+    });
+    expect(WALLET_CLAIM_CONFLICT_CODE).toBe("ADDRESS_TAKEN");
+  });
+
+  it("shows the server copy unchanged in the register form", () => {
+    const failure = mapRegisterError(409, walletClaimConflictBody());
+    expect(failure.kind).toBe("address_taken");
+    expect(failure.message).toBe(WALLET_CLAIM_CONFLICT_MESSAGE);
+    expect(failure.keepAddress).toBe(false);
+  });
+
+  it("falls back to the same copy when the 409 body is missing", () => {
+    expect(mapRegisterError(409, null).message).toBe(WALLET_CLAIM_CONFLICT_MESSAGE);
+  });
+
+  it("falls back to the same copy when the server message is blank", () => {
+    const failure = mapRegisterError(409, { error: "   ", code: "ADDRESS_TAKEN" });
+    expect(failure.message).toBe(WALLET_CLAIM_CONFLICT_MESSAGE);
+  });
+
+  it("does not use conflict copy for non-conflict failures", () => {
+    expect(mapRegisterError(401, null).message).not.toBe(WALLET_CLAIM_CONFLICT_MESSAGE);
   });
 });

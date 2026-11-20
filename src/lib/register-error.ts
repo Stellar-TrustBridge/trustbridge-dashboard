@@ -1,3 +1,5 @@
+import { WALLET_CLAIM_CONFLICT_MESSAGE } from "@/lib/contributors";
+
 /**
  * Client-side interpretation of `POST /api/register` failures (issue #146).
  *
@@ -62,9 +64,7 @@ export function mapRegisterError(
   if (code === "ADDRESS_TAKEN" || status === 409) {
     return {
       kind: "address_taken",
-      message:
-        serverMessage(body) ??
-        "That Stellar address is already registered to another contributor. Use a different wallet address, or contact a maintainer if you believe it is yours.",
+      message: serverMessage(body) ?? WALLET_CLAIM_CONFLICT_MESSAGE,
       keepAddress: false,
       requiresSignIn: false,
     };

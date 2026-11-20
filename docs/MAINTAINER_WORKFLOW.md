@@ -98,6 +98,34 @@ To prevent roster changes or rechecks from shuffling readiness states immediatel
 
 ---
 
+## 4a. Duplicate Wallet Claim Conflicts
+
+When a contributor submits a Stellar address that another user already holds,
+`POST /api/register` returns `409` with:
+
+```json
+{
+  "error": "That Stellar address is already registered to another contributor. Use a different wallet address, or contact a maintainer if you believe it is yours — the conflict has been logged for maintainer review.",
+  "code": "ADDRESS_TAKEN"
+}
+```
+
+The same body is returned by `POST /api/registrations/:id/restore` when the
+restored address has since been claimed. The copy lives in
+`src/lib/contributors.ts` (`WALLET_CLAIM_CONFLICT_MESSAGE`) and is locked by
+`tests/unit/contributors.test.ts`; change it there, not per route.
+
+Each rejected registration writes a `RegistrationConflict` row and a
+`registration.conflict` audit event. To resolve one:
+
+1. List open conflicts for your org: `GET /api/maintainer/conflicts`
+   (maintainer session required; `401` signed out, `403` non-maintainer).
+2. Ask the claimant to prove control of the address (e.g. a signed message).
+3. If they own it, soft-delete the existing registration so the claimant can
+   register; otherwise tell them to use a different wallet.
+
+---
+
 ## 5. Soroban Event Cursor Reset
 
 When operators need to re-index or re-sync Soroban events from a specific ledger or genesis:

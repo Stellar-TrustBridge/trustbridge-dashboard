@@ -20,6 +20,7 @@ import { recordInitialAddress, recordAddressChange } from "@/lib/address-history
 import { enforceFreezeWindowGuard } from "@/lib/freeze-window";
 import { evaluateAndAuditAddressChangeAnomaly } from "@/lib/address-anomaly";
 import { isUserBanned } from "@/lib/ban-service";
+import { walletClaimConflictBody } from "@/lib/contributors";
 import {
   trackServerRegistrationCreated,
   trackServerRegistrationUpdated,
@@ -188,10 +189,7 @@ export async function POST(request: NextRequest) {
       ]);
 
       return NextResponse.json(
-        {
-          error: "This Stellar address is already registered to another user",
-          code: REGISTER_ERROR_CODES.addressTaken,
-        },
+        walletClaimConflictBody(),
         { status: 409 }
       );
     }
@@ -404,10 +402,7 @@ export async function POST(request: NextRequest) {
       }
 
       return NextResponse.json(
-        {
-          error: "This Stellar address is already registered to another user",
-          code: REGISTER_ERROR_CODES.addressTaken,
-        },
+        walletClaimConflictBody(),
         { status: 409 }
       );
     }
