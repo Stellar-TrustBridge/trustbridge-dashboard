@@ -3,14 +3,37 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireMaintainerSession } from "@/lib/api-auth";
 import { assertSameOrigin } from "@/lib/csrf";
 import { invalidateContributorListCaches } from "@/lib/cache-tags";
-import { banContributor, unbanContributor } from "@/lib/ban-service";
+import {
+  banContributor,
+  unbanContributor,
+  BanServiceError,
+} from "@/lib/ban-service";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+function banErrorResponse(error: unknown): NextResponse {
+  if (error instanceof BanServiceError) {
+    const status =
+      error.code === "SELF_UNBAN_FORBIDDEN" || error.code === "SELF_BAN_FORBIDDEN"
+        ? 403
+        : error.code === "REASON_REQUIRED" || error.code === "INVALID_APPEAL_OUTCOME"
+          ? 400
+          : 500;
+    return NextResponse.json(
+      { error: error.message, code: error.code },
+      { status }
+    );
+  }
+  const message =
+    error instanceof Error ? error.message : "Failed to execute ban action.";
+  return NextResponse.json({ error: message }, { status: 500 });
+}
+
 /**
  * Maintainer endpoint for banning or unbanning a contributor by GitHub handle.
  * Requires maintainer session and a mandatory reason for bans.
+ * Self-ban/self-unban is rejected with 403 + code (issue #660).
  */
 export async function POST(request: NextRequest) {
   const csrf = assertSameOrigin(request);
@@ -18,7 +41,10 @@ export async function POST(request: NextRequest) {
 
   const session = await requireMaintainerSession();
   if (!session?.user?.id) {
-    return NextResponse.json({ error: "Forbidden. Maintainer access required." }, { status: 403 });
+    return NextResponse.json(
+      { error: "Forbidden. Maintainer access required." },
+      { status: 403 }
+    );
   }
 
   try {
@@ -35,12 +61,18 @@ export async function POST(request: NextRequest) {
     const locale = typeof body.locale === "string" ? body.locale : undefined;
 
     if (!githubUsername) {
-      return NextResponse.json({ error: "githubUsername is required." }, { status: 400 });
+      return NextResponse.json(
+        { error: "githubUsername is required." },
+        { status: 400 }
+      );
     }
 
     if (action === "ban") {
       if (!reason) {
-        return NextResponse.json({ error: "Reason is required to ban a contributor." }, { status: 400 });
+        return NextResponse.json(
+          { error: "Reason is required to ban a contributor." },
+          { status: 400 }
+        );
       }
 
       const result = await banContributor({
@@ -74,10 +106,12 @@ export async function POST(request: NextRequest) {
         details: result,
       });
     } else {
-      return NextResponse.json({ error: "Invalid action. Must be 'ban' or 'unban'." }, { status: 400 });
+      return NextResponse.json(
+        { error: "Invalid action. Must be 'ban' or 'unban'." },
+        { status: 400 }
+      );
     }
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to execute ban action.";
-    return NextResponse.json({ error: message }, { status: 500 });
+    return banErrorResponse(error);
   }
 }

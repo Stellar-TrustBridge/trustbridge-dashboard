@@ -121,6 +121,23 @@ const queryType = new GraphQLObjectType({
             extensions: { code: "FORBIDDEN" },
           });
         }
+        if (args.after) {
+          const { invalidCursor } = await import("@/lib/cursor-pagination").then(
+            (m) => m.validatePaginationOptions({ cursor: args.after })
+          );
+          if (invalidCursor) {
+            const { buildInvalidCursorError } = await import(
+              "@/lib/cursor-pagination"
+            );
+            const body = buildInvalidCursorError();
+            throw new GraphQLError(body.message, {
+              extensions: {
+                code: body.code,
+                remediation: body.remediation,
+              },
+            });
+          }
+        }
         return getContributorsPaginated(args.after, args.first, args.verificationStatus);
       },
     },

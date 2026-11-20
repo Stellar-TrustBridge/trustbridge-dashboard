@@ -32,6 +32,19 @@ export function useInfiniteContributors() {
         `/api/contributors/paginated?${params.toString()}`
       );
       if (!response.ok) {
+        const body = (await response.json().catch(() => null)) as {
+          code?: string;
+          message?: string;
+          remediation?: string;
+        } | null;
+        if (body?.code === "INVALID_CURSOR") {
+          // Stable invalid-cursor contract — do not silently restart at page 0.
+          throw new Error(
+            body.remediation
+              ? `${body.message} ${body.remediation}`
+              : body.message ?? "Invalid cursor"
+          );
+        }
         throw new Error("Failed to load contributors");
       }
 

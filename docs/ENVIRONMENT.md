@@ -247,6 +247,14 @@ FREEZE_WINDOW_ENABLED=false
 > [`docs/FEATURE_FLAGS.md`](./FEATURE_FLAGS.md) for the complementary
 > `maintenance_mode` feature flag.
 
+### `FEATURE_FLAG_<KEY>_ROLLOUT_PERCENT`
+
+Optional integer `0`–`100` sticky percentage rollout for a feature flag
+(issue #661). Unset or invalid values are ignored (full audience when the flag
+is on). See [FEATURE_FLAGS.md](./FEATURE_FLAGS.md#percentage-rollouts-sticky-bucketing-issue-661)
+for the FNV-1a bucketing algorithm and the flags API auth rules.
+
+
 ---
 
 ### `REGISTRY_MODE`

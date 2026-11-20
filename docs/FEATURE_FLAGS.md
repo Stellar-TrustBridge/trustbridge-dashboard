@@ -38,6 +38,42 @@ down.
 
 ---
 
+## Percentage rollouts (sticky bucketing, issue #661)
+
+A flag can be rolled out to a percentage of users or orgs without flickering
+the UI between evaluations. Set `FEATURE_FLAG_<KEY>_ROLLOUT_PERCENT` to an
+integer `0`–`100` (unset / invalid = full audience when the flag is on).
+
+### Algorithm
+
+1. Subject key = `${flagKey}:${scope}:${subjectId}` where `scope` is `user` or
+   `org` and `subjectId` is a **stable** id (GitHub user/org id — never a
+   display name that can change).
+2. FNV-1a 32-bit hash of that key → unsigned 32-bit integer.
+3. Bucket = `hash % 100` (range `0`–`99`).
+4. Subject is in the rollout iff `bucket < rolloutPercent`.
+
+**Boundaries:** `0` → always off; `≥ 100` → always on; non-finite / negative →
+fail closed (off). The same `(flag, scope, subjectId)` always lands in the same
+bucket, so repeated `isFeatureEnabledForSubject()` calls are **sticky** per
+user/org.
+
+Helpers live in `src/lib/feature-flags.ts`: `rolloutBucket()`, `isInRollout()`,
+`getRolloutPercent()`, `isFeatureEnabledForSubject()`.
+
+### Flags API auth (issue #661)
+
+| Method | Path | Auth |
+|---|---|---|
+| `GET` | `/api/settings/feature-flags` | Session + `isMaintainer` (401 / 403) |
+| `POST` | `/api/settings/feature-flags` | Same-origin CSRF **and** maintainer session |
+
+`POST` body: `{ "key": "<flag-key>", "enabled": true|false }`. Unknown keys and
+non-boolean `enabled` return `400`. Writes go through `setFeatureFlag()` and
+require `FEATURE_FLAGS_DB_ENABLED`; there is **no** unauthenticated toggle path.
+
+---
+
 ## Freeze windows
 
 A **freeze window** is a period (typically during a Wave) when risky, mutating

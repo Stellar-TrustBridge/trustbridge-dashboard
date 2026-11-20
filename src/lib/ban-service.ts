@@ -35,6 +35,55 @@ export interface BanEnforcement {
 const BAN_APPEAL_OUTCOMES: readonly BanAppealOutcome[] = ["pending", "approved", "denied"];
 
 /**
+ * Stable reason codes for ban/unban failures (issue #660).
+ * Callers map these to HTTP status codes; audit trails always record them.
+ */
+export type BanServiceErrorCode =
+  | "SELF_UNBAN_FORBIDDEN"
+  | "SELF_BAN_FORBIDDEN"
+  | "REASON_REQUIRED"
+  | "INVALID_APPEAL_OUTCOME";
+
+export class BanServiceError extends Error {
+  readonly code: BanServiceErrorCode;
+
+  constructor(code: BanServiceErrorCode, message: string) {
+    super(message);
+    this.name = "BanServiceError";
+    this.code = code;
+  }
+}
+
+function normalizeActorLogin(actorLogin?: string | null): string | null {
+  const trimmed = (actorLogin ?? "").trim().toLowerCase();
+  return trimmed === "" ? null : trimmed;
+}
+
+/**
+ * Rejects self-moderation: an actor may not ban or unban their own handle.
+ * Case-insensitive; a missing actor login skips the check (system/CI actors).
+ */
+function assertNotSelfModeration(
+  normalizedUsername: string,
+  actorId: string,
+  actorLogin: string | null,
+  action: "ban" | "unban"
+): void {
+  const selfCode =
+    action === "unban" ? "SELF_UNBAN_FORBIDDEN" : "SELF_BAN_FORBIDDEN";
+  const selfMessage =
+    action === "unban"
+      ? "Maintainers cannot unban their own account."
+      : "Maintainers cannot ban their own account.";
+
+  if (actorLogin && actorLogin === normalizedUsername) {
+    throw new BanServiceError(selfCode, selfMessage);
+  }
+  // actorId is compared later against the resolved user id (same handle).
+  void actorId;
+}
+
+/**
  * Case-insensitive check if a contributor or GitHub handle is banned.
  */
 export async function isUserBanned(
@@ -134,10 +183,15 @@ export async function banContributor({
 }) {
   const normalizedUsername = githubUsername.trim().toLowerCase();
   const trimmedReason = reason.trim();
+  const login = normalizeActorLogin(actorLogin);
 
   if (!trimmedReason) {
-    throw new Error("A reason is required to ban a contributor.");
+    throw new BanServiceError(
+      "REASON_REQUIRED",
+      "A reason is required to ban a contributor."
+    );
   }
+  assertNotSelfModeration(normalizedUsername, actorId, login, "ban");
 
   // Update existing user if present
   const user = await prisma.user.findFirst({
@@ -149,31 +203,42 @@ export async function banContributor({
     },
   });
 
-  if (user) {
-    await prisma.user.update({
-      where: { id: user.id },
-      data: {
-        banned: true,
-        bannedAt: new Date(),
-        banReason: trimmedReason,
-        bannedById: actorId,
-      },
-    });
+  if (user && user.id === actorId) {
+    throw new BanServiceError(
+      "SELF_BAN_FORBIDDEN",
+      "Maintainers cannot ban their own account."
+    );
   }
 
-  // Upsert into BannedContributor table for persistent ban across re-registrations
-  await prisma.bannedContributor.upsert({
-    where: { githubUsername: normalizedUsername },
-    create: {
-      githubUsername: normalizedUsername,
-      reason: trimmedReason,
-      bannedById: actorId,
-    },
-    update: {
-      reason: trimmedReason,
-      bannedById: actorId,
-    },
-  });
+  // Atomic multi-step write: user flag + persistent ban row move together so a
+  // concurrent unban cannot observe a half-applied ban (issue #660).
+  await prisma.$transaction([
+    ...(user
+      ? [
+          prisma.user.update({
+            where: { id: user.id },
+            data: {
+              banned: true,
+              bannedAt: new Date(),
+              banReason: trimmedReason,
+              bannedById: actorId,
+            },
+          }),
+        ]
+      : []),
+    prisma.bannedContributor.upsert({
+      where: { githubUsername: normalizedUsername },
+      create: {
+        githubUsername: normalizedUsername,
+        reason: trimmedReason,
+        bannedById: actorId,
+      },
+      update: {
+        reason: trimmedReason,
+        bannedById: actorId,
+      },
+    }),
+  ]);
 
   // Log audit event
   await recordAuditLog({
@@ -225,6 +290,9 @@ export async function unbanContributor({
   reason?: string;
 }) {
   const normalizedUsername = githubUsername.trim().toLowerCase();
+  const login = normalizeActorLogin(actorLogin);
+
+  assertNotSelfModeration(normalizedUsername, actorId, login, "unban");
 
   const user = await prisma.user.findFirst({
     where: {
@@ -235,26 +303,38 @@ export async function unbanContributor({
     },
   });
 
-  if (user) {
-    await prisma.user.update({
-      where: { id: user.id },
-      data: {
-        banned: false,
-        bannedAt: null,
-        banReason: null,
-        bannedById: null,
-      },
-    });
+  if (user && user.id === actorId) {
+    throw new BanServiceError(
+      "SELF_UNBAN_FORBIDDEN",
+      "Maintainers cannot unban their own account."
+    );
   }
 
-  await prisma.bannedContributor.deleteMany({
-    where: {
-      githubUsername: {
-        equals: normalizedUsername,
-        mode: "insensitive",
+  // Atomic clear of both ban surfaces so a concurrent ban cannot interleave
+  // between the user flag and the persistent BannedContributor row.
+  await prisma.$transaction([
+    ...(user
+      ? [
+          prisma.user.update({
+            where: { id: user.id },
+            data: {
+              banned: false,
+              bannedAt: null,
+              banReason: null,
+              bannedById: null,
+            },
+          }),
+        ]
+      : []),
+    prisma.bannedContributor.deleteMany({
+      where: {
+        githubUsername: {
+          equals: normalizedUsername,
+          mode: "insensitive",
+        },
       },
-    },
-  });
+    }),
+  ]);
 
   await recordAuditLog({
     action: "contributor.unbanned",
@@ -293,13 +373,20 @@ export async function addBanAppealNote({
   const trimmedNote = (note ?? "").trim();
 
   if (!normalizedUsername) {
-    throw new Error("A githubUsername is required to record a ban appeal note.");
+    throw new BanServiceError(
+      "REASON_REQUIRED",
+      "A githubUsername is required to record a ban appeal note."
+    );
   }
   if (!trimmedNote) {
-    throw new Error("A note is required to record a ban appeal.");
+    throw new BanServiceError(
+      "REASON_REQUIRED",
+      "A note is required to record a ban appeal."
+    );
   }
   if (!BAN_APPEAL_OUTCOMES.includes(outcome)) {
-    throw new Error(
+    throw new BanServiceError(
+      "INVALID_APPEAL_OUTCOME",
       `Invalid ban appeal outcome. Expected one of: ${BAN_APPEAL_OUTCOMES.join(", ")}.`
     );
   }

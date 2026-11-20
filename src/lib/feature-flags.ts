@@ -145,6 +145,59 @@ async function readDbFlags(): Promise<Map<string, boolean> | null> {
 export type FlagSource = "env" | "db" | "default" | "fail-closed";
 
 /**
+ * Percentage rollout with sticky bucketing (issue #661).
+ *
+ * Algorithm (documented for operators — do not invent a parallel scheme):
+ * 1. Subject key = `${flagKey}:${scope}:${subjectId}` where scope is `user`
+ *    or `org` and subjectId is the stable GitHub/org id (never a display name).
+ * 2. FNV-1a 32-bit hash of the UTF-8 subject key → unsigned 32-bit int.
+ * 3. Bucket = hash % 100 (range 0..99).
+ * 4. Enabled for this subject iff `bucket < rolloutPercent`.
+ *
+ * Boundaries: percent <= 0 → always off; percent >= 100 → always on.
+ * The same (flag, scope, subjectId) always lands in the same bucket, so the
+ * UI does not flicker between evaluations (sticky per user/org).
+ */
+export function rolloutBucket(
+  flagKey: string,
+  scope: "user" | "org",
+  subjectId: string
+): number {
+  const input = `${flagKey}:${scope}:${subjectId}`;
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < input.length; i++) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0) % 100;
+}
+
+/** True when `subjectId` falls inside the percentage rollout for `flagKey`. */
+export function isInRollout(
+  flagKey: string,
+  scope: "user" | "org",
+  subjectId: string,
+  rolloutPercent: number
+): boolean {
+  if (!Number.isFinite(rolloutPercent) || rolloutPercent <= 0) return false;
+  if (rolloutPercent >= 100) return true;
+  return rolloutBucket(flagKey, scope, subjectId) < rolloutPercent;
+}
+
+/**
+ * Read an optional percentage rollout for a flag from
+ * `FEATURE_FLAG_<KEY>_ROLLOUT_PERCENT` (0–100). Unset / invalid → undefined
+ * (flag behaves as a full on/off switch, matching pre-#661 behavior).
+ */
+export function getRolloutPercent(key: FeatureFlagKey): number | undefined {
+  const raw = process.env[`FEATURE_FLAG_${key.toUpperCase()}_ROLLOUT_PERCENT`];
+  if (raw == null || raw.trim() === "") return undefined;
+  const n = Number.parseInt(raw.trim(), 10);
+  if (!Number.isFinite(n) || n < 0 || n > 100) return undefined;
+  return n;
+}
+
+/**
  * Human-readable label for a flag source, for the admin read-only panel.
  */
 export function flagSourceLabel(source: FlagSource): string {
@@ -211,6 +264,24 @@ export async function isFeatureEnabled(key: FeatureFlagKey): Promise<boolean> {
 
   const dbFlags = dbSourceEnabled() ? await readDbFlags() : null;
   return resolve(key, dbFlags).enabled;
+}
+
+/**
+ * Resolve a flag for a specific user/org subject under an optional percentage
+ * rollout. When no rollout is configured the result matches
+ * {@link isFeatureEnabled}. When one is, the decision is sticky per subject
+ * (see {@link rolloutBucket}) so Wave UI does not flicker mid-registration.
+ */
+export async function isFeatureEnabledForSubject(
+  key: FeatureFlagKey,
+  scope: "user" | "org",
+  subjectId: string
+): Promise<boolean> {
+  const base = await isFeatureEnabled(key);
+  if (!base) return false;
+  const percent = getRolloutPercent(key);
+  if (percent === undefined) return true;
+  return isInRollout(key, scope, subjectId, percent);
 }
 
 /**

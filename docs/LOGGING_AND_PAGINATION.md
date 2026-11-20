@@ -380,6 +380,37 @@ Query parameters:
 - `hasMore` — Whether more pages are available
 - `nextCursor` — Cursor for the next page (if `hasMore` is true)
 
+### Invalid cursor error contract (issue #658)
+
+A malformed, non-base64, or otherwise undecodable `cursor` **must not** silently
+restart at page 0. `GET /api/contributors/paginated` validates the cursor via
+`validatePaginationOptions()` in `src/lib/cursor-pagination.ts` and returns
+**HTTP 400** with this stable body:
+
+```json
+{
+  "error": "Invalid cursor",
+  "code": "INVALID_CURSOR",
+  "message": "The provided cursor is malformed, expired, or not valid base64.",
+  "remediation": "Omit the cursor parameter to restart from the first page, or pass the nextCursor value returned by a previous response."
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `error` | Short string for backward-compatible `{ error }` handlers |
+| `code` | Always `INVALID_CURSOR` — clients should branch on this |
+| `message` | Human-readable description of what failed |
+| `remediation` | Actionable next step for the client or end user |
+
+Rules:
+
+- **Omitted** `cursor` (or `cursor=`) → first page, HTTP 200 (not an error).
+- **Present but invalid** cursor → HTTP 400 + `INVALID_CURSOR`; `getContributorsPaginated` is never called.
+- GraphQL `contributors(after:)` surfaces the same `code: "INVALID_CURSOR"` in `extensions` instead of restarting the page.
+- The React hook `useInfiniteContributors()` rethrows `INVALID_CURSOR` messages so infinite scroll fails loudly rather than looping from page 0.
+- An **expired** cursor that decodes to a deleted record id may still surface as a query error from Prisma; clients should treat that the same as an invalid cursor (drop the cursor, restart, signal the user).
+
 ### React Query hook
 
 

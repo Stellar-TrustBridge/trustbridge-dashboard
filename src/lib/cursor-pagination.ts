@@ -59,16 +59,67 @@ export function decodeCursor(cursor: string): string | null {
 }
 
 /**
+ * Stable invalid-cursor error contract (issue #658).
+ *
+ * Clients must never treat a malformed/expired cursor as "restart at page 0"
+ * without a signal — routes return HTTP 400 with this body instead.
+ */
+export const INVALID_CURSOR_CODE = "INVALID_CURSOR" as const;
+
+export interface InvalidCursorErrorBody {
+  /** Backward-compatible string field used by existing `{ error }` handlers. */
+  error: string;
+  code: typeof INVALID_CURSOR_CODE;
+  message: string;
+  remediation: string;
+}
+
+export const INVALID_CURSOR_MESSAGE =
+  "The provided cursor is malformed, expired, or not valid base64.";
+
+export const INVALID_CURSOR_REMEDIATION =
+  "Omit the cursor parameter to restart from the first page, or pass the nextCursor value returned by a previous response.";
+
+/** Build the stable 400 body for an invalid/expired cursor. */
+export function buildInvalidCursorError(): InvalidCursorErrorBody {
+  return {
+    error: "Invalid cursor",
+    code: INVALID_CURSOR_CODE,
+    message: INVALID_CURSOR_MESSAGE,
+    remediation: INVALID_CURSOR_REMEDIATION,
+  };
+}
+
+/** Type guard for the invalid-cursor error body. */
+export function isInvalidCursorErrorBody(
+  value: unknown
+): value is InvalidCursorErrorBody {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as InvalidCursorErrorBody).code === INVALID_CURSOR_CODE
+  );
+}
+
+/**
  * Validates and normalizes pagination options
- * @returns Validated options with cursor (if valid) and normalized limit
+ *
+ * Distinguishes "no cursor supplied" from "cursor supplied but invalid" so
+ * callers can signal invalid cursors instead of silently restarting at page 0.
+ *
+ * @returns Validated options with cursor (if valid), normalized limit, and
+ *   `invalidCursor: true` when a non-empty cursor failed to decode.
  */
 export function validatePaginationOptions(
   options: CursorPaginationOptions
-): { decodedCursor: string | null; limit: number } {
-  const decodedCursor = options.cursor ? decodeCursor(options.cursor) : null;
+): { decodedCursor: string | null; limit: number; invalidCursor: boolean } {
+  const raw = options.cursor;
+  const hasCursor = raw !== undefined && raw !== null && raw !== "";
+  const decodedCursor = hasCursor ? decodeCursor(raw as string) : null;
+  const invalidCursor = hasCursor && decodedCursor === null;
   const limit = Math.min(Math.max(options.limit ?? 50, 1), 100);
 
-  return { decodedCursor, limit };
+  return { decodedCursor, limit, invalidCursor };
 }
 
 /**

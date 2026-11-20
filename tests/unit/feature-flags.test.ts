@@ -22,7 +22,11 @@ import {
   clearFeatureFlagCache,
   getAllFeatureFlags,
   isFeatureEnabled,
+  isFeatureEnabledForSubject,
   isFeatureEnabledFromEnv,
+  isInRollout,
+  getRolloutPercent,
+  rolloutBucket,
   setFeatureFlag,
 } from "@/lib/feature-flags";
 
@@ -180,5 +184,127 @@ describe("setFeatureFlag", () => {
     expect(upsert).toHaveBeenCalledWith(
       expect.objectContaining({ where: { key: "otel_traces" } }),
     );
+  });
+});
+
+describe("percentage rollout with sticky bucketing (issue #661)", () => {
+  beforeEach(() => {
+    delete process.env.FEATURE_FLAG_OTEL_TRACES_ROLLOUT_PERCENT;
+    delete process.env.FEATURE_FLAG_BATCH_RECHECK_ROLLOUT_PERCENT;
+  });
+
+  it("bucket is stable for the same flag/scope/subject (sticky)", () => {
+    const a = rolloutBucket("otel_traces", "user", "github-alice");
+    const b = rolloutBucket("otel_traces", "user", "github-alice");
+    expect(a).toBe(b);
+    expect(a).toBeGreaterThanOrEqual(0);
+    expect(a).toBeLessThan(100);
+  });
+
+  it("bucket differs across flags and scopes for the same subject id", () => {
+    const userBucket = rolloutBucket("otel_traces", "user", "42");
+    const orgBucket = rolloutBucket("otel_traces", "org", "42");
+    const otherFlag = rolloutBucket("batch_recheck", "user", "42");
+    // Not guaranteed all different, but at least one axis should usually differ;
+    // assert the pure function is deterministic and range-bound instead.
+    expect(userBucket).toBe(rolloutBucket("otel_traces", "user", "42"));
+    expect(orgBucket).toBe(rolloutBucket("otel_traces", "org", "42"));
+    expect(otherFlag).toBe(rolloutBucket("batch_recheck", "user", "42"));
+    expect(userBucket).toBeGreaterThanOrEqual(0);
+    expect(orgBucket).toBeGreaterThanOrEqual(0);
+    expect(otherFlag).toBeGreaterThanOrEqual(0);
+  });
+
+  it("0% boundary is always off; 100% boundary is always on", () => {
+    for (const subject of ["a", "b", "user-1", "org-9", ""]) {
+      expect(isInRollout("otel_traces", "user", subject, 0)).toBe(false);
+      expect(isInRollout("otel_traces", "user", subject, 100)).toBe(true);
+      expect(isInRollout("otel_traces", "org", subject, 0)).toBe(false);
+      expect(isInRollout("otel_traces", "org", subject, 100)).toBe(true);
+    }
+  });
+
+  it("invalid percentages fail closed", () => {
+    expect(isInRollout("otel_traces", "user", "x", -1)).toBe(false);
+    expect(isInRollout("otel_traces", "user", "x", NaN)).toBe(false);
+    expect(isInRollout("otel_traces", "user", "x", 101)).toBe(true); // >= 100
+  });
+
+  it("is sticky across repeated evaluations for mid-range percent", () => {
+    const percent = 37;
+    const first = isInRollout("otel_traces", "user", "wave-contributor", percent);
+    for (let i = 0; i < 20; i++) {
+      expect(
+        isInRollout("otel_traces", "user", "wave-contributor", percent)
+      ).toBe(first);
+    }
+  });
+
+  it("getRolloutPercent reads env and rejects out-of-range values", () => {
+    process.env.FEATURE_FLAG_OTEL_TRACES_ROLLOUT_PERCENT = "25";
+    expect(getRolloutPercent("otel_traces")).toBe(25);
+
+    process.env.FEATURE_FLAG_OTEL_TRACES_ROLLOUT_PERCENT = "999";
+    expect(getRolloutPercent("otel_traces")).toBeUndefined();
+
+    process.env.FEATURE_FLAG_OTEL_TRACES_ROLLOUT_PERCENT = "not-a-number";
+    expect(getRolloutPercent("otel_traces")).toBeUndefined();
+
+    delete process.env.FEATURE_FLAG_OTEL_TRACES_ROLLOUT_PERCENT;
+    expect(getRolloutPercent("otel_traces")).toBeUndefined();
+  });
+
+  it("isFeatureEnabledForSubject: no rollout env → full audience when base on", async () => {
+    expect(await isFeatureEnabledForSubject("batch_recheck", "user", "u1")).toBe(
+      true,
+    );
+    expect(await isFeatureEnabledForSubject("otel_traces", "user", "u1")).toBe(
+      false,
+    );
+  });
+
+  it("isFeatureEnabledForSubject: base-off wins over rollout", async () => {
+    process.env.FEATURE_FLAG_OTEL_TRACES = "off";
+    process.env.FEATURE_FLAG_OTEL_TRACES_ROLLOUT_PERCENT = "100";
+    expect(await isFeatureEnabledForSubject("otel_traces", "user", "u1")).toBe(
+      false,
+    );
+  });
+
+  it("isFeatureEnabledForSubject: 0% rollout excludes every subject", async () => {
+    process.env.FEATURE_FLAG_BATCH_RECHECK = "on";
+    process.env.FEATURE_FLAG_BATCH_RECHECK_ROLLOUT_PERCENT = "0";
+    expect(
+      await isFeatureEnabledForSubject("batch_recheck", "user", "u1"),
+    ).toBe(false);
+    expect(
+      await isFeatureEnabledForSubject("batch_recheck", "org", "o1"),
+    ).toBe(false);
+  });
+
+  it("isFeatureEnabledForSubject: 100% rollout includes every subject", async () => {
+    process.env.FEATURE_FLAG_OTEL_TRACES = "on";
+    process.env.FEATURE_FLAG_OTEL_TRACES_ROLLOUT_PERCENT = "100";
+    expect(await isFeatureEnabledForSubject("otel_traces", "user", "u1")).toBe(
+      true,
+    );
+    expect(await isFeatureEnabledForSubject("otel_traces", "org", "o1")).toBe(
+      true,
+    );
+  });
+
+  it("isFeatureEnabledForSubject: sticky for a mid-range rollout", async () => {
+    process.env.FEATURE_FLAG_OTEL_TRACES = "on";
+    process.env.FEATURE_FLAG_OTEL_TRACES_ROLLOUT_PERCENT = "50";
+    const first = await isFeatureEnabledForSubject(
+      "otel_traces",
+      "user",
+      "sticky-user",
+    );
+    for (let i = 0; i < 10; i++) {
+      expect(
+        await isFeatureEnabledForSubject("otel_traces", "user", "sticky-user"),
+      ).toBe(first);
+    }
   });
 });

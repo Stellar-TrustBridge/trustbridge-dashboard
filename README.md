@@ -206,6 +206,8 @@ Full index: [docs/README.md](./docs/README.md)
 - **`src/lib/contract-sync.ts`** re-syncs Postgres registration state against Horizon-verified funded/trustline/balance state, intended to be driven by a scheduler (e.g. Vercel Cron) rather than a maintainer clicking "recheck all". Trigger with `POST /api/contract-sync` (maintainer session, or a scheduler presenting `Authorization: Bearer $CRON_SECRET`); read the last run via `GET /api/contract-sync` or the `contractSync` block of `/api/health`.
 - Rate-limited via `CONTRACT_SYNC_MIN_INTERVAL_MS` (default 60s) so a mis-configured scheduler can't fan out into repeated full-table Horizon sweeps, and never throws — Horizon/RPC outages and DB errors are captured in the result instead of raising a 500.
 - **Lag monitoring (issue #659):** the last successful run and the observed Soroban RPC cursor are tracked in-process; when progress ages past `CONTRACT_SYNC_LAG_THRESHOLD_MS` (15 min) or `CONTRACT_SYNC_STALL_THRESHOLD_MS` (60 min), the state is surfaced in `GET /api/health` (`checks.contractSync.lag`), `GET /api/contract-sync` (`lag`) and `/api/metrics/prometheus`, and an optional maintainer webhook (`CONTRACT_SYNC_ALERT_WEBHOOK_URL`) is notified once per stall episode. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#lag-monitoring-health--alerts-issue-659).
+- **Ban race safety (issue #660):** ban/unban run in a single transaction; self-ban and self-unban are rejected with HTTP 403 (`SELF_BAN_FORBIDDEN` / `SELF_UNBAN_FORBIDDEN`). See [docs/MAINTAINER_WORKFLOW.md](docs/MAINTAINER_WORKFLOW.md).
+- **Sticky flag rollouts (issue #661):** `FEATURE_FLAG_<KEY>_ROLLOUT_PERCENT` enables FNV-1a sticky percentage rollouts per user/org; `GET`/`POST /api/settings/feature-flags` both require a maintainer session. See [docs/FEATURE_FLAGS.md](docs/FEATURE_FLAGS.md).
 
 ### Nightly treasury CSV export cron
 
@@ -227,7 +229,7 @@ Full index: [docs/README.md](./docs/README.md)
 
 ### Pagination & infinite scroll
 
-- **Cursor-based pagination** — `/api/contributors/paginated` supports efficient cursor-based pagination via the `useInfiniteContributors()` React Query hook. Useful for tables with 100+ contributors.
+- **Cursor-based pagination** — `/api/contributors/paginated` supports efficient cursor-based pagination via the `useInfiniteContributors()` React Query hook. Useful for tables with 100+ contributors. Malformed cursors return HTTP 400 with `code: "INVALID_CURSOR"` instead of silently restarting at page 0 (issue #658).
 - **React Query integration** — `src/lib/use-infinite-contributors.ts` provides a drop-in hook for infinite scroll UIs. Automatically fetches next pages as users scroll.
 
 ### Middleware

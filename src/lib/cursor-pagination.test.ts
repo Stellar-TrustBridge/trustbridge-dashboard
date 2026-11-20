@@ -5,6 +5,8 @@ import {
   decodeCursor,
   validatePaginationOptions,
   buildCursorResult,
+  buildInvalidCursorError,
+  isInvalidCursorErrorBody,
 } from "@/lib/cursor-pagination";
 
 describe("Cursor Pagination", () => {
@@ -74,6 +76,43 @@ describe("Cursor Pagination", () => {
       const result = validatePaginationOptions({ cursor: "!!!invalid!!!" });
 
       expect(result.decodedCursor).toBeNull();
+      expect(result.invalidCursor).toBe(true);
+    });
+
+    it("does not flag a missing cursor as invalid", () => {
+      expect(validatePaginationOptions({}).invalidCursor).toBe(false);
+      expect(validatePaginationOptions({ cursor: "" }).invalidCursor).toBe(false);
+    });
+
+    it("does not flag a valid cursor as invalid", () => {
+      const result = validatePaginationOptions({
+        cursor: encodeCursor("reg-1"),
+      });
+      expect(result.invalidCursor).toBe(false);
+      expect(result.decodedCursor).toBe("reg-1");
+    });
+  });
+
+  describe("invalid-cursor error contract (issue #658)", () => {
+    it("builds a stable INVALID_CURSOR body with remediation", () => {
+      const body = buildInvalidCursorError();
+      expect(body).toEqual({
+        error: "Invalid cursor",
+        code: "INVALID_CURSOR",
+        message: expect.any(String),
+        remediation: expect.stringContaining("nextCursor"),
+      });
+      expect(isInvalidCursorErrorBody(body)).toBe(true);
+      expect(isInvalidCursorErrorBody({ code: "OTHER" })).toBe(false);
+      expect(isInvalidCursorErrorBody(null)).toBe(false);
+    });
+
+    it("signals invalid cursors distinctly from an omitted cursor", () => {
+      const omitted = validatePaginationOptions({});
+      const invalid = validatePaginationOptions({ cursor: "@@not-base64@@" });
+      expect(omitted.invalidCursor).toBe(false);
+      expect(invalid.invalidCursor).toBe(true);
+      expect(invalid.decodedCursor).toBeNull();
     });
   });
 

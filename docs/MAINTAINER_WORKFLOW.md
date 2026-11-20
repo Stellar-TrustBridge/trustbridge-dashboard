@@ -96,6 +96,46 @@ To prevent roster changes or rechecks from shuffling readiness states immediatel
 - Unban via `POST /api/maintainer/ban` (`action: "unban"`, `githubUsername: "<username>"`).
 - All actions record audit trail events (`contributor.banned`, `contributor.unbanned`).
 
+### Race safety and self-moderation (issue #660)
+
+Ban and unban write **two** surfaces (`User.banned*` flags and the persistent
+`BannedContributor` row). Both operations now run inside a single
+`prisma.$transaction` so a concurrent ban/unban cannot observe a half-applied
+state — the user flag and the ban row commit together or not at all. Audit
+events are written only **after** the transaction commits; a failed transaction
+leaves no audit trail and no partial ban.
+
+**Self-moderation is rejected.** An actor may not ban or unban their own
+handle (case-insensitive on `githubUsername`, or when `actorId` matches the
+resolved user id). The API returns:
+
+```json
+{
+  "error": "Maintainers cannot unban their own account.",
+  "code": "SELF_UNBAN_FORBIDDEN"
+}
+```
+
+with HTTP **403**. Ban uses `code: "SELF_BAN_FORBIDDEN"` with the same status.
+Use a second maintainer (or an org admin) to lift a ban on a moderator account.
+
+| Outcome | HTTP | `code` |
+|---|---|---|
+| Self-unban attempt | 403 | `SELF_UNBAN_FORBIDDEN` |
+| Self-ban attempt | 403 | `SELF_BAN_FORBIDDEN` |
+| Empty ban reason | 400 | `REASON_REQUIRED` (service) / plain `error` from the route |
+| Success | 200 | — (audit: `contributor.banned` / `contributor.unbanned`) |
+
+Appeal notes (`addBanAppealNote`) continue to write
+`contributor.ban_appeal_note` audit entries; they never mutate ban state on
+their own — unban remains an explicit maintainer action subject to the rules
+above.
+
+**Maintainer UX:** the ban modal should disable the “unban” control when the
+selected handle matches the signed-in maintainer, and surface the API’s
+`code`/`error` body when the request is rejected so operators know to ask a
+peer to act instead of retrying.
+
 ---
 
 ## 5. Soroban Event Cursor Reset

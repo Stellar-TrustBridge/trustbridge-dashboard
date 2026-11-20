@@ -1,5 +1,10 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { isUserBanned, banContributor, unbanContributor } from "@/lib/ban-service";
+import {
+  isUserBanned,
+  banContributor,
+  unbanContributor,
+  BanServiceError,
+} from "@/lib/ban-service";
 import { prisma } from "@/lib/prisma";
 import { recordAuditLog } from "@/lib/audit";
 
@@ -15,6 +20,12 @@ vi.mock("@/lib/prisma", () => ({
       upsert: vi.fn(),
       deleteMany: vi.fn(),
     },
+    $transaction: vi.fn(async (ops: unknown) => {
+      if (Array.isArray(ops)) {
+        return Promise.all(ops);
+      }
+      return ops;
+    }),
   },
 }));
 
@@ -191,6 +202,7 @@ describe("Ban Service", () => {
     });
 
     expect(result.success).toBe(true);
+    expect(prisma.$transaction).toHaveBeenCalled();
     expect(prisma.user.update).toHaveBeenCalledWith(
       expect.objectContaining({
         where: { id: "user-99" },
@@ -204,5 +216,145 @@ describe("Ban Service", () => {
         action: "contributor.unbanned",
       })
     );
+  });
+
+  it("rejects self-unban with SELF_UNBAN_FORBIDDEN and leaves no state change", async () => {
+    await expect(
+      unbanContributor({
+        githubUsername: "Alice",
+        actorId: "user-alice",
+        actorLogin: "alice",
+      })
+    ).rejects.toMatchObject({
+      name: "BanServiceError",
+      code: "SELF_UNBAN_FORBIDDEN",
+    });
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect(recordAuditLog).not.toHaveBeenCalled();
+  });
+
+  it("rejects self-unban when actor id matches the target user id", async () => {
+    vi.mocked(prisma.user.findFirst).mockResolvedValue({
+      id: "maintainer-1",
+      githubUsername: "alice",
+    } as any);
+
+    await expect(
+      unbanContributor({
+        githubUsername: "alice",
+        actorId: "maintainer-1",
+        actorLogin: "bob",
+      })
+    ).rejects.toMatchObject({ code: "SELF_UNBAN_FORBIDDEN" });
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect(recordAuditLog).not.toHaveBeenCalled();
+  });
+
+  it("rejects self-ban with SELF_BAN_FORBIDDEN", async () => {
+    vi.mocked(prisma.user.findFirst).mockResolvedValue({
+      id: "maintainer-1",
+      githubUsername: "alice",
+    } as any);
+
+    await expect(
+      banContributor({
+        githubUsername: "alice",
+        reason: "oops",
+        actorId: "maintainer-1",
+        actorLogin: "alice",
+      })
+    ).rejects.toMatchObject({ code: "SELF_BAN_FORBIDDEN" });
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+
+  it("applies ban atomically via a single transaction", async () => {
+    vi.mocked(prisma.user.findFirst).mockResolvedValue({
+      id: "user-99",
+      githubUsername: "spammer",
+    } as any);
+    vi.mocked(prisma.user.update).mockResolvedValue({} as any);
+    vi.mocked(prisma.bannedContributor.upsert).mockResolvedValue({} as any);
+
+    await banContributor({
+      githubUsername: "spammer",
+      reason: "abuse",
+      actorId: "maintainer-1",
+      actorLogin: "admin",
+    });
+
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    const ops = vi.mocked(prisma.$transaction).mock.calls[0][0] as unknown[];
+    expect(Array.isArray(ops)).toBe(true);
+    expect(ops).toHaveLength(2);
+  });
+
+  it("serializes concurrent ban and unban through transactions (race-safe)", async () => {
+    const order: string[] = [];
+    vi.mocked(prisma.$transaction).mockImplementation(async (ops: any) => {
+      order.push("tx-start");
+      const result = Array.isArray(ops) ? await Promise.all(ops) : await ops;
+      order.push("tx-end");
+      return result;
+    });
+    vi.mocked(prisma.user.findFirst)
+      .mockResolvedValueOnce({
+        id: "user-1",
+        githubUsername: "target",
+      } as any)
+      .mockResolvedValueOnce({
+        id: "user-1",
+        githubUsername: "target",
+      } as any);
+    vi.mocked(prisma.user.update).mockResolvedValue({} as any);
+    vi.mocked(prisma.bannedContributor.upsert).mockResolvedValue({} as any);
+    vi.mocked(prisma.bannedContributor.deleteMany).mockResolvedValue({
+      count: 1,
+    } as any);
+
+    const [banResult, unbanResult] = await Promise.all([
+      banContributor({
+        githubUsername: "target",
+        reason: "race",
+        actorId: "m1",
+        actorLogin: "mod1",
+      }),
+      unbanContributor({
+        githubUsername: "target",
+        actorId: "m2",
+        actorLogin: "mod2",
+      }),
+    ]);
+
+    expect(banResult.success).toBe(true);
+    expect(unbanResult.success).toBe(true);
+    expect(prisma.$transaction).toHaveBeenCalledTimes(2);
+    expect(order.filter((x) => x === "tx-start")).toHaveLength(2);
+    expect(order.filter((x) => x === "tx-end")).toHaveLength(2);
+    // Both operations recorded audit trails.
+    expect(recordAuditLog).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "contributor.banned" })
+    );
+    expect(recordAuditLog).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "contributor.unbanned" })
+    );
+  });
+
+  it("keeps a failed ban transaction from writing an audit trail", async () => {
+    vi.mocked(prisma.user.findFirst).mockResolvedValue({
+      id: "user-99",
+      githubUsername: "spammer",
+    } as any);
+    vi.mocked(prisma.$transaction).mockRejectedValue(
+      new Error("tx failed")
+    );
+
+    await expect(
+      banContributor({
+        githubUsername: "spammer",
+        reason: "abuse",
+        actorId: "maintainer-1",
+      })
+    ).rejects.toThrow("tx failed");
+    expect(recordAuditLog).not.toHaveBeenCalled();
   });
 });

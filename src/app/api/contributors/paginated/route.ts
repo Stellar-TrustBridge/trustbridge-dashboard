@@ -3,6 +3,10 @@ import { requireMaintainerSession } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { getRegistryMode } from "@/lib/registry-mode";
 import { getContributorsPaginated } from "@/lib/registrations";
+import {
+  buildInvalidCursorError,
+  validatePaginationOptions,
+} from "@/lib/cursor-pagination";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -14,6 +18,10 @@ export const dynamic = "force-dynamic";
  * Query params:
  * - limit: number of items per page (default: 25, max: 100)
  * - cursor: cursor from previous page's response
+ *
+ * Invalid/expired cursors return HTTP 400 with the stable invalid-cursor
+ * contract (`code: "INVALID_CURSOR"`) from `src/lib/cursor-pagination.ts` —
+ * they never silently restart at page 0.
  *
  * Delegates to `getContributorsPaginated` (src/lib/registrations.ts) — the
  * same cursor-pagination logic already used and tested elsewhere — rather
@@ -28,6 +36,11 @@ export async function GET(request: NextRequest) {
   const searchParams = request.nextUrl.searchParams;
   const limitParam = searchParams.get("limit");
   const cursor = searchParams.get("cursor") ?? undefined;
+
+  const { invalidCursor } = validatePaginationOptions({ cursor });
+  if (invalidCursor) {
+    return NextResponse.json(buildInvalidCursorError(), { status: 400 });
+  }
 
   let limit = 25;
   if (limitParam) {

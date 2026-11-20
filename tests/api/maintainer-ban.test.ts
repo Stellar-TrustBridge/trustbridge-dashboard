@@ -11,13 +11,21 @@ import { NextRequest } from "next/server";
 vi.mock("@/lib/api-auth", () => ({
   requireMaintainerSession: vi.fn(),
 }));
-vi.mock("@/lib/ban-service", () => ({
-  banContributor: vi.fn(),
-  unbanContributor: vi.fn(),
-}));
+vi.mock("@/lib/ban-service", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/ban-service")>();
+  return {
+    ...actual,
+    banContributor: vi.fn(),
+    unbanContributor: vi.fn(),
+  };
+});
 
 import { requireMaintainerSession } from "@/lib/api-auth";
-import { banContributor, unbanContributor } from "@/lib/ban-service";
+import {
+  banContributor,
+  unbanContributor,
+  BanServiceError,
+} from "@/lib/ban-service";
 import { POST } from "@/app/api/maintainer/ban/route";
 
 const SESSION = {
@@ -209,5 +217,48 @@ describe("POST /api/maintainer/ban", () => {
     expect(res.status).toBe(500);
     const body = await res.json();
     expect(body).toEqual({ error: "db unavailable" });
+  });
+
+  it("returns 403 with SELF_UNBAN_FORBIDDEN when the service rejects self-unban", async () => {
+    vi.mocked(requireMaintainerSession).mockResolvedValue(SESSION as never);
+    vi.mocked(unbanContributor).mockRejectedValue(
+      new BanServiceError(
+        "SELF_UNBAN_FORBIDDEN",
+        "Maintainers cannot unban their own account."
+      )
+    );
+
+    const res = await POST(
+      request({
+        action: "unban",
+        githubUsername: "alice",
+      })
+    );
+
+    expect(res.status).toBe(403);
+    const body = await res.json();
+    expect(body).toEqual({
+      error: "Maintainers cannot unban their own account.",
+      code: "SELF_UNBAN_FORBIDDEN",
+    });
+  });
+
+  it("returns 403 with SELF_BAN_FORBIDDEN when the service rejects self-ban", async () => {
+    vi.mocked(requireMaintainerSession).mockResolvedValue(SESSION as never);
+    vi.mocked(banContributor).mockRejectedValue(
+      new BanServiceError("SELF_BAN_FORBIDDEN", "Maintainers cannot ban their own account.")
+    );
+
+    const res = await POST(
+      request({
+        action: "ban",
+        githubUsername: "alice",
+        reason: "oops",
+      })
+    );
+
+    expect(res.status).toBe(403);
+    const body = await res.json();
+    expect(body.code).toBe("SELF_BAN_FORBIDDEN");
   });
 });

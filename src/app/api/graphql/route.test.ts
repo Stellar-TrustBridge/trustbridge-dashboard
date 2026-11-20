@@ -99,15 +99,35 @@ describe("POST /api/graphql", () => {
       user: { id: "maintainer-1", isMaintainer: true },
     } as never);
 
+    const after = Buffer.from("reg-1", "utf-8").toString("base64");
     const response = await POST(
       post(
         "query($first: Int!, $after: String) { contributors(first: $first, after: $after) { nodes { githubUsername stellarAddress readiness } hasMore nextCursor } }",
-        { first: 10, after: "cursor-1" }
+        { first: 10, after }
       )
     );
 
     expect(response.status).toBe(200);
-    expect(getContributorsPaginated).toHaveBeenCalledWith("cursor-1", 10, undefined);
+    expect(getContributorsPaginated).toHaveBeenCalledWith(after, 10, undefined);
+  });
+
+  it("rejects an invalid after cursor with INVALID_CURSOR (no silent restart)", async () => {
+    vi.mocked(requireMaintainerSession).mockResolvedValue({
+      user: { id: "maintainer-1", isMaintainer: true },
+    } as never);
+
+    const response = await POST(
+      post(
+        "query($first: Int!, $after: String) { contributors(first: $first, after: $after) { hasMore } }",
+        { first: 10, after: "!!!bad!!!" }
+      )
+    );
+
+    expect(response.status).toBe(200);
+    const result = await response.json();
+    expect(result.errors?.[0]?.extensions?.code).toBe("INVALID_CURSOR");
+    expect(result.errors?.[0]?.extensions?.remediation).toBeTruthy();
+    expect(getContributorsPaginated).not.toHaveBeenCalled();
   });
 
   it("rejects writes because the API is read-only", async () => {

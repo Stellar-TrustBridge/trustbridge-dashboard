@@ -77,13 +77,14 @@ describe("GET /api/contributors/paginated", () => {
     });
     vi.mocked(prisma.registration.count).mockResolvedValue(42);
 
+    const validCursor = Buffer.from("reg-1", "utf-8").toString("base64");
     const res = await GET(
       get(
-        "http://localhost:3000/api/contributors/paginated?limit=10&cursor=abc123"
+        `http://localhost:3000/api/contributors/paginated?limit=10&cursor=${encodeURIComponent(validCursor)}`
       )
     );
 
-    expect(getContributorsPaginated).toHaveBeenCalledWith("abc123", 10);
+    expect(getContributorsPaginated).toHaveBeenCalledWith(validCursor, 10);
     const json = await res.json();
     expect(json.total).toBe(42);
     expect(json.hasMore).toBe(true);
@@ -103,5 +104,68 @@ describe("GET /api/contributors/paginated", () => {
     );
 
     expect(getContributorsPaginated).toHaveBeenCalledWith(undefined, 25);
+  });
+
+  it("returns 400 INVALID_CURSOR for a malformed cursor (no silent page-0 restart)", async () => {
+    const res = await GET(
+      get("http://localhost:3000/api/contributors/paginated?cursor=!!!bad!!!")
+    );
+
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.code).toBe("INVALID_CURSOR");
+    expect(body.error).toBe("Invalid cursor");
+    expect(body.message).toBeTruthy();
+    expect(body.remediation).toBeTruthy();
+    expect(getContributorsPaginated).not.toHaveBeenCalled();
+    expect(prisma.registration.count).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 INVALID_CURSOR for a non-base64 cursor", async () => {
+    const res = await GET(
+      get(
+        "http://localhost:3000/api/contributors/paginated?cursor=not%20base64%21"
+      )
+    );
+
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.code).toBe("INVALID_CURSOR");
+    expect(getContributorsPaginated).not.toHaveBeenCalled();
+  });
+
+  it("still accepts a valid base64 cursor", async () => {
+    const valid = Buffer.from("reg-9", "utf-8").toString("base64");
+    vi.mocked(getContributorsPaginated).mockResolvedValue({
+      contributors: [],
+      nextCursor: null,
+      hasMore: false,
+    });
+    vi.mocked(prisma.registration.count).mockResolvedValue(0);
+
+    const res = await GET(
+      get(
+        `http://localhost:3000/api/contributors/paginated?cursor=${encodeURIComponent(valid)}`
+      )
+    );
+
+    expect(res.status).toBe(200);
+    expect(getContributorsPaginated).toHaveBeenCalledWith(valid, 25);
+  });
+
+  it("treats an empty cursor as the first page", async () => {
+    vi.mocked(getContributorsPaginated).mockResolvedValue({
+      contributors: [],
+      nextCursor: null,
+      hasMore: false,
+    });
+    vi.mocked(prisma.registration.count).mockResolvedValue(0);
+
+    const res = await GET(
+      get("http://localhost:3000/api/contributors/paginated?cursor=")
+    );
+
+    expect(res.status).toBe(200);
+    expect(getContributorsPaginated).toHaveBeenCalledWith("", 25);
   });
 });

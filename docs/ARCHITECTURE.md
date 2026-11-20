@@ -139,7 +139,36 @@ The endpoint exposes two query fields:
 - `contributors(first, after)` returns a cursor-paginated `nodes` page,
   `hasMore`, and `nextCursor`. It requires the same maintainer session as
   `GET /api/contributors/paginated`. `first` defaults to 25 and is limited to
-  1–100.
+  1–100. An undecodable `after` cursor fails with GraphQL error
+  `extensions.code = "INVALID_CURSOR"` (same contract as the REST route) — it
+  never silently restarts at page 0.
+
+### Cursor pagination error contract (#658)
+
+`GET /api/contributors/paginated` validates `cursor` before touching the
+database. Malformed cursors return **400** with
+`{ error, code: "INVALID_CURSOR", message, remediation }` from
+`src/lib/cursor-pagination.ts` (`buildInvalidCursorError()`). Omitted or empty
+cursors still mean “first page”. Client hook `useInfiniteContributors` surfaces
+the remediation text instead of looping. See
+[LOGGING_AND_PAGINATION.md](./LOGGING_AND_PAGINATION.md#invalid-cursor-error-contract-issue-658).
+
+### Ban / unban race safety (#660)
+
+`banContributor` / `unbanContributor` run their dual-surface writes
+(`User` flags + `BannedContributor`) inside one `prisma.$transaction`. Audit
+rows (`contributor.banned` / `contributor.unbanned`) are written only after a
+successful commit. Self-ban and self-unban are rejected with HTTP 403 and
+`code` `SELF_BAN_FORBIDDEN` / `SELF_UNBAN_FORBIDDEN`. Details:
+[MAINTAINER_WORKFLOW.md](./MAINTAINER_WORKFLOW.md#race-safety-and-self-moderation-issue-660).
+
+### Feature-flag percentage rollouts (#661)
+
+Optional sticky percentage rollouts via `FEATURE_FLAG_<KEY>_ROLLOUT_PERCENT`
+use FNV-1a bucketing (`rolloutBucket` / `isFeatureEnabledForSubject` in
+`src/lib/feature-flags.ts`). `GET`/`POST /api/settings/feature-flags` both
+require a maintainer session; `POST` also enforces same-origin CSRF. See
+[FEATURE_FLAGS.md](./FEATURE_FLAGS.md#percentage-rollouts-sticky-bucketing-issue-661).
 
 The schema is intentionally allow-listed and read-only. It exposes no user
 tokens, wallet-proof data, or Horizon debug payloads, and it defines no
