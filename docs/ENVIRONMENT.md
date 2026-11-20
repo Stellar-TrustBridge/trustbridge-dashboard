@@ -642,6 +642,13 @@ Destination email address for digest emails.
 - When all three are unset the digest still runs and writes an audit log entry,
   but no email is sent.
 
+### `DIGEST_QUIET_HOURS` / `DIGEST_TIMEZONE`
+
+Optional quiet-hours window (`HH:MM-HH:MM`, 24h) during which scheduled digests
+are skipped, evaluated in the IANA timezone `DIGEST_TIMEZONE` (default `UTC`).
+Invalid values are logged and ignored. See
+[DIGEST.md — Quiet hours and timezones](./DIGEST.md#quiet-hours-and-timezones).
+
 ### `DIGEST_CADENCE`
 
 Controls the label in the digest subject line (`Daily` or `Weekly`). Does not

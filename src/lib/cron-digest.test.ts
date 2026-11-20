@@ -1,10 +1,12 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   getConfiguredCadence,
   getDigestDestinationEmail,
   getLastDigestHealth,
+  getQuietHoursConfig,
   isFullListEnabled,
+  isWithinQuietHours,
   resetDigestState,
   runCronDigest,
 } from "@/lib/cron-digest";
@@ -522,5 +524,116 @@ describe("isFullListEnabled", () => {
   it("returns false for DIGEST_INCLUDE_FULL_LIST=false", () => {
     process.env.DIGEST_INCLUDE_FULL_LIST = "false";
     expect(isFullListEnabled()).toBe(false);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Quiet hours (#696)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("getQuietHoursConfig", () => {
+  beforeEach(() => {
+    delete process.env.DIGEST_QUIET_HOURS;
+    delete process.env.DIGEST_TIMEZONE;
+  });
+
+  it("is disabled when DIGEST_QUIET_HOURS is unset", () => {
+    expect(getQuietHoursConfig()).toBeNull();
+  });
+
+  it("parses the window and defaults the timezone to UTC", () => {
+    process.env.DIGEST_QUIET_HOURS = "22:00-07:30";
+    expect(getQuietHoursConfig()).toEqual({
+      startMinute: 22 * 60,
+      endMinute: 7 * 60 + 30,
+      timeZone: "UTC",
+    });
+  });
+
+  it("ignores malformed windows instead of blocking digests", () => {
+    for (const bad of ["22-07", "24:00-07:00", "22:00", "08:00-08:00"]) {
+      process.env.DIGEST_QUIET_HOURS = bad;
+      expect(getQuietHoursConfig()).toBeNull();
+    }
+  });
+
+  it("ignores an unknown timezone instead of blocking digests", () => {
+    process.env.DIGEST_QUIET_HOURS = "22:00-07:00";
+    process.env.DIGEST_TIMEZONE = "Mars/Olympus_Mons";
+    expect(getQuietHoursConfig()).toBeNull();
+  });
+});
+
+describe("isWithinQuietHours", () => {
+  const overnight = { startMinute: 22 * 60, endMinute: 7 * 60, timeZone: "UTC" };
+
+  it("handles windows that cross midnight (start inclusive, end exclusive)", () => {
+    expect(isWithinQuietHours(new Date("2026-01-05T21:59:00Z"), overnight)).toBe(false);
+    expect(isWithinQuietHours(new Date("2026-01-05T22:00:00Z"), overnight)).toBe(true);
+    expect(isWithinQuietHours(new Date("2026-01-06T03:00:00Z"), overnight)).toBe(true);
+    expect(isWithinQuietHours(new Date("2026-01-06T07:00:00Z"), overnight)).toBe(false);
+  });
+
+  it("handles same-day windows", () => {
+    const lunch = { startMinute: 12 * 60, endMinute: 13 * 60, timeZone: "UTC" };
+    expect(isWithinQuietHours(new Date("2026-01-05T12:30:00Z"), lunch)).toBe(true);
+    expect(isWithinQuietHours(new Date("2026-01-05T13:00:00Z"), lunch)).toBe(false);
+  });
+
+  it("evaluates the window in the configured timezone, including DST", () => {
+    const ny = { ...overnight, timeZone: "America/New_York" };
+    // 08:00 UTC is 03:00 EST in January (quiet) ...
+    expect(isWithinQuietHours(new Date("2026-01-05T08:00:00Z"), ny)).toBe(true);
+    // ... and 04:00 EDT in July (still quiet); 12:00 UTC is 08:00 EDT (not quiet).
+    expect(isWithinQuietHours(new Date("2026-07-06T08:00:00Z"), ny)).toBe(true);
+    expect(isWithinQuietHours(new Date("2026-07-06T12:00:00Z"), ny)).toBe(false);
+  });
+});
+
+describe("runCronDigest quiet hours", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetDigestState();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    process.env.DIGEST_EMAIL = "ops@example.com";
+    process.env.DIGEST_QUIET_HOURS = "22:00-07:00";
+    delete process.env.DIGEST_TIMEZONE;
+    delete process.env.DIGEST_CRON_MIN_INTERVAL_MS;
+    vi.mocked(prisma.registration.findMany).mockResolvedValue([readyReg] as never);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    delete process.env.DIGEST_QUIET_HOURS;
+    delete process.env.DIGEST_EMAIL;
+  });
+
+  it("skips a run delayed into quiet hours without querying or emailing", async () => {
+    vi.setSystemTime(new Date("2026-01-05T23:15:00Z"));
+
+    const result = await runCronDigest();
+
+    expect(result.status).toBe("skipped");
+    expect(result.error).toContain("Quiet hours");
+    expect(prisma.registration.findMany).not.toHaveBeenCalled();
+    expect(sendEmailNotification).not.toHaveBeenCalled();
+  });
+
+  it("does not rate-limit the first run after quiet hours end", async () => {
+    process.env.DIGEST_CRON_MIN_INTERVAL_MS = "86400000";
+    vi.setSystemTime(new Date("2026-01-06T06:30:00Z"));
+    expect((await runCronDigest()).status).toBe("skipped");
+
+    vi.setSystemTime(new Date("2026-01-06T08:00:00Z"));
+    expect((await runCronDigest()).status).toBe("ok");
+  });
+
+  it("force sends even during quiet hours", async () => {
+    vi.setSystemTime(new Date("2026-01-05T23:15:00Z"));
+
+    const result = await runCronDigest({ force: true });
+
+    expect(result.status).toBe("ok");
+    expect(sendEmailNotification).toHaveBeenCalledTimes(1);
   });
 });

@@ -97,6 +97,82 @@ export function isFullListEnabled(): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Quiet hours (#696)
+// ---------------------------------------------------------------------------
+
+export interface QuietHoursConfig {
+  /** Minutes after local midnight when quiet hours begin (inclusive). */
+  startMinute: number;
+  /** Minutes after local midnight when quiet hours end (exclusive). */
+  endMinute: number;
+  /** IANA timezone the window is evaluated in. */
+  timeZone: string;
+}
+
+const QUIET_HOURS_PATTERN = /^([01]\d|2[0-3]):([0-5]\d)-([01]\d|2[0-3]):([0-5]\d)$/;
+
+function isValidTimeZone(timeZone: string): boolean {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Parse `DIGEST_QUIET_HOURS` ("HH:MM-HH:MM", 24h) and `DIGEST_TIMEZONE`
+ * (IANA name, default "UTC"). Returns null when quiet hours are unset or
+ * misconfigured; a bad value is logged and never blocks the digest.
+ */
+export function getQuietHoursConfig(): QuietHoursConfig | null {
+  const raw = process.env.DIGEST_QUIET_HOURS?.trim();
+  if (!raw) return null;
+
+  const match = QUIET_HOURS_PATTERN.exec(raw);
+  if (!match) {
+    logger.warn("cron_digest_quiet_hours_invalid", { value: raw });
+    return null;
+  }
+  const startMinute = Number(match[1]) * 60 + Number(match[2]);
+  const endMinute = Number(match[3]) * 60 + Number(match[4]);
+  if (startMinute === endMinute) {
+    logger.warn("cron_digest_quiet_hours_empty", { value: raw });
+    return null;
+  }
+
+  const timeZone = process.env.DIGEST_TIMEZONE?.trim() || "UTC";
+  if (!isValidTimeZone(timeZone)) {
+    logger.warn("cron_digest_timezone_invalid", { value: timeZone });
+    return null;
+  }
+
+  return { startMinute, endMinute, timeZone };
+}
+
+/**
+ * True when `at` falls inside the quiet window in the configured timezone.
+ * Windows may cross midnight (e.g. 22:00-07:00). DST is handled by
+ * evaluating the wall-clock time in `timeZone` via Intl.
+ */
+export function isWithinQuietHours(at: Date, config: QuietHoursConfig): boolean {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: config.timeZone,
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(at);
+  const hour = Number(parts.find((p) => p.type === "hour")?.value ?? 0);
+  const minute = Number(parts.find((p) => p.type === "minute")?.value ?? 0);
+  const local = hour * 60 + minute;
+
+  const { startMinute, endMinute } = config;
+  return startMinute < endMinute
+    ? local >= startMinute && local < endMinute
+    : local >= startMinute || local < endMinute;
+}
+
+// ---------------------------------------------------------------------------
 // Rate gate (in-process; mirrors cron-export.ts)
 // ---------------------------------------------------------------------------
 
@@ -157,6 +233,20 @@ export async function runCronDigest(
       startedAt: new Date(now).toISOString(),
       durationMs: 0,
       error: `Rate limited: minimum interval between digests is ${minIntervalMs}ms`,
+    };
+  }
+
+  // ── Quiet hours ───────────────────────────────────────────────────────────
+  // Checked before lastRunAt is set, so a skipped run never rate-limits the
+  // first run after quiet hours end. Manual `force` runs are not deferred.
+  const quietHours = getQuietHoursConfig();
+  if (!options.force && quietHours && isWithinQuietHours(new Date(now), quietHours)) {
+    logger.info("cron_digest_skipped_quiet_hours", { timeZone: quietHours.timeZone });
+    return {
+      status: "skipped",
+      startedAt: new Date(now).toISOString(),
+      durationMs: 0,
+      error: `Quiet hours: digests are not sent during DIGEST_QUIET_HOURS (${quietHours.timeZone})`,
     };
   }
 

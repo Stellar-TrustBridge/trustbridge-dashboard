@@ -30,6 +30,9 @@ export const dynamic = "force-dynamic";
  * Schedule gate: in-process minimum interval (DIGEST_CRON_MIN_INTERVAL_MS,
  * default 1 hour) prevents spam from misconfigured schedulers.
  *
+ * Quiet hours: runs inside DIGEST_QUIET_HOURS (evaluated in DIGEST_TIMEZONE)
+ * return { status: "skipped" } with HTTP 200 — see docs/DIGEST.md.
+ *
  * Never throws: DB and email failures are returned as { status: "error" } with
  * HTTP 502 so the scheduler can log the failure without entering a retry storm.
  */

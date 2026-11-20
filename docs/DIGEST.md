@@ -37,9 +37,45 @@ audit log entry every time.
 | `DIGEST_CADENCE` | No | `daily` | Subject line label: `daily` or `weekly` |
 | `DIGEST_INCLUDE_FULL_LIST` | No | unset (off) | Set `true` to include per-contributor names + reasons |
 | `DIGEST_CRON_MIN_INTERVAL_MS` | No | `3600000` (1 hr) | Minimum ms between runs; prevents spam on misconfigured schedules |
+| `DIGEST_QUIET_HOURS` | No | unset (off) | `HH:MM-HH:MM` (24h) window in which scheduled digests are skipped, e.g. `22:00-07:00` |
+| `DIGEST_TIMEZONE` | No | `UTC` | IANA timezone the quiet-hours window is evaluated in, e.g. `Europe/Berlin` |
 | `CRON_SECRET` | Recommended | — | Shared bearer token for all `/api/cron/*` routes |
 
 See [ENVIRONMENT.md — Digest emails](./ENVIRONMENT.md#digest-emails-dailyweekly-not-ready-contributor-digest) for full details.
+
+---
+
+## Quiet hours and timezones
+
+Set `DIGEST_QUIET_HOURS` to stop digests landing at 3am for maintainers:
+
+```bash
+DIGEST_QUIET_HOURS=22:00-07:00
+DIGEST_TIMEZONE=America/New_York
+```
+
+- **Where the timezone lives:** it is a single deployment-wide setting
+  (`DIGEST_TIMEZONE`), not stored per user in the database. Pick the timezone
+  of the maintainer who receives `DIGEST_EMAIL`. Cron schedules themselves stay
+  in UTC.
+- **Window semantics:** start is inclusive, end is exclusive. Windows may cross
+  midnight (`22:00-07:00`). Wall-clock time is evaluated with `Intl`, so DST
+  shifts are handled automatically.
+- **Delayed into quiet hours:** if a scheduled run fires (or is retried late)
+  inside the window, it returns `{ status: "skipped", error: "Quiet hours: ..." }`
+  with HTTP 200. Nothing is queued; the next scheduled run sends as normal. A
+  skipped run does not count toward `DIGEST_CRON_MIN_INTERVAL_MS`, so it never
+  blocks that next run.
+- **Manual runs:** `runCronDigest({ force: true })` ignores quiet hours, the same
+  way it ignores the rate gate.
+- **Misconfiguration never blocks digests:** an invalid window (`22-07`,
+  `24:00-07:00`, equal start and end) or unknown timezone logs a
+  `cron_digest_quiet_hours_invalid`, `cron_digest_quiet_hours_empty` or
+  `cron_digest_timezone_invalid` warning and
+  the digest is sent as if quiet hours were unset.
+
+Make sure your cron schedule has at least one firing outside the window, or
+the digest will never send.
 
 ---
 
