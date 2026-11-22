@@ -242,59 +242,96 @@ export async function resolveDualAuth(
 }
 
 /**
- * GraphQL abuse-protection limits. These bound the cost of a single GraphQL
- * operation so a deeply nested or wide query cannot be used as a cheap DoS
- * against the Wave dashboard during traffic spikes.
- *
- * Operators can override the defaults via environment variables:
- * - `GRAPHQL_MAX_DEPTH` (default 10)
- * - `GRAPHQL_MAX_COMPLEXITY` (default 1000)
- *
- * Introspection is disabled in production unless `GRAPHQL_ALLOW_INTROSPECTION`
- * is set to `"true"` (useful for trusted tooling).
+ * Stable reason codes returned by {@link enforceInviteRateLimit} so the invites
+ * generate route can map failures to consistent HTTP responses.
  */
-export const GRAPHQL_DEFAULT_MAX_DEPTH = 10;
-export const GRAPHQL_DEFAULT_MAX_COMPLEXITY = 1000;
+export type InviteRateLimitReason =
+  | "rate_limited"
+  | "invalid_actor";
+
+export interface InviteRateLimitResult {
+  ok: boolean;
+  /** Remaining generations allowed in the current window. */
+  remaining: number;
+  /** Milliseconds until the window resets (0 when not limited). */
+  retryAfterMs: number;
+  /** Stable reason code when `ok` is false. */
+  reason?: InviteRateLimitReason;
+}
+
+interface InviteRateLimitBucket {
+  count: number;
+  resetAt: number;
+}
 
 /**
- * Stable reason codes returned when a GraphQL operation is rejected by the
- * abuse-protection limits. Documented in `docs/ARCHITECTURE.md`.
+ * Default invite-generation budget: 10 tokens per actor per 60s window.
+ * Overridable via `INVITE_GENERATE_RATE_LIMIT` (max generations) and
+ * `INVITE_GENERATE_RATE_WINDOW_MS` (window length) for operators.
  */
-export type GraphQLLimitReasonCode =
-  | "graphql_depth_exceeded"
-  | "graphql_complexity_exceeded"
-  | "graphql_introspection_disabled";
+const DEFAULT_INVITE_LIMIT = 10;
+const DEFAULT_INVITE_WINDOW_MS = 60_000;
+
+const inviteRateLimitBuckets = new Map<string, InviteRateLimitBucket>();
 
 function readPositiveIntEnv(name: string, fallback: number): number {
   const raw = process.env[name]?.trim();
   if (!raw) return fallback;
   const parsed = Number.parseInt(raw, 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
-  return parsed;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 /**
- * Resolve the effective GraphQL depth/complexity limits from the environment,
- * falling back to the documented defaults when unset or invalid.
+ * Reset the in-memory invite rate-limit state. Exposed for tests only.
  */
-export function getGraphQLLimits(): { maxDepth: number; maxComplexity: number } {
-  return {
-    maxDepth: readPositiveIntEnv("GRAPHQL_MAX_DEPTH", GRAPHQL_DEFAULT_MAX_DEPTH),
-    maxComplexity: readPositiveIntEnv(
-      "GRAPHQL_MAX_COMPLEXITY",
-      GRAPHQL_DEFAULT_MAX_COMPLEXITY
-    ),
-  };
+export function resetInviteRateLimit(): void {
+  inviteRateLimitBuckets.clear();
 }
 
 /**
- * Whether GraphQL introspection is permitted. Disabled in production unless
- * explicitly opted in via `GRAPHQL_ALLOW_INTROSPECTION=true`; always allowed
- * outside production so local tooling keeps working.
+ * Enforce a per-actor sliding-window rate limit on invite generation. This
+ * resists token enumeration and abuse of the generate route. The actor key is
+ * the maintainer's stable user id; requests without one are rejected with
+ * `invalid_actor` so anonymous callers can never consume the budget.
+ *
+ * The limiter is process-local (best-effort) and intentionally dependency-free
+ * to match the existing route patterns; operators behind multiple instances
+ * should also front the route with an edge rate limiter.
  */
-export function isGraphQLIntrospectionAllowed(): boolean {
-  if (process.env.NODE_ENV !== "production") return true;
-  return process.env.GRAPHQL_ALLOW_INTROSPECTION?.trim().toLowerCase() === "true";
+export function enforceInviteRateLimit(
+  actorId: string | null | undefined,
+  now: number = Date.now()
+): InviteRateLimitResult {
+  const limit = readPositiveIntEnv("INVITE_GENERATE_RATE_LIMIT", DEFAULT_INVITE_LIMIT);
+  const windowMs = readPositiveIntEnv(
+    "INVITE_GENERATE_RATE_WINDOW_MS",
+    DEFAULT_INVITE_WINDOW_MS
+  );
+
+  if (!actorId || typeof actorId !== "string" || actorId.trim().length === 0) {
+    return { ok: false, remaining: 0, retryAfterMs: 0, reason: "invalid_actor" };
+  }
+
+  const key = actorId.trim();
+  const bucket = inviteRateLimitBuckets.get(key);
+
+  if (!bucket || bucket.resetAt <= now) {
+    inviteRateLimitBuckets.set(key, { count: 1, resetAt: now + windowMs });
+    return { ok: true, remaining: limit - 1, retryAfterMs: 0 };
+  }
+
+  if (bucket.count >= limit) {
+    return {
+      ok: false,
+      remaining: 0,
+      retryAfterMs: Math.max(0, bucket.resetAt - now),
+      reason: "rate_limited",
+    };
+  }
+
+  bucket.count += 1;
+  return { ok: true, remaining: limit - bucket.count, retryAfterMs: 0 };
 }
 
-export { hasMinimumRole, ROLE_HIERARCHY };
+/**
+ * GraphQL abuse-protection limits. These bound the cost 

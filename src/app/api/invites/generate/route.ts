@@ -15,6 +15,26 @@ import {
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+// Rate limit: max generations per admin within a rolling window. Guards the
+// generate route against enumeration/abuse of the invite surface (issue #670).
+const GENERATE_RATE_LIMIT_MAX = 20;
+const GENERATE_RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000;
+const generateRateLimitBuckets = new Map<string, number[]>();
+
+function checkGenerateRateLimit(actorId: string, now: number): boolean {
+  const windowStart = now - GENERATE_RATE_LIMIT_WINDOW_MS;
+  const hits = (generateRateLimitBuckets.get(actorId) ?? []).filter(
+    (ts) => ts > windowStart
+  );
+  if (hits.length >= GENERATE_RATE_LIMIT_MAX) {
+    generateRateLimitBuckets.set(actorId, hits);
+    return false;
+  }
+  hits.push(now);
+  generateRateLimitBuckets.set(actorId, hits);
+  return true;
+}
+
 interface GenerateBulkInvitesRequest {
   count?: number;
   expiryDays?: number;
@@ -43,6 +63,22 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(
       { error: "Invite generation is currently disabled" },
       { status: 403 }
+    );
+  }
+
+  if (!checkGenerateRateLimit(session.user.id, Date.now())) {
+    await recordAuditLog({
+      action: "invites.generate_rate_limited",
+      actorId: session.user.id,
+      actorLogin: session.user.githubUsername ?? null,
+      metadata: { max: GENERATE_RATE_LIMIT_MAX, windowMs: GENERATE_RATE_LIMIT_WINDOW_MS },
+    });
+    return NextResponse.json(
+      {
+        error: "Too many invite generation requests",
+        reason: "rate_limited",
+      },
+      { status: 429 }
     );
   }
 
