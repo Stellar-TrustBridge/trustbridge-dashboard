@@ -54,6 +54,46 @@ standard structured/redacted error reporting.
 recent deleted registrations (default page size 25, capped at 100) and asks for
 confirmation before calling the restore endpoint.
 
+## Delete policy: soft-delete versus hard-delete
+
+Self-delete through `src/app/api/register/delete/route.ts` is a **soft delete**.
+The route never issues a `DELETE`/`deleteMany` against the `Registration`
+table; it only sets `deletedAt`. Concretely:
+
+- **Soft delete (implemented).** The row, its `stellarAddress`, its
+  `maintainerOrgId`, and its audit trail remain in PostgreSQL. Readiness and
+  contributor-list queries filter on `deletedAt IS NULL`, so the registration
+  disappears from the active surface but is fully **restorable by maintainers**
+  via `POST /api/registrations/:id/restore` (see above).
+- **Hard delete (not implemented).** There is no route, flag, or env var that
+  permanently removes a `Registration` row on self-delete. Permanent removal is
+  only reachable through the retention/purge job described below, which is
+  dry-run by default and requires an explicit real-purge request. A hard-deleted
+  row is **not restorable**; only the audit trail survives.
+
+Because self-delete is soft, a GDPR erasure request that requires permanent
+removal must go through the retention purge path (with a dry-run report
+archived first), not through the self-delete route. This distinction is what
+keeps Wave operators from assuming a self-delete already purged the record.
+
+### Policy tests
+
+The delete route's semantics are pinned by automated tests
+(`src/app/api/register/delete/route.test.ts`). They assert:
+
+- **Happy path** — an authorized, same-origin, in-scope self-delete returns
+  success, sets `deletedAt` (soft delete), writes a `registration.delete` audit
+  entry, and leaves the row restorable.
+- **Failure: unauthenticated / missing session** — returns `403` with no
+  `update`, no audit entry, and no cache invalidation.
+- **Failure: cross-origin request** — `assertSameOrigin` rejects with `403`
+  before any DB work.
+- **Failure: out-of-scope or already-deleted target** — returns `404` with no
+  mutation, matching the tombstone-enumeration guard used by restore.
+
+If the route ever drifts to a hard delete, these tests fail, forcing a matching
+update to this document and to the audit reason codes below.
+
 ## Authorization and response semantics
 
 | Situation | Status | Notes |
@@ -134,7 +174,8 @@ concurrent invocations are idempotent and leave no partial privileged state.
 
 - `AuditAction` in `src/types/index.ts` includes `registration.delete` and
   `registration.restore`; query `/api/audit` for either action to reconstruct a
-  tombstone's lifecycle.
+  tombstone's lifecycle. Self-delete writes `registration.delete` (soft); a
+  retention purge is the only path that permanently removes a row.
 - The OpenAPI document (`src/lib/openapi-spec.ts`) describes the restore `409`
   as the address-conflict case, not as "registration is not deleted" (which is
   a `404`).

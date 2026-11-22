@@ -125,7 +125,48 @@ export async function recordRetentionDryRunAudit(input: {
       candidateCount: input.candidateCount,
       cutoff: input.cutoff,
       reasonCode: input.reasonCode ?? null,
+    },
+  });
+}
 
+/**
+ * Record a self-service registration delete performed via
+ * `POST /api/register/delete`.
+ *
+ * The delete route implements a **soft-delete** policy: the contributor row is
+ * retained with `deletedAt` set (and PII redacted per the retention policy) so
+ * Wave maintainers can restore it within the retention window. This helper
+ * encodes that policy in the audit trail with a stable metadata shape so the
+ * soft-delete versus hard-delete semantics stay observable and testable.
+ *
+ * `mode` is always `"soft"` for the current route; it is recorded explicitly
+ * so any future hard-delete path must declare itself and cannot silently drift
+ * the retention contract. Best-effort like {@link recordAuditLog}.
+ */
+export async function recordRegistrationDeleteAudit(input: {
+  actorId?: string | null;
+  actorLogin?: string | null;
+  registrationId: string;
+  mode: "soft" | "hard";
+  restorable: boolean;
+  reasonCode?: string | null;
+}): Promise<void> {
+  await recordAuditLog({
+    action: "registrations.delete",
+    actorId: input.actorId ?? null,
+    actorLogin: input.actorLogin ?? null,
+    targetId: input.registrationId,
+    targetLabel: input.registrationId,
+    metadata: {
+      registrationId: input.registrationId,
+      mode: input.mode,
+      restorable: input.restorable,
+      reasonCode: input.reasonCode ?? null,
+    },
+  });
+}
+
+/**
  * Record a DLQ replay attempt (success or failure).
  *
  * Wraps {@link recordAuditLog} with the canonical action name and a stable
