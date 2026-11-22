@@ -44,8 +44,12 @@ export interface ProcessEventResult {
  * `x-hub-signature-256` header.  We recompute the HMAC over the raw body
  * and compare with a constant-time equality check to resist timing attacks.
  *
- * Returns `{ ok: false }` (never throws) so callers can always branch on the
- * result without wrapping in try/catch.
+ * Fail-closed: any missing secret, missing header, malformed scheme, bad
+ * hex encoding, or length mismatch returns `{ ok: false }` (never throws) so
+ * callers can always branch on the result without wrapping in try/catch.
+ *
+ * The raw body MUST be the exact bytes GitHub signed — do not re-serialize
+ * parsed JSON before calling this, or the HMAC will not match.
  */
 export function verifyWebhookSignature(
   rawBody: string,
@@ -83,6 +87,12 @@ export function verifyWebhookSignature(
   // Use timingSafeEqual to prevent timing-oracle attacks.
   const expected = Buffer.from(expectedHex, "hex");
   const received = Buffer.from(receivedHex, "hex");
+
+  // Defensive: timingSafeEqual throws on length mismatch. We already guard
+  // above, but keep this fail-closed in case the guard ever changes.
+  if (expected.length !== received.length) {
+    return { ok: false, reason: "Signature length mismatch" };
+  }
 
   const match = timingSafeEqual(expected, received);
   return match ? { ok: true } : { ok: false, reason: "Signature mismatch" };
