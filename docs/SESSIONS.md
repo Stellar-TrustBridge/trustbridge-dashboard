@@ -24,6 +24,45 @@ beyond the opaque session identifier.
 4. **Revocation** — Sign-out, password changes, and explicit revocation delete
    the server-side session record so the cookie can no longer be resolved.
 
+## Concurrent session limits
+
+Concurrent sessions **are limited per user**. The limit bounds how many active
+sessions a single user may hold at once, which caps the persistence window an
+attacker gains from a stolen credential.
+
+- **Default limit** — `MAX_CONCURRENT_SESSIONS` (default `5`). Set it via
+  environment configuration; see `docs/FEATURE_FLAGS.md` for gating.
+- **Enforcement** — When a new session is created and the user already holds
+  `MAX_CONCURRENT_SESSIONS` active sessions, the **oldest** session (by
+  last-seen time) is revoked before the new one is persisted. The new sign-in
+  always succeeds; the evicted session's cookie can no longer be resolved.
+- **Idempotency** — Re-authenticating from an existing session refreshes that
+  session rather than creating a duplicate, so repeated sign-ins do not consume
+  additional slots.
+- **Operator visibility** — Evictions are recorded server-side so operators can
+  audit unexpected churn. No session identifiers are logged; only the owning
+  user and a stable reason code (`session_limit_evicted`).
+
+## Revocation
+
+- **Sign-out** deletes the current session record immediately.
+- **Password change** revokes all of the user's sessions except the one used to
+  perform the change.
+- **Explicit revocation** (operator or self-service) deletes the targeted
+  session record; the cookie becomes unresolvable on the next request.
+- **Limit eviction** revokes the oldest session as described above.
+
+Revocation is server-side and effective immediately; there is no grace window.
+
+## Org-switch interaction
+
+Switching the active organization does **not** create a new session and does
+**not** consume a concurrent-session slot. The active org is stored on the
+existing session record and updated in place. Because the session identifier is
+unchanged, org-switch preserves the existing CSRF token binding and does not
+trigger rotation. Revoking a session revokes it for all orgs the user belongs
+to.
+
 ## Storage
 
 - Session records are stored server-side; the client only ever holds the opaque
@@ -40,12 +79,14 @@ beyond the opaque session identifier.
 - **Rotation** on privilege change (e.g. sign-in, password change) prevents
   session fixation.
 - **Server-side revocation** ensures sign-out is effective immediately.
+- **Concurrent session limits** bound takeover persistence from stolen
+  credentials.
 
 ## Configuration
 
 Session behavior is controlled by environment configuration (idle timeout,
-absolute lifetime, cookie flags). Feature-gated behavior is documented in
-`docs/FEATURE_FLAGS.md`.
+absolute lifetime, cookie flags, and `MAX_CONCURRENT_SESSIONS`). Feature-gated
+behavior is documented in `docs/FEATURE_FLAGS.md`.
 
 ## Testing
 

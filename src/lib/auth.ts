@@ -8,7 +8,6 @@ export interface SessionUser {
   role: Role;
   orgs: string[];
 }
-
 export interface AuthResult {
   ok: boolean;
   user?: SessionUser;
@@ -17,6 +16,19 @@ export interface AuthResult {
 }
 
 const MAINTAINER_ROLES: Role[] = ["maintainer", "admin"];
+
+/**
+ * Maximum number of concurrent sessions a single user may hold.
+ *
+ * Maintainers and admins are capped tighter than contributors because an
+ * unlimited number of live maintainer sessions increases takeover
+ * persistence. See docs/SESSIONS.md for the full policy.
+ */
+export const MAX_CONCURRENT_SESSIONS: Record<Role, number> = {
+  contributor: 10,
+  maintainer: 5,
+  admin: 3,
+};
 
 /**
  * Resolve the authenticated user from the request.
@@ -97,4 +109,36 @@ export function requireMaintainer(
     return { ok: false, error: "forbidden", status: 403 };
   }
   return auth;
+}
+
+/**
+ * The per-role concurrent session cap for a user.
+ */
+export function maxSessionsForRole(role: Role): number {
+  return MAX_CONCURRENT_SESSIONS[role] ?? MAX_CONCURRENT_SESSIONS.contributor;
+}
+
+/**
+ * Whether a user may open another concurrent session given the number of
+ * sessions they currently hold. Returns a stable reason code
+ * (`session_limit_exceeded`) when the cap is reached so route handlers can
+ * surface an actionable error instead of silently succeeding.
+ *
+ * Org switching does not create a new session and therefore does not count
+ * against the limit; see docs/SESSIONS.md.
+ */
+export function checkSessionLimit(
+  user: SessionUser | null | undefined,
+  activeSessions: number,
+): AuthResult {
+  if (!user) {
+    return { ok: false, error: "unauthenticated", status: 401 };
+  }
+  if (!Number.isFinite(activeSessions) || activeSessions < 0) {
+    return { ok: false, error: "invalid_session_count", status: 400 };
+  }
+  if (activeSessions >= maxSessionsForRole(user.role)) {
+    return { ok: false, error: "session_limit_exceeded", status: 429 };
+  }
+  return { ok: true, user };
 }

@@ -121,3 +121,13 @@ This tooling **does not** rotate credentials. If malware was confirmed on a mach
 1. Stop using that machine for privileged work.
 2. From a clean device, rotate GitHub, npm, cloud, SSH, wallet, and CI secrets.
 3. Review recent publishes and force-pushes on your accounts.
+
+## Session limits and revocation (see `docs/SESSIONS.md`)
+
+Concurrent session limits and revocation are documented in [`docs/SESSIONS.md`](./SESSIONS.md). Security-relevant summary for operators:
+
+- **Concurrent session limit:** each user has a bounded number of active sessions; exceeding the limit evicts the oldest session (stable reason code `SESSION_LIMIT_EXCEEDED`). This bounds takeover persistence from stolen credentials.
+- **Revocation:** sessions can be revoked individually or all-at-once; revocation is idempotent and takes effect on the next request (no partial privileged state).
+- **Org-switch interaction:** switching orgs does not create a new session or bypass the limit; the same session is re-scoped to the target org and existing org-scope/CSRF rules still apply.
+
+If a session limit or revocation is suspected to be bypassed, treat it as a security issue and follow the credential-exposure steps above.
