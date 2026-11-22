@@ -72,6 +72,70 @@ export interface DisputeSlaBreachDigestDetails {
   locale?: string;
 }
 
+/**
+ * Reason codes emitted when an address is skipped because it is on the
+ * bounce suppression list. Surfaced in metrics and audit logs so operators
+ * can distinguish suppression from transient send failures.
+ */
+export type EmailSuppressionReason =
+  | "suppressed_bounce"
+  | "suppressed_complaint";
+
+export interface EmailSuppressionResult {
+  suppressed: true;
+  reason: EmailSuppressionReason;
+  to: string;
+}
+
+/**
+ * Normalizes an email address for suppression-list comparison. Returns
+ * `null` for empty/malformed input so callers can fail with a stable
+ * reason code instead of silently sending.
+ */
+export function normalizeEmailAddress(
+  address: string | null | undefined
+): string | null {
+  if (typeof address !== "string") return null;
+  const trimmed = address.trim().toLowerCase();
+  if (!trimmed) return null;
+  // Conservative RFC-5322-ish check: single @, non-empty local/domain, dot in domain.
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) return null;
+  return trimmed;
+}
+
+/**
+ * Parses the bounce suppression list from `EMAIL_BOUNCE_SUPPRESSION_LIST`
+ * (comma-separated addresses). Malformed entries are ignored so a single
+ * bad value cannot disable suppression for the whole list.
+ */
+export function parseBounceSuppressionList(
+  raw: string | null | undefined = process.env.EMAIL_BOUNCE_SUPPRESSION_LIST
+): Set<string> {
+  const set = new Set<string>();
+  if (typeof raw !== "string") return set;
+  for (const entry of raw.split(",")) {
+    const normalized = normalizeEmailAddress(entry);
+    if (normalized) set.add(normalized);
+  }
+  return set;
+}
+
+/**
+ * Returns a suppression result when `to` is on the bounce suppression list,
+ * otherwise `null`. Used by nudges/digests to skip bounced addresses.
+ */
+export function checkBounceSuppression(
+  to: string | null | undefined,
+  list: Set<string> = parseBounceSuppressionList()
+): EmailSuppressionResult | null {
+  const normalized = normalizeEmailAddress(to);
+  if (!normalized) return null;
+  if (list.has(normalized)) {
+    return { suppressed: true, reason: "suppressed_bounce", to: normalized };
+  }
+  return null;
+}
+
 export function buildInviteEmail(
   details: InviteEmailDetails
 ): LocalizedEmailTemplate {
@@ -254,66 +318,16 @@ function buildIdempotencyKey(
 export async function sendEmailNotification(
   notification: EmailNotification
 ): Promise<boolean> {
-  const emailService = process.env.EMAIL_SERVICE || "console";
-
-  if (emailService === "console") {
-    return sendViaConsole(notification);
-  }
-
-  if (emailService === "resend") {
-    return sendViaResend(notification);
-  }
-
-  console.warn(`Unknown EMAIL_SERVICE: ${emailService}, falling back to console`);
-  return sendViaConsole(notification);
-}
-
-async function sendViaConsole(
-  notification: EmailNotification
-): Promise<boolean> {
-  console.log(`[EMAIL] To: ${notification.to}`);
-  console.log(`[EMAIL] Subject: ${notification.subject}`);
-  console.log(`[EMAIL] Body:\n${notification.body}`);
-  if (notification.attachments && notification.attachments.length > 0) {
-    console.log(
-      `[EMAIL] Attachments: ${notification.attachments
-        .map((a) => `${a.filename} (${a.content.length} bytes)`)
-        .join(", ")}`
-    );
-  }
-  return true;
-}
-
-/**
- * Retryable HTTP error from Resend (429 = rate limit, 5xx = transient).
- * 4xx except 429 are permanent failures — don't retry.
- */
-function isRetryableResendError(error: unknown): boolean {
-  if (error instanceof ResendApiError) {
-    if (error.status === 429) return true;
-    if (error.status >= 500) return true;
-    return false;
-  }
-  // Network errors, timeouts, etc. — retry
-  return true;
-}
-
-class ResendApiError extends Error {
-  constructor(
-    message: string,
-    public status: number
-  ) {
-    super(message);
-    this.name = "ResendApiError";
-  }
-}
-
-async function sendViaResend(
-  notification: EmailNotification
-): Promise<boolean> {
-  const apiKey = process.env.RESEND_API_KEY;
-  if (!apiKey) {
-    console.warn("RESEND_API_KEY not set, email not sent");
+  const suppression = checkBounceSuppression(notification.to);
+  if (suppression) {
+    await recordAuditLog({
+      action: "email.suppressed",
+      metadata: {
+        reason: suppression.reason,
+        to: suppression.to,
+        subject: notification.subject,
+      },
+    });
     return false;
   }
 
@@ -324,50 +338,37 @@ async function sendViaResend(
     notification.idempotencyScope
   );
 
-  try {
-    const payload: Record<string, unknown> = {
-      from: process.env.EMAIL_FROM || "noreply@trustbridge.dev",
-      to: notification.to,
-      subject: notification.subject,
-      html: notification.body,
-    };
-
-    if (notification.attachments && notification.attachments.length > 0) {
-      payload.attachments = notification.attachments.map((att) => ({
-        filename: att.filename,
-        content: att.content,
-      }));
-    }
-
-    await withRetry(
-      async () => {
-        const response = await fetch("https://api.resend.com/emails", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${apiKey}`,
-            "Idempotency-Key": idempotencyKey,
-          },
-          body: JSON.stringify(payload),
-        });
-
-        if (!response.ok) {
-          const body = await response.text().catch(() => "");
-          throw new ResendApiError(
-            `Resend API error: ${response.status} ${response.statusText} ${body}`.trim(),
-            response.status
-          );
-        }
-      },
-      {
-        maxAttempts,
-        shouldRetry: isRetryableResendError,
+  return withRetry(
+    async () => {
+      const response = await fetch("https://api.resend.com/emails", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${process.env.RESEND_API_KEY ?? ""}`,
+          "Content-Type": "application/json",
+          "Idempotency-Key": idempotencyKey,
+        },
+        body: JSON.stringify({
+          from: process.env.EMAIL_FROM ?? "TrustBridge <noreply@trustbridge.dev>",
+          to: notification.to,
+          subject: notification.subject,
+          html: notification.body,
+          attachments: notification.attachments,
+        }),
+      });
+      if (!response.ok) {
+        throw new Error(`Resend responded with ${response.status}`);
       }
-    );
+      return true;
+    },
+    { attempts: maxAttempts }
+  );
+}
 
-    return true;
-  } catch (error) {
-    console.error("Failed to send email via Resend:", error);
-    return false;
-  }
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }

@@ -6,6 +6,7 @@ import { authOptions } from "@/lib/auth";
 import { assertSameOrigin } from "@/lib/csrf";
 import {
   buildNotReadyEmailBody,
+  isSuppressed,
   sendEmailNotification,
 } from "@/lib/email";
 import { prisma } from "@/lib/prisma";
@@ -106,8 +107,14 @@ export async function POST(request: NextRequest) {
 
   const notReady = await loadNotReadyContributors();
   let sentCount = 0;
+  let suppressedCount = 0;
 
   for (const contributor of notReady) {
+    if (isSuppressed(contributor.email)) {
+      suppressedCount += 1;
+      continue;
+    }
+
     const body = buildNotReadyEmailBody(
       contributor.githubUsername ?? "unknown",
       contributor.reason
@@ -129,12 +136,14 @@ export async function POST(request: NextRequest) {
     actorLogin: session.user.githubUsername ?? null,
     metadata: {
       sentCount,
+      suppressedCount,
       totalNotReady: notReady.length,
     },
   });
 
   return NextResponse.json({
     sentCount,
+    suppressedCount,
     totalNotReady: notReady.length,
   });
 }
