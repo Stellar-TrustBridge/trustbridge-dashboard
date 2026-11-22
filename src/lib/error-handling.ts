@@ -217,6 +217,23 @@ export function apiErrorResponse(
 }
 
 /**
+ * Representative error response examples for maintainer mutation routes.
+ * These are surfaced in `src/app/api/openapi.json/route.ts` so integrators
+ * can see the exact envelope shape for 401/403/422 responses. Shapes are
+ * produced via `createApiError` to guarantee they match the live envelope.
+ */
+export const mutationErrorExamples: Record<'401' | '403' | '422', ApiErrorBody> = {
+  '401': createApiError('UNAUTHORIZED', 'Authentication required to perform this mutation.'),
+  '403': createApiError(
+    'FORBIDDEN',
+    'Caller lacks the required org scope or CSRF token for this mutation.'
+  ),
+  '422': createApiError('VALIDATION_ERROR', 'Request body failed validation.', {
+    fields: [{ path: 'body.title', message: 'Required' }],
+  }),
+};
+
+/**
  * Match actual HTTP 5xx server status codes, or explicit server-error enums,
  * without misclassifying unrelated numeric fragments like "field 5".
  */
