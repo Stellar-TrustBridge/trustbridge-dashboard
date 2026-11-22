@@ -10,8 +10,36 @@ import type { ContributorRow } from "@/types";
 const CSV_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 let cachedCsv: { data: string; timestamp: number } | null = null;
 
+/**
+ * UTF-8 BOM policy for Excel compatibility.
+ *
+ * Excel (Windows, and macOS in some locales) mis-decodes UTF-8 CSV files that
+ * lack a byte-order mark, producing mojibake in payout spreadsheets. We default
+ * to emitting the BOM so Excel opens exports correctly, while allowing callers
+ * to opt out (e.g. for tooling that treats the BOM as data).
+ *
+ * The BOM is prepended AFTER serialization so it never participates in cell
+ * escaping or the CSV injection guards applied by `buildCsv`.
+ */
+export const UTF8_BOM = "\uFEFF";
+
+export interface CsvExportOptions {
+  /** Prepend a UTF-8 BOM for Excel compatibility. Defaults to `true`. */
+  bom?: boolean;
+}
+
+function applyBom(csv: string, options?: CsvExportOptions): string {
+  const includeBom = options?.bom ?? true;
+  if (!includeBom) {
+    return csv;
+  }
+  // Avoid double-prefixing if the serialized output already starts with a BOM.
+  return csv.startsWith(UTF8_BOM) ? csv : `${UTF8_BOM}${csv}`;
+}
+
 export function buildContributorsCsv(
-  contributors: ContributorRow[]
+  contributors: ContributorRow[],
+  options?: CsvExportOptions
 ): string {
   const headers = [
     "id",
@@ -67,14 +95,17 @@ export function buildContributorsCsv(
     ];
   });
 
-  return buildCsv(headers, rows);
+  return applyBom(buildCsv(headers, rows), options);
 }
 
 export function getContributorsCsvFilename(date = new Date()): string {
   return buildCsvFilename("contributors", date);
 }
 
-export function getCachedCsv(contributors: ContributorRow[]): string {
+export function getCachedCsv(
+  contributors: ContributorRow[],
+  options?: CsvExportOptions
+): string {
   const now = Date.now();
 
   if (
@@ -84,7 +115,7 @@ export function getCachedCsv(contributors: ContributorRow[]): string {
     return cachedCsv.data;
   }
 
-  const csv = buildContributorsCsv(contributors);
+  const csv = buildContributorsCsv(contributors, options);
   cachedCsv = { data: csv, timestamp: now };
   return csv;
 }

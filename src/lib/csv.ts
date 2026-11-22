@@ -1,11 +1,28 @@
+export const UTF8_BOM = "\uFEFF";
+
+export interface CsvBuildOptions {
+  /**
+   * Prepend a UTF-8 BOM so Excel detects the encoding and avoids mojibake.
+   * Defaults to `true` for Excel compatibility; pass `false` to opt out.
+   */
+  bom?: boolean;
+}
+
 export function escapeCsvCell(value: unknown): string {
   return `"${String(value ?? "").replace(/"/g, '""')}"`;
 }
 
-export function buildCsv(headers: string[], rows: unknown[][]): string {
-  return [headers, ...rows]
+export function buildCsv(
+  headers: string[],
+  rows: unknown[][],
+  options: CsvBuildOptions = {},
+): string {
+  const body = [headers, ...rows]
     .map((line) => line.map(escapeCsvCell).join(","))
     .join("\n");
+  // BOM is prepended after serialization so it never lands inside a cell and
+  // the formula-injection escaping above still applies to every cell.
+  return options.bom === false ? body : `${UTF8_BOM}${body}`;
 }
 
 export function buildCsvFilename(prefix: string, date = new Date()): string {

@@ -15,6 +15,7 @@ import {
 import {
   buildContributorsCsv,
   getContributorsCsvFilename,
+  parseBomOption,
 } from "@/lib/csv-export";
 
 export const runtime = "nodejs";
@@ -57,6 +58,19 @@ export async function GET(request: NextRequest) {
     actorLogin = `api-key:${apiKeyAuth.name}`;
   }
 
+  // ── BOM policy: default on for Excel; opt out via ?bom=0 ──────────────
+  const bomParam = request.nextUrl.searchParams.get("bom");
+  const bomOption = parseBomOption(bomParam);
+  if (bomOption === null) {
+    return NextResponse.json(
+      {
+        error: "Invalid bom parameter",
+        details: "Expected one of: 1, 0, true, false, on, off",
+      },
+      { status: 400 }
+    );
+  }
+
   try {
     const { contributors, total } = await getContributors();
 
@@ -67,7 +81,7 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const csv = buildContributorsCsv(contributors);
+    const csv = buildContributorsCsv(contributors, { bom: bomOption });
     const filename = getContributorsCsvFilename();
 
     await recordAuditLog({
@@ -77,6 +91,7 @@ export async function GET(request: NextRequest) {
       metadata: {
         contributorCount: total,
         filename,
+        bom: bomOption,
       },
     });
 
