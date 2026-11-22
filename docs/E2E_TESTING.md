@@ -20,6 +20,29 @@ npx playwright show-report              # last run
 | `tests/e2e/settings-feature-flags.spec.ts` | Feature-flag panel on `/dashboard/settings` (issue #510): renders mocked flags with their keys, sources and enabled/disabled states, plus the loading, empty, error (HTTP 500) and re-request states. `GET /api/settings/feature-flags` resolves the deployment's real `FEATURE_*` environment, so every case intercepts it — see below. |
 | `tests/e2e/maintainer-a11y.spec.ts` | Accessibility gate for the maintainer settings page and the Wave prep / disputes sections (issue #511): runs axe against `/dashboard/settings`, the Wave prep workspace and the disputes panel, fails on serious/critical violations, and asserts keyboard focus order reaches the primary actions. |
 
+### Unit tests for client-side progress hook
+
+`src/lib/use-job-progress.test.ts` covers the SSE reconnect-backoff logic with
+a minimal `EventSource` stub (no browser required). It runs under Vitest with
+`jsdom` and fake timers:
+
+```bash
+npm test -- use-job-progress
+```
+
+Scenarios covered:
+
+| Test | What it proves |
+| --- | --- |
+| Happy path — progress event | `isStreaming: true`, `event.processed` updated |
+| Happy path — `completed` | `isStreaming` flips to `false`, no error |
+| `error` event | `error` set, `isStreaming: false` |
+| First reconnect fires after `reconnectDelayMs` | New `EventSource` created after the timer |
+| Backoff increases exponentially on consecutive failures | Delay 2 is 1.5× delay 1 |
+| `maxReconnectAttempts` exhausted | Permanent error, `isStreaming: false` |
+| Stale state preserved while reconnecting | Last `event` survives the connection drop |
+| `stopProgress` cancels timers | No new `EventSource` after `stopProgress` |
+
 ## Accessibility gate (axe-core)
 
 Issue #142. Each spec file has one test that signs in, loads its page to a

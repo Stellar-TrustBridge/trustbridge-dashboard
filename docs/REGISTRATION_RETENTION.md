@@ -37,8 +37,10 @@ standard structured/redacted error reporting.
    newest-first with cursor pagination (`limit` default 25, max 100). The lookup
    is scoped to `session.user.maintainerOrgId` when present, so a maintainer
    cannot page through another org's tombstones. Each item exposes `id`,
-   `stellarAddress`, `userId`, `githubUsername`, `deletedAt`, `createdAt`, and
-   `updatedAt`.
+   `stellarAddress`, `userId`, `githubUsername`, `deletedAt`, `createdAt`,
+   `updatedAt`, and **`retentionCountdownDays`** (see below). The response
+   envelope also includes a top-level `retentionDays` field (the configured
+   purge window) so the UI can display it without a separate API call.
 3. **Restore** — `POST /api/registrations/:id/restore` (maintainer only,
    same-origin) finds a row where `id` matches, `deletedAt` is not null, and
    `maintainerOrgId` matches the session's org when one is configured. It then
@@ -129,6 +131,54 @@ Dry-run report generation fails with stable, documented reason codes:
 Failures never report silent success: a non-`ok` result always carries one of
 the reason codes above. Dry-run never deletes records, so repeated or
 concurrent invocations are idempotent and leave no partial privileged state.
+
+## Retention countdown
+
+Every item returned by `GET /api/registrations/deleted` now includes a
+`retentionCountdownDays` field — a non-negative integer representing whole
+calendar days until the registration is eligible for hard purge by the
+retention job.
+
+```jsonc
+{
+  "registrations": [
+    {
+      "id": "reg_123",
+      "stellarAddress": "G...",
+      "userId": "user_abc",
+      "githubUsername": "alice",
+      "deletedAt": "2026-10-15T12:00:00.000Z",
+      "createdAt": "2026-01-01T00:00:00.000Z",
+      "updatedAt": "2026-10-15T12:00:00.000Z",
+      "retentionCountdownDays": 60   // days until hard-purge eligibility
+    }
+  ],
+  "hasMore": false,
+  "retentionDays": 90               // top-level: configured purge window
+}
+```
+
+### Countdown semantics
+
+| Value | Meaning |
+|-------|---------|
+| > 0 | Days remaining before hard-purge eligibility |
+| 0 | Purge window has elapsed; registration is overdue for hard purge |
+| `null` | Registration is not soft-deleted (never returned by this endpoint) |
+
+The countdown is computed from `deletedAt + REGISTRATION_RETENTION_DAYS` minus
+the server clock at request time. It is rounded **up** (ceiling) so a countdown
+of `1` means "less than 24 hours remain". Maintainers should restore or
+acknowledge registrations before the countdown reaches `0`.
+
+### Environment variable
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `REGISTRATION_RETENTION_DAYS` | `90` | Days after soft-delete that a registration is eligible for hard purge |
+
+The same variable is read by the retention dry-run (`runRetentionDryRun` in
+`src/lib/cron-export.ts`), so the countdown and dry-run reports always agree.
 
 ## Operator notes
 

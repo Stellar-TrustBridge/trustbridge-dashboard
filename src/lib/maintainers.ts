@@ -220,16 +220,55 @@ export async function listRegistrationConflicts(options?: {
   });
 }
 
+const DEFAULT_REGISTRATION_RETENTION_DAYS = 90;
+
+/**
+ * Read the configured retention period in days from the environment.
+ * Falls back to 90 days when unset or invalid, matching the cron-export default.
+ */
+export function getRegistrationRetentionDays(): number {
+  const parsed = Number.parseInt(
+    process.env.REGISTRATION_RETENTION_DAYS ?? "",
+    10
+  );
+  return Number.isFinite(parsed) && parsed >= 0
+    ? parsed
+    : DEFAULT_REGISTRATION_RETENTION_DAYS;
+}
+
+/**
+ * Compute how many whole days remain before a soft-deleted registration would
+ * be eligible for hard purge by the retention job.
+ *
+ * Returns `null` when `deletedAt` is null (the registration is not deleted).
+ * Returns `0` when the purge window has already elapsed (overdue).
+ */
+export function computeRetentionCountdownDays(
+  deletedAt: Date | null,
+  retentionDays: number,
+  now: number = Date.now()
+): number | null {
+  if (!deletedAt) return null;
+  const purgeEligibleAt = deletedAt.getTime() + retentionDays * 24 * 60 * 60 * 1000;
+  const remainingMs = purgeEligibleAt - now;
+  return Math.max(0, Math.ceil(remainingMs / (24 * 60 * 60 * 1000)));
+}
+
 /**
  * Lists soft-deleted registrations with cursor pagination and maintainerOrgId filtering.
+ * Each item includes a `retentionCountdownDays` field: the number of whole days
+ * until the registration is eligible for hard purge by the retention job.
  */
 export async function listDeletedRegistrations(options?: {
   maintainerOrgId?: string;
   limit?: number;
   cursor?: string;
+  now?: number;
 }) {
   const limit = options?.limit ?? 25;
   const cursor = options?.cursor;
+  const now = options?.now ?? Date.now();
+  const retentionDays = getRegistrationRetentionDays();
 
   const { encodeCursor, decodeCursor } = await import("@/lib/cursor-pagination");
   const decodedCursor = cursor ? decodeCursor(cursor) : null;
@@ -269,8 +308,14 @@ export async function listDeletedRegistrations(options?: {
       deletedAt: reg.deletedAt,
       createdAt: reg.createdAt,
       updatedAt: reg.updatedAt,
+      retentionCountdownDays: computeRetentionCountdownDays(
+        reg.deletedAt,
+        retentionDays,
+        now
+      ),
     })),
     hasMore,
     nextCursor: nextCursor ?? undefined,
+    retentionDays,
   };
 }

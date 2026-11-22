@@ -17,6 +17,10 @@ vi.mock("@/lib/prisma", () => ({
       count: vi.fn(),
       updateMany: vi.fn(),
     },
+    user: {
+      findUnique: vi.fn(),
+      update: vi.fn(),
+    },
   },
 }));
 
@@ -132,5 +136,135 @@ describe("notifications library", () => {
         }),
       });
     });
+  });
+});
+
+// ─── Digest / dispute / nudge preference combinations ─────────────────────
+//
+// These tests live here (notifications.test.ts) rather than in a separate
+// file so the issue requirement "update src/lib/notifications.test.ts" is met
+// while the notification preferences module keeps its own deeper unit tests in
+// notification-preferences.test.ts.
+
+import {
+  parseNotificationPreferences,
+  updateNotificationPreferences,
+  DEFAULT_NOTIFICATION_PREFERENCES,
+} from "./notification-preferences";
+
+describe("Notification preference edge toggles (digest / dispute / nudge)", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  // ── parseNotificationPreferences defaults ──────────────────────────────
+
+  it("defaults both digest and dispute to true when preferences are absent", () => {
+    expect(parseNotificationPreferences(null)).toEqual({
+      digest: true,
+      dispute: true,
+    });
+  });
+
+  it("defaults both to true when stored value is an empty object", () => {
+    expect(parseNotificationPreferences({})).toEqual({
+      digest: true,
+      dispute: true,
+    });
+  });
+
+  it("digest=false does not affect dispute default", () => {
+    const raw = {
+      __notificationPreferences: { digest: false },
+      "__notificationPreferences.digest": false,
+    };
+    const result = parseNotificationPreferences(raw);
+    expect(result.digest).toBe(false);
+    expect(result.dispute).toBe(DEFAULT_NOTIFICATION_PREFERENCES.dispute); // true
+  });
+
+  it("dispute=false does not affect digest default", () => {
+    const raw = {
+      __notificationPreferences: { dispute: false },
+      "__notificationPreferences.dispute": false,
+    };
+    const result = parseNotificationPreferences(raw);
+    expect(result.dispute).toBe(false);
+    expect(result.digest).toBe(DEFAULT_NOTIFICATION_PREFERENCES.digest); // true
+  });
+
+  // ── updateNotificationPreferences partial updates ─────────────────────
+
+  it("toggling digest off preserves the dispute preference", async () => {
+    vi.mocked(prisma.user.findUnique).mockResolvedValueOnce({
+      checklistCompleted: {
+        __notificationPreferences: { digest: true, dispute: false },
+        "__notificationPreferences.digest": true,
+        "__notificationPreferences.dispute": false,
+      },
+    } as any);
+    vi.mocked(prisma.user.update).mockResolvedValueOnce({} as any);
+
+    const result = await updateNotificationPreferences("u1", { digest: false });
+
+    expect(result).toEqual({ digest: false, dispute: false });
+  });
+
+  it("toggling dispute on preserves the digest preference", async () => {
+    vi.mocked(prisma.user.findUnique).mockResolvedValueOnce({
+      checklistCompleted: {
+        __notificationPreferences: { digest: false, dispute: false },
+        "__notificationPreferences.digest": false,
+        "__notificationPreferences.dispute": false,
+      },
+    } as any);
+    vi.mocked(prisma.user.update).mockResolvedValueOnce({} as any);
+
+    const result = await updateNotificationPreferences("u2", { dispute: true });
+
+    expect(result).toEqual({ digest: false, dispute: true });
+  });
+
+  it("toggling both off at once produces {digest:false, dispute:false}", async () => {
+    vi.mocked(prisma.user.findUnique).mockResolvedValueOnce({
+      checklistCompleted: {
+        __notificationPreferences: { digest: true, dispute: true },
+        "__notificationPreferences.digest": true,
+        "__notificationPreferences.dispute": true,
+      },
+    } as any);
+    vi.mocked(prisma.user.update).mockResolvedValueOnce({} as any);
+
+    const result = await updateNotificationPreferences("u3", {
+      digest: false,
+      dispute: false,
+    });
+
+    expect(result).toEqual({ digest: false, dispute: false });
+  });
+
+  // ── Failure paths ──────────────────────────────────────────────────────
+
+  it("DB error on findUnique propagates rather than silently succeeding", async () => {
+    vi.mocked(prisma.user.findUnique).mockRejectedValueOnce(
+      new Error("DB timeout")
+    );
+
+    await expect(
+      updateNotificationPreferences("u-fail", { digest: false })
+    ).rejects.toThrow("DB timeout");
+  });
+
+  it("DB error on update propagates rather than silently succeeding", async () => {
+    vi.mocked(prisma.user.findUnique).mockResolvedValueOnce({
+      checklistCompleted: {
+        __notificationPreferences: { digest: true, dispute: true },
+      },
+    } as any);
+    vi.mocked(prisma.user.update).mockRejectedValueOnce(
+      new Error("unique constraint violated")
+    );
+
+    await expect(
+      updateNotificationPreferences("u-write-fail", { digest: false })
+    ).rejects.toThrow("unique constraint violated");
   });
 });

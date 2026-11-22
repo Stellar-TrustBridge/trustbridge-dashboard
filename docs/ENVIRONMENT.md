@@ -488,6 +488,32 @@ PostHog ingestion host for server-side events. Defaults to `https://app.posthog.
 
 Minimum time between `/api/contract-sync` runs; a trigger inside this window returns `{ status: "skipped" }` instead of re-running Horizon checks for every registration. Defaults to `60000` (1 minute).
 
+### `REGISTRATION_RETENTION_DAYS`
+
+Number of days after a registration is soft-deleted (or last updated, for
+active rows) before it is considered eligible for hard purge by the retention
+job (`runRetentionDryRun` in `src/lib/cron-export.ts`). Defaults to `90` when
+unset or invalid.
+
+The same value powers the **`retentionCountdownDays`** field on every item
+returned by `GET /api/registrations/deleted`, so maintainers can see how much
+time remains before each tombstone is eligible for removal without looking up
+the environment variable separately. See
+[REGISTRATION_RETENTION.md — Retention countdown](./REGISTRATION_RETENTION.md#retention-countdown).
+
+| Value | Behaviour |
+|-------|-----------|
+| Unset / invalid | Falls back to **90 days** |
+| `0` | Registrations are immediately eligible for purge after soft-delete (use with caution) |
+| Any positive integer | Days after soft-delete / last update that the row is eligible for purge |
+
+> **Tip:** Always run a dry-run report (`runRetentionDryRun`) and review the
+> countdown figures in `GET /api/registrations/deleted` before changing this
+> value in production. Reducing the window retroactively moves many rows to
+> countdown `0` immediately.
+
+> **See also:** [SETUP.md — Contract-sync prerequisites checklist](./SETUP.md#contract-sync-prerequisites-checklist) for the full set of variables and failure symptoms relevant to Soroban contract sync.
+
 ### `CONTRACT_SYNC_LAG_THRESHOLD_MS`
 
 Age of contract-sync progress (last successful run / last RPC cursor advance)
