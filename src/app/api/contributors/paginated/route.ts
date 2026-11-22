@@ -23,6 +23,11 @@ export const dynamic = "force-dynamic";
  * contract (`code: "INVALID_CURSOR"`) from `src/lib/cursor-pagination.ts` —
  * they never silently restart at page 0.
  *
+ * Cursor TTL: cursors are opaque and time-bounded (see
+ * `docs/LOGGING_AND_PAGINATION.md`). Once a cursor expires, clients must
+ * restart from the first page rather than retrying the same cursor — the
+ * `INVALID_CURSOR` response is terminal for that cursor value.
+ *
  * Delegates to `getContributorsPaginated` (src/lib/registrations.ts) — the
  * same cursor-pagination logic already used and tested elsewhere — rather
  * than re-implementing cursor handling against Prisma directly here.

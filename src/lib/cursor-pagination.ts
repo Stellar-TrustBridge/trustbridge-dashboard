@@ -26,6 +26,22 @@ export interface CursorPaginationResult<T> {
 }
 
 /**
+ * Cursor TTL (issue #703).
+ *
+ * Cursors are opaque base64 tokens that encode the last-seen record ID. They
+ * are not signed and carry no embedded timestamp, so the server cannot
+ * cryptographically expire them. Instead, a cursor is considered "expired"
+ * when the record it points at no longer exists (deleted, archived, or moved
+ * out of the caller's org scope). Clients should treat that the same as a
+ * malformed cursor: restart from the first page rather than retrying.
+ *
+ * This constant documents the recommended client-side freshness window for
+ * cursors used across a single pagination walk. It is advisory only — the
+ * server does not enforce it.
+ */
+export const CURSOR_TTL_SECONDS = 15 * 60;
+
+/**
  * Encodes a cursor value (typically an ID or timestamp) into base64
  */
 export function encodeCursor(value: string): string {

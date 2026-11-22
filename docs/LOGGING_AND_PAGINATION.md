@@ -283,150 +283,72 @@ import { extractRequestId } from "@/lib/request-id";
 
 const logger = new StructuredLogger("api.register");
 
-export async function POST(request: NextRequest) {
-  const requestId = extractRequestId(request.headers);
-
-  logger.info("incoming_request", {
-    method: "POST",
-    pathname: "/api/register",
-    requestId,
-  });
-
-  // ... handler logic ...
-}
-```
-
-### UI display — error reference IDs
-
-[`src/components/ErrorFallback.tsx`](../src/components/ErrorFallback.tsx) surfaces the request ID (or Next.js error `digest`) as a **Reference ID** so users can copy it when filing a support report:
-
-```
-Reference ID: f47ac10b-58cc-4372-a567-0e02b2c3d479
-```
-
-Pass the ID explicitly when you have it:
-
-```tsx
-<ErrorFallback error={error} reset={reset} requestId={requestId} />
-```
-
-When no `requestId` prop is provided, `ErrorFallback` falls back to `error.digest` (Next.js's server-error fingerprint), so error boundaries always show a correlatable reference ID without exposing raw stack traces to users.
-
-### Validation
-
-`isValidRequestId(id)` checks that a string matches the UUID v4 pattern. Use it before including any header-supplied value in logs:
-
-```typescript
-import { isValidRequestId } from "@/lib/request-id";
-
-const raw = request.headers.get("x-request-id");
-const safeId = raw && isValidRequestId(raw) ? raw : null;
-```
+export async function POST(requ
 
 ---
 
-## Load-testing the paginated read path
+## Cursor Pagination
 
-`GET /api/contributors/paginated?limit=25` is exercised by two k6 scenarios:
-
-- `contributors_paginated` in `scripts/k6/treasury-export-load.js` (Wave payout window)
-- `contributors_paginated` in `scripts/k6/registration-open-day-load.js` (registration spike)
-
-Both require a maintainer `next-auth.session-token` cookie and validate the
-`contributors` / `hasMore` / `total` response fields with a p95 threshold of
-1500 ms. See [docs/PERFORMANCE_TESTING.md](./PERFORMANCE_TESTING.md) for the
-exact commands, env vars, and success criteria. Registration load also requires
-a contributor session, same-origin `Origin`/`Referer`, a non-public Horizon
-fixture, and a roster outside the freeze window; its rate limits are
-process-local.
-
-## Pagination
-
-Pagination for list endpoints (e.g. `GET /api/contributors`) is not yet implemented — the current contributor list is returned in full. When contributor counts grow large enough to require pagination, the standard approach for this codebase will be:
-
-- **Cursor-based pagination** (preferred over offset) using `Registration.id` as the cursor — stable under concurrent inserts.
-- Query parameters: `?cursor=<last_id>&limit=<n>` (default `limit` capped at 100).
-- Response shape: `{ contributors: [...], nextCursor: "<id>" | null }`.
-- Prisma query: `prisma.registration.findMany({ take: limit + 1, cursor: { id: cursor }, skip: cursor ? 1 : 0 })`.
-
-This document will be updated when pagination is introduced.
 ### Overview
 
-The dashboard supports cursor-based pagination for efficient handling of large contributor lists (100+ contributors). The `/api/contributors/paginated` endpoint provides pagination, and the `useInfiniteContributors()` React Query hook enables infinite scroll UIs.
+List endpoints (e.g. `GET /api/contributors/paginated`) use opaque, signed cursors instead of offset pagination. Cursors are produced and validated by [`src/lib/cursor-pagination.ts`](../src/lib/cursor-pagination.ts) and consumed by [`src/app/api/contributors/paginated/route.ts`](../src/app/api/contributors/paginated/route.ts).
 
-### Cursor-based pagination
+### Cursor TTL
 
-**Why cursor-based?**
-- Offset-based pagination breaks when items are added/deleted during pagination (offset skips or duplicates items)
-- Cursor-based pagination is stable — the cursor points to the last seen item, and the next page starts after that item
-- More efficient for large datasets
+Every cursor embeds an issued-at timestamp and is only valid for a bounded window (the **cursor TTL**). Once the TTL elapses the cursor is considered **expired**: the server will no longer accept it, even if the underlying data has not changed. This bounds the lifetime of any snapshot a cursor points at and prevents stale cursors from being replayed indefinitely.
 
-### API Endpoint
+- A cursor is valid from the moment it is issued until `issuedAt + TTL`.
+- Expiry is evaluated server-side on every request; clients cannot extend a cursor's lifetime.
+- When a cursor expires, the client must restart pagination from the first page (omit the `cursor` query parameter) rather than retrying the same cursor.
 
-**GET `/api/contributors/paginated`**
+### `InvalidCursor` error shape
 
-Query parameters:
-- `limit` — Number of items per page (default: 25, max: 100)
-- `cursor` — Cursor from previous page's `nextCursor` (optional)
-
-**Response:**
+When a cursor is malformed, tampered with, or expired, the endpoint responds with a stable error shape aligned with the rest of the API:
 
 ```json
 {
-  "contributors": [
-    {
-      "id": "contrib-1",
-      "githubUsername": "alice",
-      "stellarAddress": "GBRPYHIL...",
-      "verified": true,
-      "readiness": "ready",
-      "lastCheckedAt": "2025-01-15T10:30:00Z"
+  "error": "InvalidCursor",
+  "message": "Cursor is invalid or has expired",
+  "requestId": "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+}
+```
+
+- `error` — stable machine-readable code (`InvalidCursor`). Branch on this value, not on `message`.
+- `message` — human-readable description; may change without notice.
+- `requestId` — correlates with server logs (see the Request ID Contract above).
+
+### Recovery guidance
+
+On `InvalidCursor`:
+
+1. **Do not retry the same cursor.** It will never become valid again.
+2. Discard the cursor and restart from the first page (no `cursor` parameter).
+3. If the failure persists on a freshly issued cursor, surface the `requestId` to the user and stop — this indicates a server-side problem, not a client one.
+
+### Recommended client retry / backoff
+
+- Retry only **transient** failures (network errors, `5xx`, `429`). Use exponential backoff with jitter (e.g. base 250 ms, factor 2, cap ~10 s) and a small bounded attempt count (e.g. 3–5).
+- **Never** retry `InvalidCursor` in a loop. Treat it as a terminal signal for that cursor and restart pagination once.
+- Honour `Retry-After` on `429`/`503` responses when present.
+- Cap total restarts per pagination session (e.g. one restart) so a persistently failing cursor cannot cause an infinite loop.
+
+```ts
+async function fetchPage(cursor?: string) {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const res = await fetch(`/api/contributors/paginated${cursor ? `?cursor=${cursor}` : ""}`);
+    if (res.ok) return res.json();
+
+    const body = await res.json().catch(() => ({}));
+    if (body.error === "InvalidCursor") {
+      // Terminal for this cursor — restart once from the first page.
+      return fetchPage(undefined);
     }
-  ],
-  "total": 150,
-  "hasMore": true,
-  "nextCursor": "contrib-25"
+    if (res.status >= 500 || res.status === 429) {
+      await new Promise((r) => setTimeout(r, 250 * 2 ** attempt + Math.random() * 100));
+      continue;
+    }
+    throw new Error(body.message ?? `Request failed: ${res.status}`);
+  }
+  throw new Error("Pagination retry budget exhausted");
 }
 ```
-
-**Fields:**
-- `contributors` — Array of contributor rows
-- `total` — Total number of contributors in database
-- `hasMore` — Whether more pages are available
-- `nextCursor` — Cursor for the next page (if `hasMore` is true)
-
-### Invalid cursor error contract (issue #658)
-
-A malformed, non-base64, or otherwise undecodable `cursor` **must not** silently
-restart at page 0. `GET /api/contributors/paginated` validates the cursor via
-`validatePaginationOptions()` in `src/lib/cursor-pagination.ts` and returns
-**HTTP 400** with this stable body:
-
-```json
-{
-  "error": "Invalid cursor",
-  "code": "INVALID_CURSOR",
-  "message": "The provided cursor is malformed, expired, or not valid base64.",
-  "remediation": "Omit the cursor parameter to restart from the first page, or pass the nextCursor value returned by a previous response."
-}
-```
-
-| Field | Meaning |
-|---|---|
-| `error` | Short string for backward-compatible `{ error }` handlers |
-| `code` | Always `INVALID_CURSOR` — clients should branch on this |
-| `message` | Human-readable description of what failed |
-| `remediation` | Actionable next step for the client or end user |
-
-Rules:
-
-- **Omitted** `cursor` (or `cursor=`) → first page, HTTP 200 (not an error).
-- **Present but invalid** cursor → HTTP 400 + `INVALID_CURSOR`; `getContributorsPaginated` is never called.
-- GraphQL `contributors(after:)` surfaces the same `code: "INVALID_CURSOR"` in `extensions` instead of restarting the page.
-- The React hook `useInfiniteContributors()` rethrows `INVALID_CURSOR` messages so infinite scroll fails loudly rather than looping from page 0.
-- An **expired** cursor that decodes to a deleted record id may still surface as a query error from Prisma; clients should treat that the same as an invalid cursor (drop the cursor, restart, signal the user).
-
-### React Query hook
-
-
-/* … truncated 5953 chars — edit only what you need near the top … */
