@@ -242,59 +242,106 @@ export async function resolveDualAuth(
 }
 
 /**
- * GraphQL abuse-protection limits. These bound the cost of a single GraphQL
- * operation so a deeply nested or wide query cannot be used as a cheap DoS
- * against the Wave dashboard during traffic spikes.
- *
- * Operators can override the defaults via environment variables:
- * - `GRAPHQL_MAX_DEPTH` (default 10)
- * - `GRAPHQL_MAX_COMPLEXITY` (default 1000)
- *
- * Introspection is disabled in production unless `GRAPHQL_ALLOW_INTROSPECTION`
- * is set to `"true"` (useful for trusted tooling).
+ * Stable reason code returned when an invite-minting request exceeds the
+ * per-org / per-actor burst limit. Documented in docs/SECURITY_POLINRIDER.md.
  */
-export const GRAPHQL_DEFAULT_MAX_DEPTH = 10;
-export const GRAPHQL_DEFAULT_MAX_COMPLEXITY = 1000;
+export const INVITE_RATE_LIMIT_REASON = "rate_limited" as const;
 
 /**
- * Stable reason codes returned when a GraphQL operation is rejected by the
- * abuse-protection limits. Documented in `docs/ARCHITECTURE.md`.
+ * Default invite-minting burst limit per org (and per actor) within the
+ * rolling window. Overridable via `INVITE_GENERATE_RATE_LIMIT`.
  */
-export type GraphQLLimitReasonCode =
-  | "graphql_depth_exceeded"
-  | "graphql_complexity_exceeded"
-  | "graphql_introspection_disabled";
+export const DEFAULT_INVITE_RATE_LIMIT = 20;
+
+/**
+ * Default rolling window (ms) for the invite-minting burst limit. Overridable
+ * via `INVITE_GENERATE_RATE_WINDOW_MS`.
+ */
+export const DEFAULT_INVITE_RATE_WINDOW_MS = 60_000;
 
 function readPositiveIntEnv(name: string, fallback: number): number {
   const raw = process.env[name]?.trim();
   if (!raw) return fallback;
   const parsed = Number.parseInt(raw, 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
-  return parsed;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+interface RateLimitBucket {
+  timestamps: number[];
+}
+
+const inviteRateBuckets = new Map<string, RateLimitBucket>();
+
+/**
+ * Reset the in-memory invite rate-limit state. Exposed for tests so each case
+ * starts from a clean slate.
+ */
+export function resetInviteRateLimit(): void {
+  inviteRateBuckets.clear();
+}
+
+export interface InviteRateLimitResult {
+  ok: boolean;
+  /** Stable reason code when `ok` is false. */
+  reason?: typeof INVITE_RATE_LIMIT_REASON;
+  /** Configured limit for the window. */
+  limit: number;
+  /** Configured window in milliseconds. */
+  windowMs: number;
+  /** Milliseconds until the caller may retry (0 when allowed). */
+  retryAfterMs: number;
+}
+
+function consumeBucket(key: string, limit: number, windowMs: number, now: number): InviteRateLimitResult {
+  const bucket = inviteRateBuckets.get(key) ?? { timestamps: [] };
+  const cutoff = now - windowMs;
+  bucket.timestamps = bucket.timestamps.filter((ts) => ts > cutoff);
+
+  if (bucket.timestamps.length >= limit) {
+    inviteRateBuckets.set(key, bucket);
+    const oldest = bucket.timestamps[0] ?? now;
+    return {
+      ok: false,
+      reason: INVITE_RATE_LIMIT_REASON,
+      limit,
+      windowMs,
+      retryAfterMs: Math.max(0, oldest + windowMs - now),
+    };
+  }
+
+  bucket.timestamps.push(now);
+  inviteRateBuckets.set(key, bucket);
+  return { ok: true, limit, windowMs, retryAfterMs: 0 };
 }
 
 /**
- * Resolve the effective GraphQL depth/complexity limits from the environment,
- * falling back to the documented defaults when unset or invalid.
+ * Enforce the invite-minting burst limit per org and per actor. Both buckets
+ * are consumed so a single actor cannot flood a single org, and a single org
+ * cannot be flooded by rotating actors. Returns `ok: false` with the stable
+ * `rate_limited` reason code when either bucket is exhausted.
+ *
+ * `orgId` and `actorId` are required; callers must resolve them from the
+ * existing auth/org-scope helpers before invoking this function.
  */
-export function getGraphQLLimits(): { maxDepth: number; maxComplexity: number } {
-  return {
-    maxDepth: readPositiveIntEnv("GRAPHQL_MAX_DEPTH", GRAPHQL_DEFAULT_MAX_DEPTH),
-    maxComplexity: readPositiveIntEnv(
-      "GRAPHQL_MAX_COMPLEXITY",
-      GRAPHQL_DEFAULT_MAX_COMPLEXITY
-    ),
-  };
+export function checkInviteRateLimit(
+  orgId: string,
+  actorId: string,
+  now: number = Date.now()
+): InviteRateLimitResult {
+  const limit = readPositiveIntEnv("INVITE_GENERATE_RATE_LIMIT", DEFAULT_INVITE_RATE_LIMIT);
+  const windowMs = readPositiveIntEnv(
+    "INVITE_GENERATE_RATE_WINDOW_MS",
+    DEFAULT_INVITE_RATE_WINDOW_MS
+  );
+
+  const orgResult = consumeBucket(`org:${orgId}`, limit, windowMs, now);
+  if (!orgResult.ok) return orgResult;
+
+  const actorResult = consumeBucket(`actor:${actorId}`, limit, windowMs, now);
+  if (!actorResult.ok) return actorResult;
+
+  return { ok: true, limit, windowMs, retryAfterMs: 0 };
 }
 
 /**
- * Whether GraphQL introspection is permitted. Disabled in production unless
- * explicitly opted in via `GRAPHQL_ALLOW_INTROSPECTION=true`; always allowed
- * outside production so local tooling keeps working.
- */
-export function isGraphQLIntrospectionAllowed(): boolean {
-  if (process.env.NODE_ENV !== "production") return true;
-  return process.env.GRAPHQL_ALLOW_INTROSPECTION?.trim().toLowerCase() === "true";
-}
-
-export { hasMinimumRole, ROLE_HIERARCHY };
+ * GraphQL abuse-protection limits. These bound the cost 

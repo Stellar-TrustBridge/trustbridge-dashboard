@@ -15,6 +15,57 @@ import {
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+// Per-org / per-actor invite minting rate limit (issue #715).
+// Invite floods create unmanageable Wave registration spam, so we cap how many
+// invites a single org/actor can mint within a rolling window. Limits are
+// intentionally conservative and documented in docs/SECURITY_POLINRIDER.md.
+export const INVITE_RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000; // 1 hour
+const INVITE_RATE_LIMIT_MAX_PER_ORG = 200;
+const INVITE_RATE_LIMIT_MAX_PER_ACTOR = 100;
+
+interface RateLimitBucket {
+  orgCount: number;
+  actorCount: number;
+  resetAt: number;
+}
+
+// Module-scoped store keyed by org id. In-memory is sufficient for the single
+// node runtime used by the dashboard; swap for a shared store if we scale out.
+const rateLimitBuckets = new Map<string, RateLimitBucket>();
+
+function checkInviteRateLimit(
+  orgId: string,
+  actorId: string,
+  requested: number,
+  now: number
+): { allowed: true } | { allowed: false; reason: "rate_limited"; retryAfterSeconds: number } {
+  const existing = rateLimitBuckets.get(orgId);
+  const bucket: RateLimitBucket =
+    existing && existing.resetAt > now
+      ? existing
+      : { orgCount: 0, actorCount: 0, resetAt: now + INVITE_RATE_LIMIT_WINDOW_MS };
+
+  const nextOrgCount = bucket.orgCount + requested;
+  const nextActorCount = bucket.actorCount + requested;
+
+  if (
+    nextOrgCount > INVITE_RATE_LIMIT_MAX_PER_ORG ||
+    nextActorCount > INVITE_RATE_LIMIT_MAX_PER_ACTOR
+  ) {
+    rateLimitBuckets.set(orgId, bucket);
+    return {
+      allowed: false,
+      reason: "rate_limited",
+      retryAfterSeconds: Math.max(1, Math.ceil((bucket.resetAt - now) / 1000)),
+    };
+  }
+
+  bucket.orgCount = nextOrgCount;
+  bucket.actorCount = nextActorCount;
+  rateLimitBuckets.set(orgId, bucket);
+  return { allowed: true };
+}
+
 interface GenerateBulkInvitesRequest {
   count?: number;
   expiryDays?: number;
@@ -94,6 +145,34 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(
       { error: "Expiry days must be between 1 and 365" },
       { status: 400 }
+    );
+  }
+
+  // Enforce per-org / per-actor invite minting rate limit before any invites
+  // are created so a rejected burst leaves no partial privileged state.
+  const orgId = session.user.orgId ?? session.user.id;
+  const rateLimit = checkInviteRateLimit(orgId, session.user.id, count, Date.now());
+  if (!rateLimit.allowed) {
+    await recordAuditLog({
+      action: "invites.generate_rate_limited",
+      actorId: session.user.id,
+      actorLogin: session.user.githubUsername ?? null,
+      metadata: {
+        reason: rateLimit.reason,
+        requestedCount: count,
+        retryAfterSeconds: rateLimit.retryAfterSeconds,
+      },
+    });
+    return NextResponse.json(
+      {
+        error: "Invite generation rate limit exceeded",
+        reason: rateLimit.reason,
+        retryAfterSeconds: rateLimit.retryAfterSeconds,
+      },
+      {
+        status: 429,
+        headers: { "Retry-After": String(rateLimit.retryAfterSeconds) },
+      }
     );
   }
 
