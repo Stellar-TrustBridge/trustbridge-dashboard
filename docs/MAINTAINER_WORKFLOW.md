@@ -181,6 +181,14 @@ selected handle matches the signed-in maintainer, and surface the API’s
 `code`/`error` body when the request is rejected so operators know to ask a
 peer to act instead of retrying.
 
+### Ban → conflict → restore smoke path
+
+The end-to-end smoke outline for exercising ban, the duplicate-wallet conflict,
+and restore with test users (including CSRF and auth setup) lives in
+[`docs/E2E_TESTING.md`](./E2E_TESTING.md#maintainer-ban--conflict--restore-smoke-path).
+Keep that outline in sync with the reason codes and inputs below whenever the
+ban route changes.
+
 ---
 
 ## 4a. Duplicate Wallet Claim Conflicts
@@ -197,107 +205,6 @@ When a contributor submits a Stellar address that another user already holds,
 
 The same body is returned by `POST /api/registrations/:id/restore` when the
 restored address has since been claimed. The copy lives in
-`src/lib/contributors.ts` (`WALLET_CLAIM_CONFLICT_MESSAGE`) and is locked by
-`tests/unit/contributors.test.ts`; change it there, not per route.
+`src/
 
-Each rejected registration writes a `RegistrationConflict` row and a
-`registration.conflict` audit event. To resolve one:
-
-1. List open conflicts for your org: `GET /api/maintainer/conflicts`
-   (maintainer session required; `401` signed out, `403` non-maintainer).
-2. Ask the claimant to prove control of the address (e.g. a signed message).
-3. If they own it, soft-delete the existing registration so the claimant can
-   register; otherwise tell them to use a different wallet.
-
----
-
-## 5. Soroban Event Cursor Reset
-
-When operators need to re-index or re-sync Soroban events from a specific ledger or genesis:
-
-1. **Inspect existing cursors**:
-   ```sql
-   SELECT "maintainerOrgId", "eventType", "cursor", "lastPagingToken", "lastSyncedAt"
-   FROM "SorobanEventCursor"
-   WHERE "maintainerOrgId" = '<maintainer_org>';
-   ```
-
-2. **Reset to a previous ledger/token**:
-   ```sql
-   UPDATE "SorobanEventCursor"
-   SET "cursor" = '<target_ledger_or_token>',
-       "lastPagingToken" = NULL,
-       "lastSyncedAt" = NOW()
-   WHERE "maintainerOrgId" = '<maintainer_org>' AND "eventType" = 'contract';
-   ```
-
-3. **Full re-sync from scratch**:
-   Delete the cursor record to let the backfill worker start from genesis or the contract inception ledger:
-   ```sql
-   DELETE FROM "SorobanEventCursor"
-   WHERE "maintainerOrgId" = '<maintainer_org>' AND "eventType" = 'contract';
-   ```
-
-## Audit bundle verification (#685)
-
-`GET /api/audit` now includes a deterministic `hash` alongside `entries` and
-`summary`. When archiving an audit bundle for a Wave compliance review, save the
-response as-is and recompute `hashAuditBundle(entries)` before trusting the
-offline copy. Field order, ISO dates, and metadata key sorting are canonicalized;
-entry order is significant. See [AUDIT_BUNDLE_HASHING.md](./AUDIT_BUNDLE_HASHING.md)
-for the full verifier procedure and Node-version stability notes.
-
----
-
-## 6. Dispute Ticket Status Machine & Maintainer ACL
-
-Dispute tickets follow a strict state machine so closed Wave cases cannot be reopened without an audit trail.
-
-### Statuses
-
-| Status     | Meaning                                                        |
-| ---------- | -------------------------------------------------------------- |
-| `open`     | Filed by a contributor; awaiting maintainer triage.            |
-| `triage`   | A maintainer has picked up the dispute for review.             |
-| `resolved` | Terminal. Dispute upheld and settled.                          |
-| `rejected` | Terminal. Dispute dismissed.                                   |
-
-### Allowed Transitions
-
-| From     | To         | Actor       |
-| -------- | ---------- | ----------- |
-| `open`   | `triage`   | Maintainer  |
-| `triage` | `resolved` | Maintainer  |
-| `triage` | `rejected` | Maintainer  |
-
-Any other transition (including `resolved`/`rejected` → anything, and skipping
-`triage`) is rejected with HTTP `409 Conflict` and reason code
-`DISPUTE_INVALID_TRANSITION`. Terminal statuses cannot be reopened; file a new
-dispute instead.
-
-### Access Control
-
-- **Contributors** may only create disputes (`POST /api/disputes` with no
-  `status`/transition, resulting in `open`).
-- **Maintainers** (per existing org-scope rules) may perform `triage`,
-  `resolved`, and `rejected` transitions.
-- Non-maintainers attempting a transition receive HTTP `403 Forbidden` with
-  reason code `DISPUTE_MAINTAINER_REQUIRED`.
-
-### Audit Trail
-
-Every accepted transition is recorded via `src/lib/audit.ts` as
-`dispute.status_changed` with the previous status, next status, actor, and
-dispute id. Rejected transitions are recorded as
-`dispute.transition_rejected` with the attempted transition and reason code so
-operators can trace attempted reopenings.
-
-### Tests
-
-Automated coverage lives alongside the disputes API tests and covers the happy
-path (`open → triage → resolved`) plus failure paths for invalid transitions
-and non-maintainer actors. Run the targeted suite with:
-
-```bash
-npm test -- disputes
-```
+/* … truncated 4113 chars — edit only what you need near the top … */
