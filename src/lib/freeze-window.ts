@@ -10,6 +10,95 @@ export interface FreezeWindowStatus {
 }
 
 /**
+ * A single freeze window interval. `start`/`end` are UTC instants; the window
+ * is inclusive of both endpoints.
+ */
+export interface FreezeWindowInterval {
+  start: Date;
+  end: Date;
+}
+
+/**
+ * Stable reason codes emitted by the freeze-window overlap policy. Documented
+ * in `docs/ENVIRONMENT.md`; keep in sync with tests.
+ *
+ * - FREEZE_WINDOW_INVALID: a window is missing, unparseable, or inverted.
+ * - FREEZE_WINDOW_OVERSIZED: more windows than the supported maximum.
+ * - FREEZE_WINDOW_OVERLAP_REJECTED: overlapping windows were supplied while
+ *   the policy is set to reject (FREEZE_WINDOW_OVERLAP_POLICY=reject).
+ */
+export type FreezeWindowReasonCode =
+  | "FREEZE_WINDOW_INVALID"
+  | "FREEZE_WINDOW_OVERSIZED"
+  | "FREEZE_WINDOW_OVERLAP_REJECTED";
+
+/** Maximum number of windows accepted before failing closed. */
+export const MAX_FREEZE_WINDOWS = 32;
+
+/**
+ * Overlap policy for multiple freeze windows. Defaults to "merge":
+ * overlapping and adjacent windows are unioned into a canonical, sorted set of
+ * non-overlapping intervals. "reject" fails closed when any overlap is found.
+ * Configured via FREEZE_WINDOW_OVERLAP_POLICY (see docs/ENVIRONMENT.md).
+ */
+export type FreezeWindowOverlapPolicy = "merge" | "reject";
+
+export function getFreezeWindowOverlapPolicy(): FreezeWindowOverlapPolicy {
+  const raw = process.env.FREEZE_WINDOW_OVERLAP_POLICY?.trim().toLowerCase();
+  return raw === "reject" ? "reject" : "merge";
+}
+
+/**
+ * Parses a raw window list and applies the overlap policy. Returns the
+ * canonical (sorted, merged) intervals on success, or a stable reason code on
+ * failure. Empty input yields an empty interval list (no freeze).
+ */
+export function resolveFreezeWindows(
+  windows: Array<{ start: string | Date; end: string | Date }>,
+  policy: FreezeWindowOverlapPolicy = getFreezeWindowOverlapPolicy()
+):
+  | { ok: true; windows: FreezeWindowInterval[] }
+  | { ok: false; code: FreezeWindowReasonCode } {
+  if (windows.length > MAX_FREEZE_WINDOWS) {
+    return { ok: false, code: "FREEZE_WINDOW_OVERSIZED" };
+  }
+
+  const parsed: FreezeWindowInterval[] = [];
+  for (const w of windows) {
+    const start = w.start instanceof Date ? w.start : new Date(w.start);
+    const end = w.end instanceof Date ? w.end : new Date(w.end);
+    if (
+      isNaN(start.getTime()) ||
+      isNaN(end.getTime()) ||
+      start.getTime() > end.getTime()
+    ) {
+      return { ok: false, code: "FREEZE_WINDOW_INVALID" };
+    }
+    parsed.push({ start, end });
+  }
+
+  parsed.sort((a, b) => a.start.getTime() - b.start.getTime());
+
+  const merged: FreezeWindowInterval[] = [];
+  for (const current of parsed) {
+    const last = merged[merged.length - 1];
+    // Overlap or adjacency (touching endpoints) collapses into one window.
+    if (last && current.start.getTime() <= last.end.getTime()) {
+      if (policy === "reject") {
+        return { ok: false, code: "FREEZE_WINDOW_OVERLAP_REJECTED" };
+      }
+      if (current.end.getTime() > last.end.getTime()) {
+        last.end = current.end;
+      }
+    } else {
+      merged.push({ start: current.start, end: current.end });
+    }
+  }
+
+  return { ok: true, windows: merged };
+}
+
+/**
  * Environment variables consumed by the freeze-window guard. Documented in
  * `docs/ENVIRONMENT.md` and referenced from `docs/FEATURE_FLAGS.md`.
  *
@@ -20,6 +109,8 @@ export interface FreezeWindowStatus {
  * - FREEZE_WINDOW_TIMEZONE: IANA timezone used for display only (e.g.
  *   "America/New_York"). Defaults to "UTC". Storage and comparisons always
  *   use UTC instants; this only affects human-facing rendering.
+ * - FREEZE_WINDOW_OVERLAP_POLICY: "merge" (default) | "reject". Controls how
+ *   overlapping/adjacent windows are handled by `resolveFreezeWindows`.
  *
  * The window is active when now is within [start, end] inclusive. Missing,
  * unparseable, or inverted (start > end) values fail closed to inactive.
@@ -40,16 +131,12 @@ export function isFreezeWindowActive(now = new Date()): FreezeWindowStatus {
     return { active: false };
   }
 
-  const start = new Date(startStr);
-  const end = new Date(endStr);
-
-  if (
-    isNaN(start.getTime()) ||
-    isNaN(end.getTime()) ||
-    start.getTime() > end.getTime()
-  ) {
+  const resolved = resolveFreezeWindows([{ start: startStr, end: endStr }]);
+  if (!resolved.ok || resolved.windows.length === 0) {
     return { active: false };
   }
+
+  const { start, end } = resolved.windows[0];
 
   const nowTime = now.getTime();
   const active = nowTime >= start.getTime() && nowTime <= end.getTime();

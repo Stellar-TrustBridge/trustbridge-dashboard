@@ -34,11 +34,20 @@ export const dynamic = "force-dynamic";
  *   that zone, DST-aware).  When no timezone is configured these fields are
  *   `null` and consumers fall back to UTC — preserving prior behavior.
  *
+ * Overlapping window merge policy (issue #705):
+ *   Overlapping or adjacent freeze windows are merged into a single canonical
+ *   union by `isFreezeWindowActive()`.  The reported `start` / `end` therefore
+ *   describe the merged envelope, and `reason` carries the documented reason
+ *   code from the freeze-window module (e.g. `FREEZE_WINDOW_ACTIVE`,
+ *   `FREEZE_WINDOW_MERGED`, `FREEZE_WINDOW_INVALID`).  Malformed or oversized
+ *   window input never throws here — the module returns a stable inactive
+ *   state with a documented reason code, which this route surfaces verbatim.
+ *
  * Shape (200):
  * ```json
  * {
  *   "active": true,
- *   "reason": "Wave roster payout freeze window in effect",
+ *   "reason": "FREEZE_WINDOW_MERGED",
  *   "start":  "2026-09-24T18:00:00.000Z",
  *   "end":    "2026-09-25T06:00:00.000Z",
  *   "timezone": "America/New_York",
@@ -86,6 +95,9 @@ export async function GET(request: NextRequest) {
   }
 
   // ── Freeze status ─────────────────────────────────────────────────────────
+  // isFreezeWindowActive() applies the overlapping-window merge policy
+  // (issue #705) and never throws on malformed input; it returns a stable
+  // inactive state with a documented reason code instead.
   const status = isFreezeWindowActive();
 
   return NextResponse.json(

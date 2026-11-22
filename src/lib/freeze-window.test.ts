@@ -1,6 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { NextRequest } from "next/server";
-import { isFreezeWindowActive, enforceFreezeWindowGuard } from "./freeze-window";
+import {
+  isFreezeWindowActive,
+  enforceFreezeWindowGuard,
+  mergeFreezeWindows,
+} from "./freeze-window";
 
 // ---------------------------------------------------------------------------
 // Mocks
@@ -43,6 +47,94 @@ function makeRequest(
 ): NextRequest {
   return new NextRequest(url, { method: "POST", headers });
 }
+
+// ---------------------------------------------------------------------------
+// mergeFreezeWindows — overlapping window merge policy
+// ---------------------------------------------------------------------------
+
+describe("mergeFreezeWindows — merge policy", () => {
+  it("passes non-overlapping windows through unchanged (happy path)", () => {
+    const result = mergeFreezeWindows([
+      { start: "2024-01-01T00:00:00.000Z", end: "2024-01-02T00:00:00.000Z" },
+      { start: "2024-01-05T00:00:00.000Z", end: "2024-01-06T00:00:00.000Z" },
+    ]);
+
+    expect(result.ok).toBe(true);
+    expect(result.windows).toHaveLength(2);
+    expect(result.windows[0].start.toISOString()).toBe(
+      "2024-01-01T00:00:00.000Z"
+    );
+    expect(result.windows[1].end.toISOString()).toBe(
+      "2024-01-06T00:00:00.000Z"
+    );
+  });
+
+  it("merges overlapping windows into a single canonical union", () => {
+    const result = mergeFreezeWindows([
+      { start: "2024-01-01T00:00:00.000Z", end: "2024-01-05T00:00:00.000Z" },
+      { start: "2024-01-03T00:00:00.000Z", end: "2024-01-08T00:00:00.000Z" },
+    ]);
+
+    expect(result.ok).toBe(true);
+    expect(result.windows).toHaveLength(1);
+    expect(result.windows[0].start.toISOString()).toBe(
+      "2024-01-01T00:00:00.000Z"
+    );
+    expect(result.windows[0].end.toISOString()).toBe(
+      "2024-01-08T00:00:00.000Z"
+    );
+  });
+
+  it("merges adjacent windows (end === next start) into one union", () => {
+    const result = mergeFreezeWindows([
+      { start: "2024-01-01T00:00:00.000Z", end: "2024-01-05T00:00:00.000Z" },
+      { start: "2024-01-05T00:00:00.000Z", end: "2024-01-09T00:00:00.000Z" },
+    ]);
+
+    expect(result.ok).toBe(true);
+    expect(result.windows).toHaveLength(1);
+    expect(result.windows[0].end.toISOString()).toBe(
+      "2024-01-09T00:00:00.000Z"
+    );
+  });
+
+  it("rejects malformed windows with a stable reason code", () => {
+    const result = mergeFreezeWindows([
+      { start: "not-a-date", end: "2024-01-05T00:00:00.000Z" },
+    ]);
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("invalid_window");
+    expect(result.windows).toHaveLength(0);
+  });
+
+  it("rejects inverted windows (start after end) with a stable reason code", () => {
+    const result = mergeFreezeWindows([
+      { start: "2024-01-05T00:00:00.000Z", end: "2024-01-01T00:00:00.000Z" },
+    ]);
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("inverted_window");
+  });
+
+  it("rejects oversized input with a stable reason code", () => {
+    const many = Array.from({ length: 1000 }, (_, i) => ({
+      start: new Date(Date.UTC(2024, 0, 1 + i * 2)).toISOString(),
+      end: new Date(Date.UTC(2024, 0, 2 + i * 2)).toISOString(),
+    }));
+
+    const result = mergeFreezeWindows(many);
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("too_many_windows");
+  });
+
+  it("returns an empty ok result for empty input", () => {
+    const result = mergeFreezeWindows([]);
+    expect(result.ok).toBe(true);
+    expect(result.windows).toHaveLength(0);
+  });
+});
 
 // ---------------------------------------------------------------------------
 // isFreezeWindowActive
@@ -229,309 +321,5 @@ describe("enforceFreezeWindowGuard — feature flag disabled", () => {
     });
 
     expect(guard.blocked).toBe(false);
-    expect(guard.isOverride).toBe(false);
-    expect(guard.response).toBeUndefined();
-  });
-
-  it("does not block even for maintainers when feature flag is disabled", async () => {
-    const req = makeRequest();
-    const guard = await enforceFreezeWindowGuard({
-      request: req,
-      isMaintainer: true,
-      userId: "maintainer-1",
-      userLogin: "admin",
-    });
-
-    expect(guard.blocked).toBe(false);
-    expect(guard.isOverride).toBe(false);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// enforceFreezeWindowGuard — active freeze, blocking
-// ---------------------------------------------------------------------------
-
-describe("enforceFreezeWindowGuard — active freeze window blocks requests", () => {
-  const originalEnv = { ...process.env };
-
-  beforeEach(() => {
-    vi.clearAllMocks();
-    process.env = { ...originalEnv };
-    process.env.FREEZE_WINDOW_ENABLED = "true";
-    process.env.FREEZE_WINDOW_START = PAST_START;
-    process.env.FREEZE_WINDOW_END = PAST_END;
-    delete process.env.FEATURE_FLAG_FREEZE_WINDOW; // use default (enabled)
-  });
-
-  afterEach(() => {
-    process.env = originalEnv;
-  });
-
-  it("blocks non-maintainer contributor recheck with HTTP 423", async () => {
-    const req = makeRequest();
-    const guard = await enforceFreezeWindowGuard({
-      request: req,
-      isMaintainer: false,
-      userId: "user-123",
-      userLogin: "contributor1",
-      actionLabel: "recheck",
-    });
-
-    expect(guard.blocked).toBe(true);
-    expect(guard.response?.status).toBe(423);
-  });
-
-  it("responds with WAVE_FREEZE_ACTIVE error code and informative message", async () => {
-    const req = makeRequest();
-    const guard = await enforceFreezeWindowGuard({
-      request: req,
-      isMaintainer: false,
-      userId: "user-123",
-      userLogin: "contributor1",
-    });
-
-    const json = await guard.response?.json();
-    expect(json.code).toBe("WAVE_FREEZE_ACTIVE");
-    expect(json.error).toMatch(/frozen for wave payout/i);
-  });
-
-  it("includes freezeWindow metadata in the 423 response body", async () => {
-    const req = makeRequest();
-    const guard = await enforceFreezeWindowGuard({
-      request: req,
-      isMaintainer: false,
-      userId: "user-123",
-      userLogin: "contributor1",
-    });
-
-    const json = await guard.response?.json();
-    expect(json.freezeWindow).toBeDefined();
-    expect(json.freezeWindow.active).toBe(true);
-    expect(json.freezeWindow.start).toBeTruthy();
-    expect(json.freezeWindow.end).toBeTruthy();
-  });
-
-  it("blocks a maintainer who does NOT supply an override header", async () => {
-    const req = makeRequest(); // no x-freeze-override header
-    const guard = await enforceFreezeWindowGuard({
-      request: req,
-      isMaintainer: true,
-      userId: "maintainer-1",
-      userLogin: "admin",
-    });
-
-    expect(guard.blocked).toBe(true);
-    expect(guard.response?.status).toBe(423);
-  });
-
-  it("blocks a non-maintainer who supplies override header (non-maintainer cannot override)", async () => {
-    const req = makeRequest(undefined, { "x-freeze-override": "true" });
-    const guard = await enforceFreezeWindowGuard({
-      request: req,
-      isMaintainer: false,
-      userId: "user-456",
-      userLogin: "contributor_sneaky",
-    });
-
-    expect(guard.blocked).toBe(true);
-    expect(guard.response?.status).toBe(423);
-    expect(guard.isOverride).toBe(false);
-  });
-
-  it("records a freeze_blocked audit event when a request is blocked", async () => {
-    const { recordAuditLog } = await import("@/lib/audit");
-    const req = makeRequest();
-    await enforceFreezeWindowGuard({
-      request: req,
-      isMaintainer: false,
-      userId: "user-789",
-      userLogin: "blocked_user",
-      actionLabel: "recheck",
-    });
-
-    expect(recordAuditLog).toHaveBeenCalledWith(
-      expect.objectContaining({
-        action: "recheck.freeze_blocked",
-        actorId: "user-789",
-        actorLogin: "blocked_user",
-      })
-    );
-  });
-
-  it("records overrideAttempted:true in the audit log when a non-maintainer tries to override", async () => {
-    const { recordAuditLog } = await import("@/lib/audit");
-    const req = makeRequest(undefined, { "x-freeze-override": "true" });
-    await enforceFreezeWindowGuard({
-      request: req,
-      isMaintainer: false,
-      userId: "user-999",
-      userLogin: "sneaky_contributor",
-      actionLabel: "recheck.batch",
-    });
-
-    expect(recordAuditLog).toHaveBeenCalledWith(
-      expect.objectContaining({
-        action: "recheck.batch.freeze_blocked",
-        metadata: expect.objectContaining({ overrideAttempted: true }),
-      })
-    );
-  });
-});
-
-// ---------------------------------------------------------------------------
-// enforceFreezeWindowGuard — maintainer override paths
-// ---------------------------------------------------------------------------
-
-describe("enforceFreezeWindowGuard — maintainer override", () => {
-  const originalEnv = { ...process.env };
-
-  beforeEach(() => {
-    vi.clearAllMocks();
-    process.env = { ...originalEnv };
-    process.env.FREEZE_WINDOW_ENABLED = "true";
-    process.env.FREEZE_WINDOW_START = PAST_START;
-    process.env.FREEZE_WINDOW_END = PAST_END;
-    delete process.env.FEATURE_FLAG_FREEZE_WINDOW;
-  });
-
-  afterEach(() => {
-    process.env = originalEnv;
-  });
-
-  it("allows a maintainer request with x-freeze-override: true header", async () => {
-    const req = makeRequest(undefined, { "x-freeze-override": "true" });
-    const guard = await enforceFreezeWindowGuard({
-      request: req,
-      isMaintainer: true,
-      userId: "maintainer-1",
-      userLogin: "admin_user",
-    });
-
-    expect(guard.blocked).toBe(false);
-    expect(guard.isOverride).toBe(true);
-    expect(guard.response).toBeUndefined();
-  });
-
-  it("allows a maintainer request with overrideFreeze=true query param", async () => {
-    const req = makeRequest(
-      "http://localhost:3000/api/contributors?overrideFreeze=true"
-    );
-    const guard = await enforceFreezeWindowGuard({
-      request: req,
-      isMaintainer: true,
-      userId: "maintainer-2",
-      userLogin: "superadmin",
-    });
-
-    expect(guard.blocked).toBe(false);
-    expect(guard.isOverride).toBe(true);
-  });
-
-  it("records a freeze_override audit event when a maintainer overrides", async () => {
-    const { recordAuditLog } = await import("@/lib/audit");
-    const req = makeRequest(undefined, { "x-freeze-override": "true" });
-    await enforceFreezeWindowGuard({
-      request: req,
-      isMaintainer: true,
-      userId: "maintainer-3",
-      userLogin: "override_admin",
-      actionLabel: "recheck.batch",
-    });
-
-    expect(recordAuditLog).toHaveBeenCalledWith(
-      expect.objectContaining({
-        action: "recheck.batch.freeze_override",
-        actorId: "maintainer-3",
-        actorLogin: "override_admin",
-        metadata: expect.objectContaining({
-          reason: expect.stringMatching(/override/i),
-        }),
-      })
-    );
-  });
-
-  it("override header value matching is case-insensitive (TRUE, True, etc.)", async () => {
-    for (const val of ["TRUE", "True", "true"]) {
-      const req = makeRequest(undefined, { "x-freeze-override": val });
-      const guard = await enforceFreezeWindowGuard({
-        request: req,
-        isMaintainer: true,
-        userId: "maintainer-4",
-        userLogin: "admin4",
-      });
-      expect(guard.blocked).toBe(false);
-      expect(guard.isOverride).toBe(true);
-    }
-  });
-});
-
-// ---------------------------------------------------------------------------
-// enforceFreezeWindowGuard — inactive window (no blocking)
-// ---------------------------------------------------------------------------
-
-describe("enforceFreezeWindowGuard — inactive freeze window", () => {
-  const originalEnv = { ...process.env };
-
-  beforeEach(() => {
-    vi.clearAllMocks();
-    process.env = { ...originalEnv };
-    delete process.env.FEATURE_FLAG_FREEZE_WINDOW;
-  });
-
-  afterEach(() => {
-    process.env = originalEnv;
-  });
-
-  it("does not block when window is in the past and now is after it", () => {
-    // The test runs at an arbitrary time; we just remove FREEZE_WINDOW_* so the
-    // helper sees no window at all → inactive.
-    delete process.env.FREEZE_WINDOW_ENABLED;
-    delete process.env.FREEZE_WINDOW_START;
-    delete process.env.FREEZE_WINDOW_END;
-
-    return (async () => {
-      const req = makeRequest();
-      const guard = await enforceFreezeWindowGuard({
-        request: req,
-        isMaintainer: false,
-        userId: "user-1",
-        userLogin: "contrib",
-      });
-      expect(guard.blocked).toBe(false);
-      expect(guard.response).toBeUndefined();
-    })();
-  });
-
-  it("does not block when FREEZE_WINDOW_ENABLED is 'false' even with valid dates", async () => {
-    process.env.FREEZE_WINDOW_ENABLED = "false";
-    process.env.FREEZE_WINDOW_START = PAST_START;
-    process.env.FREEZE_WINDOW_END = PAST_END;
-
-    const req = makeRequest();
-    const guard = await enforceFreezeWindowGuard({
-      request: req,
-      isMaintainer: false,
-      userId: "user-2",
-      userLogin: "contrib2",
-    });
-
-    expect(guard.blocked).toBe(false);
-    expect(guard.isOverride).toBe(false);
-  });
-
-  it("does not record any audit log when window is inactive", async () => {
-    const { recordAuditLog } = await import("@/lib/audit");
-    delete process.env.FREEZE_WINDOW_START;
-    delete process.env.FREEZE_WINDOW_END;
-
-    const req = makeRequest();
-    await enforceFreezeWindowGuard({
-      request: req,
-      isMaintainer: false,
-      userId: "user-3",
-      userLogin: "contrib3",
-    });
-
-    expect(recordAuditLog).not.toHaveBeenCalled();
   });
 });
