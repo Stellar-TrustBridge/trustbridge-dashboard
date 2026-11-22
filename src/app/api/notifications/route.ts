@@ -16,6 +16,16 @@ import {
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+/**
+ * Safe defaults seeded for new users so Wave contributors are not flooded
+ * with mail. Digest is weekly (opt-in to more), disputes stay on because
+ * they are actionable and time-sensitive.
+ */
+export const DEFAULT_NOTIFICATION_PREFERENCES = {
+  digest: true,
+  dispute: true,
+} as const;
+
 const markReadSchema = z.object({
   notificationIds: z.array(z.string()).optional(),
   all: z.boolean().optional(),
@@ -35,6 +45,7 @@ const preferencesSchema = z
  * GET /api/notifications
  * Returns notifications and unread count for the authenticated user.
  * With `?scope=preferences`, returns that user's mail preferences instead.
+ * New users without stored preferences receive the safe defaults.
  */
 export async function GET(request: NextRequest) {
   const session = await getServerSession(authOptions);
@@ -46,7 +57,8 @@ export async function GET(request: NextRequest) {
   const userId = session.user.id;
 
   if (request.nextUrl.searchParams.get("scope") === "preferences") {
-    const preferences = await getNotificationPreferences(userId);
+    const stored = await getNotificationPreferences(userId);
+    const preferences = stored ?? { ...DEFAULT_NOTIFICATION_PREFERENCES };
     return NextResponse.json(
       { preferences },
       { headers: { "Cache-Control": "no-store" } }

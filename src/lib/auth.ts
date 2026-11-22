@@ -31,6 +31,32 @@ export const MAX_CONCURRENT_SESSIONS: Record<Role, number> = {
 };
 
 /**
+ * Notification digest cadence. `weekly` is the safe default for new users so
+ * Wave contributors are not flooded with mail on day one.
+ */
+export type DigestFrequency = "off" | "daily" | "weekly";
+
+/**
+ * Notification preferences seeded for a brand-new user.
+ *
+ * Defaults are intentionally conservative: a weekly digest and dispute
+ * notifications on, everything else off. See docs/DIGEST.md.
+ */
+export interface NotificationPreferences {
+  digest: DigestFrequency;
+  disputes: boolean;
+  mentions: boolean;
+  releases: boolean;
+}
+
+export const DEFAULT_NOTIFICATION_PREFERENCES: Readonly<NotificationPreferences> = {
+  digest: "weekly",
+  disputes: true,
+  mentions: false,
+  releases: false,
+};
+
+/**
  * Resolve the authenticated user from the request.
  *
  * The dashboard trusts the upstream session header set by the auth proxy.
@@ -141,4 +167,26 @@ export function checkSessionLimit(
     return { ok: false, error: "session_limit_exceeded", status: 429 };
   }
   return { ok: true, user };
+}
+
+/**
+ * Seed notification preferences for a brand-new user.
+ *
+ * Returns a fresh copy of the safe defaults (weekly digest, disputes on) so
+ * callers can persist them without mutating the shared constant. Existing
+ * preferences are never overwritten: pass them as `existing` and they are
+ * returned unchanged, keeping repeated invocations idempotent.
+ */
+export function seedNotificationPreferences(
+  existing?: Partial<NotificationPreferences> | null,
+): NotificationPreferences {
+  if (existing && typeof existing === "object") {
+    return {
+      digest: existing.digest ?? DEFAULT_NOTIFICATION_PREFERENCES.digest,
+      disputes: existing.disputes ?? DEFAULT_NOTIFICATION_PREFERENCES.disputes,
+      mentions: existing.mentions ?? DEFAULT_NOTIFICATION_PREFERENCES.mentions,
+      releases: existing.releases ?? DEFAULT_NOTIFICATION_PREFERENCES.releases,
+    };
+  }
+  return { ...DEFAULT_NOTIFICATION_PREFERENCES };
 }

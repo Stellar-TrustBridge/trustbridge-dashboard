@@ -13,6 +13,85 @@ export interface CreateNotificationInput {
 }
 
 /**
+ * Digest cadence options for notification email preferences.
+ */
+export type DigestFrequency = "off" | "daily" | "weekly";
+
+/**
+ * Notification email preferences for a user.
+ */
+export interface NotificationPreferences {
+  digestFrequency: DigestFrequency;
+  disputesEnabled: boolean;
+}
+
+/**
+ * Safe defaults seeded for new users.
+ * - Weekly digest (not daily) to avoid noisy mail.
+ * - Disputes enabled so users are not surprised by missed disputes.
+ */
+export const DEFAULT_NOTIFICATION_PREFERENCES: Readonly<NotificationPreferences> = Object.freeze({
+  digestFrequency: "weekly",
+  disputesEnabled: true,
+});
+
+/**
+ * Returns a fresh copy of the default notification preferences for new users.
+ */
+export function getDefaultNotificationPreferences(): NotificationPreferences {
+  return { ...DEFAULT_NOTIFICATION_PREFERENCES };
+}
+
+/**
+ * Normalizes a partial/unknown preference payload into a complete, valid
+ * NotificationPreferences object, falling back to safe defaults for any
+ * missing or malformed field.
+ */
+export function normalizeNotificationPreferences(
+  input?: Partial<NotificationPreferences> | null
+): NotificationPreferences {
+  const defaults = getDefaultNotificationPreferences();
+  if (!input) return defaults;
+
+  const digestFrequency: DigestFrequency =
+    input.digestFrequency === "off" ||
+    input.digestFrequency === "daily" ||
+    input.digestFrequency === "weekly"
+      ? input.digestFrequency
+      : defaults.digestFrequency;
+
+  const disputesEnabled =
+    typeof input.disputesEnabled === "boolean"
+      ? input.disputesEnabled
+      : defaults.disputesEnabled;
+
+  return { digestFrequency, disputesEnabled };
+}
+
+/**
+ * Seeds default notification preferences for a newly created user.
+ * Idempotent: repeated calls for the same user return the existing row
+ * unchanged rather than overwriting user-chosen settings.
+ */
+export async function seedDefaultNotificationPreferences(userId: string) {
+  if (!userId) {
+    throw new Error("seedDefaultNotificationPreferences: userId is required");
+  }
+
+  const defaults = getDefaultNotificationPreferences();
+
+  return prisma.notificationPreference.upsert({
+    where: { userId },
+    update: {},
+    create: {
+      userId,
+      digestFrequency: defaults.digestFrequency,
+      disputesEnabled: defaults.disputesEnabled,
+    },
+  });
+}
+
+/**
  * Sanitizes PII from notification text:
  * - Replaces email addresses with [redacted-email]
  * - Replaces Stellar G-addresses (G[A-Z0-9]{55}) with [redacted-address]
