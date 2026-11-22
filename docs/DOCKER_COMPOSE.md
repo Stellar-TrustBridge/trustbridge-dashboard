@@ -142,6 +142,83 @@ docker-compose down -v
 
 For a clean restore path, prefer a dedicated backup job or a scheduled `pg_dump` to an encrypted object store. Local development may use `pg_dump` directly; production MUST not keep plaintext dumps in the repo or on a shared workstation.
 
+## Resource limits for the local mock Horizon stack
+
+Wave contributor setups run the mock Horizon service alongside the Postgres
+stack. Under-resourced containers are the most common cause of false Wave
+check failures: the mock Horizon process gets OOM-killed mid-request, the
+healthcheck flaps, and the Wave runner reports a failure that has nothing to do
+with the code under test.
+
+### Recommended limits
+
+Apply these limits to the `mock-horizon` service (and keep them in sync with
+the comments in `docker-compose.yml`):
+
+| Service | CPU limit | Memory limit | Memory reservation | Rationale |
+|---------|-----------|--------------|--------------------|-----------|
+| `mock-horizon` | `1.0` | `512M` | `256M` | Node.js mock server plus in-memory fixture store; 512M leaves headroom for GC spikes during Wave check bursts. |
+| `postgres` | `2.0` | `1G` | `512M` | Shared buffers plus connection pool; below 1G Postgres logs `out of shared memory` under parallel Wave runs. |
+| `postgres-admin` | `0.5` | `256M` | `128M` | Adminer is a thin PHP UI; 256M is ample. |
+
+Example Compose v2 syntax for the mock Horizon service:
+
+```yaml
+services:
+  mock-horizon:
+    # ...existing config...
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          memory: 256M
+```
+
+> `deploy.resources` is honored by `docker compose` (v2) for local runs. If you
+> are on an older Compose v1 binary, use the equivalent `mem_limit: 512m` and
+> `cpus: 1.0` keys instead.
+
+### Known OOM symptoms
+
+If the mock Horizon stack is under-resourced you will typically see one or more
+of the following:
+
+- **Container exits with code `137`** — `docker-compose ps` shows the service as
+  `Exited (137)`. `137 = 128 + 9` (SIGKILL), the signature of the kernel OOM
+  killer.
+- **Healthcheck failures** — `docker-compose ps` reports `Up (unhealthy)` and
+  `docker inspect` shows repeated `Healthcheck failed` entries even though the
+  process starts cleanly.
+- **`Killed` in container logs** — `docker-compose logs mock-horizon` ends with a
+  bare `Killed` line and no stack trace.
+- **Host OOM killer** — `dmesg -T | grep -i 'killed process'` (Linux) or the
+  Docker Desktop resource panel shows the container being reaped.
+- **Flaky Wave checks** — Wave checks pass locally in isolation but fail when run
+  in parallel, because concurrent requests push the mock server past its memory
+  ceiling.
+
+### Diagnosing OOM
+
+```bash
+# Confirm the exit code (137 == OOM-killed)
+docker-compose ps
+
+# Inspect the last exit status and OOM flag
+docker inspect --format '{{.State.ExitCode}} {{.State.OOMKilled}}' trustbridge-mock-horizon
+
+# Check host kernel logs (Linux)
+dmesg -T | grep -i 'killed process'
+
+# Watch live memory usage while a Wave check runs
+docker stats trustbridge-mock-horizon
+```
+
+If `OOMKilled` is `true` or the exit code is `137`, raise the memory limit for
+`mock-horizon` (start at `512M`, go to `1G` for large fixture sets) and re-run
+the Wave check. Do not treat an OOM-killed mock Horizon as a code failure.
+
 ## Stopping and Cleanup
 
 ### Stop containers (preserve data)

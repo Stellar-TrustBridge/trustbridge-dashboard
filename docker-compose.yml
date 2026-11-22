@@ -1,5 +1,15 @@
 version: "3.8"
 
+# Resource limits for local Wave contributor stacks.
+# See docs/DOCKER_COMPOSE.md for rationale, OOM symptoms, and troubleshooting.
+#
+# Recommended minimums (local mock Horizon + Postgres):
+#   postgres: 1.0 CPU / 1g memory
+#   postgres-admin: 0.5 CPU / 256m memory
+#   mock-horizon: 1.0 CPU / 512m memory
+# Under-resourced stacks cause false Wave check failures (OOM kills,
+# healthcheck timeouts). Raise limits before debugging app code.
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -14,6 +24,15 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./docker/postgres/init-roles.sql:/docker-entrypoint-initdb.d/10-init-roles.sql:ro
+    # Recommended local limits (see docs/DOCKER_COMPOSE.md).
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1g
+        reservations:
+          cpus: "0.25"
+          memory: 256m
     healthcheck:
       test:
         - CMD-SHELL
@@ -34,6 +53,12 @@ services:
       - "8080:8080"
     environment:
       ADMINER_DEFAULT_SERVER: postgres
+    # Recommended local limits (see docs/DOCKER_COMPOSE.md).
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256m
     networks:
       - trustbridge-network
 
