@@ -110,6 +110,115 @@ function httpUrlField(name: string) {
 }
 
 /**
+ * Hostnames that must never be reachable from operator-supplied base URLs.
+ * Mirrors the SSRF posture used by other outbound clients (loopback,
+ * link-local, cloud metadata, and internal-only suffixes).
+ */
+const BLOCKED_HOSTNAMES = new Set([
+  "localhost",
+  "localhost.localdomain",
+  "metadata",
+  "metadata.google.internal",
+  "instance-data",
+]);
+
+const BLOCKED_HOST_SUFFIXES = [".localhost", ".local", ".internal", ".localdomain"];
+
+/**
+ * Returns true when the hostname is a private/loopback/link-local/metadata
+ * address or an internal-only hostname that would turn the dashboard into an
+ * SSRF proxy.
+ */
+function isBlockedHostname(hostname: string): boolean {
+  const host = hostname.trim().toLowerCase().replace(/^\[|\]$/g, "");
+  if (!host) return true;
+  if (BLOCKED_HOSTNAMES.has(host)) return true;
+  if (BLOCKED_HOST_SUFFIXES.some((suffix) => host.endsWith(suffix))) return true;
+
+  // IPv4 literal checks (loopback, private, link-local, metadata, CGNAT).
+  const ipv4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (ipv4) {
+    const [a, b] = [Number(ipv4[1]), Number(ipv4[2])];
+    if (a === 0 || a === 10 || a === 127) return true;
+    if (a === 169 && b === 254) return true; // link-local + cloud metadata
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT
+    return false;
+  }
+
+  // IPv6 literal checks (loopback, unspecified, unique-local, link-local).
+  if (host.includes(":")) {
+    if (host === "::1" || host === "::") return true;
+    if (/^f[cd][0-9a-f]{2}:/.test(host)) return true; // fc00::/7
+    if (/^fe[89ab][0-9a-f]:/.test(host)) return true; // fe80::/10
+    return false;
+  }
+
+  return false;
+}
+
+/**
+ * Validates an operator-supplied Action/check base URL with the same SSRF
+ * posture as other outbound clients: http(s) only, no embedded credentials,
+ * no private/loopback/link-local/metadata hosts, and no disallowed ports.
+ */
+export function validateActionBaseUrl(value: string): string {
+  if (isPlaceholderUrl(value)) {
+    throw new Error("Action base URL must be a real http(s) URL (placeholders are not allowed)");
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error("Action base URL must be a valid URL");
+  }
+
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error("Action base URL must use http or https");
+  }
+
+  if (parsed.username || parsed.password) {
+    throw new Error("Action base URL must not contain embedded credentials");
+  }
+
+  if (parsed.port) {
+    const port = Number(parsed.port);
+    const allowed = parsed.protocol === "https:" ? [443] : [80];
+    if (!allowed.includes(port)) {
+      throw new Error("Action base URL must not use a non-standard port");
+    }
+  }
+
+  if (isBlockedHostname(parsed.hostname)) {
+    throw new Error("Action base URL must not target a private, loopback, or metadata host");
+  }
+
+  return value;
+}
+
+/**
+ * Optional Action/check base URL field. When set, it is validated with the
+ * SSRF posture above so a misconfigured base cannot proxy internal traffic.
+ */
+function actionBaseUrlField(name: string) {
+  return z
+    .string()
+    .min(1, `${name} must not be empty`)
+    .superRefine((value, ctx) => {
+      try {
+        validateActionBaseUrl(value);
+      } catch (err) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: err instanceof Error ? err.message : `${name} is invalid`,
+        });
+      }
+    });
+}
+
+/**
  * Environment variable schema for the TrustBridge Dashboard.
  * Validates all required and optional configuration at application boot.
  */
@@ -166,6 +275,11 @@ const envSchema = z.object({
   // contract ID; the cross-field check below enforces that pairing.
   SOROBAN_CONTRACT_ID: z.string().optional(),
   SOROBAN_RPC_URL: httpUrlField("SOROBAN_RPC_URL").optional(),
+
+  // Configurable Action/check base URL. Validated with the same SSRF posture
+  // as other outbound clients so a misconfigured base cannot proxy internal
+  // traffic (loopback, private, link-local, metadata, credentials, ports).
+  TRUSTBRIDGE_ACTION_BASE_URL: actionBaseUrlField("TRUSTBRIDGE_ACTION_BASE_URL").optional(),
 
   // Webhook secret (optional at boot, but required for org membership sync — requests are rejected if missing)
   GITHUB_WEBHOOK_SECRET: z.string().optional(),
@@ -247,23 +361,10 @@ export function validateEnv(): Environment {
   if (!result.success) {
     const errors = result.error.flatten();
     const fieldErrors = Object.entries(errors.fieldErrors)
-      .map(([field, msgs]) => `${field}: ${msgs?.join(", ")}`)
-      .join("\n");
-
-    const message = `❌ Environment validation failed:\n${fieldErrors}`;
-    console.error(message);
-
-    throw new Error(message);
+      .map(([field, messages]) => `${field}: ${messages?.join(", ")}`)
+      .join("; ");
+    throw new Error(`Environment validation failed: ${fieldErrors}`);
   }
 
   return result.data;
-}
-
-let cachedEnv: Environment | null = null;
-
-export function getValidatedEnv(): Environment {
-  if (!cachedEnv) {
-    cachedEnv = validateEnv();
-  }
-  return cachedEnv;
 }
