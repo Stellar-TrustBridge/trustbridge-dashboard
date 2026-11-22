@@ -68,6 +68,40 @@ npm run build-storybook
 
 ---
 
+## OpenAPI schema (`openapi.json`)
+
+The public dashboard API contract is published at `/api/openapi.json` and is
+consumed by Wave external automations. The spec is generated from the route
+handlers and committed as a snapshot so drift is caught in CI.
+
+### Regenerating the snapshot
+
+After changing any public API route (request/response shape, status codes,
+parameters), regenerate the committed snapshot:
+
+```bash
+npm run openapi:generate   # rewrites the committed openapi.json snapshot
+```
+
+Commit the regenerated `openapi.json` alongside your route change.
+
+### When the drift check fails
+
+CI runs `npm run openapi:check`, which regenerates the spec and diffs it against
+the committed snapshot. If it fails you will see a stable error like:
+
+```
+OpenAPI drift detected: committed openapi.json is stale.
+Run `npm run openapi:generate` and commit the result.
+```
+
+To fix it: run `npm run openapi:generate`, review the diff to confirm it reflects
+only your intended API change, and commit the updated snapshot. Do not hand-edit
+`openapi.json` — always regenerate it so the route handlers remain the single
+source of truth.
+
+---
+
 ## Pull request guidelines
 
 ### Before opening a PR
@@ -79,10 +113,11 @@ npm run build-storybook
 - [ ] `npm run typecheck` passes (TypeScript strict mode)
 - [ ] `npm run test` passes (all Vitest unit + API tests)
 - [ ] `npm run build` passes locally (Next.js build)
+- [ ] `npm run openapi:check` passes (regenerate with `npm run openapi:generate` if it fails)
 - [ ] No secrets committed
 
-> **Note:** CI runs `lint`, `typecheck`, `vitest run`, and `build` automatically.
-> Your PR must pass all four before it can be merged.
+> **Note:** CI runs `lint`, `typecheck`, `vitest run`, `build`, and the OpenAPI
+> drift check automatically. Your PR must pass all of them before it can be merged.
 
 ### PR title format
 
@@ -133,6 +168,7 @@ Include:
 - Use `export const runtime = "nodejs"` for stellar-sdk routes
 - Use `export const dynamic = "force-dynamic"` for DB-backed routes
 - Return structured JSON errors with appropriate HTTP status codes
+- Regenerate `openapi.json` (`npm run openapi:generate`) when public API shapes change
 
 ### Database
 

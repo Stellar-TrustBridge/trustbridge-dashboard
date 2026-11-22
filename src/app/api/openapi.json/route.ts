@@ -6,6 +6,11 @@ import { publicOptionsResponse, withPublicCors } from "@/lib/public-cors";
  *
  * Returns the OpenAPI 3.0.0 specification for the TrustBridge Dashboard API.
  * Can be used with Swagger UI or other API documentation tools.
+ *
+ * The spec is generated from the single source of truth in
+ * `src/lib/openapi-spec.ts`. The committed snapshot at `openapi.json` is
+ * checked for drift in CI (`npm run check:openapi-drift`); regenerate it with
+ * `npm run generate:openapi` whenever route handlers change.
  */
 export async function GET(request: Request): Promise<Response> {
   const url = new URL(request.url);
