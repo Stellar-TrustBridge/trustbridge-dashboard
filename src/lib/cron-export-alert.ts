@@ -7,6 +7,21 @@ const logger = new StructuredLogger("cron-export-alert");
 
 const ALERT_TIMEOUT_MS = 5_000;
 
+/**
+ * Stable reason codes for partial-export cleanup failures.
+ *
+ * These are surfaced through the existing alerting path so operators can
+ * triage leftover artifacts without parsing free-form error text.
+ *
+ *   - `cleanup_local_failed`  — could not remove the partial local file
+ *   - `cleanup_storage_failed` — could not remove the partial object-storage object
+ *   - `cleanup_unknown_failed` — cleanup failed for an unrecognized target
+ */
+export type CronExportCleanupReasonCode =
+  | "cleanup_local_failed"
+  | "cleanup_storage_failed"
+  | "cleanup_unknown_failed";
+
 export interface CronExportAlertPayload {
   source: "trustbridge-cron-export";
   status: "error";
@@ -21,6 +36,8 @@ export interface CronExportAlertPayload {
   text?: string;
   /** PagerDuty event action (always "trigger" for failures). */
   event_action?: "trigger";
+  /** Stable reason code when the failure is a partial-file cleanup failure. */
+  reason_code?: CronExportCleanupReasonCode;
 }
 
 /**
@@ -107,6 +124,87 @@ export async function sendCronExportAlert(
     // AbortError = timeout; log as warn, not error — the alert delivery
     // failure is secondary to the original export failure.
     logger.warn("cron_export_alert_failed", { webhookUrl, error: message });
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+/**
+ * Report a partial-export cleanup failure through the existing alerting path.
+ *
+ * Reuses `sendCronExportAlert` so operators get the same webhook/PagerDuty
+ * routing as ordinary export failures, but tags the payload with a stable
+ * `reason_code` so leftover artifacts are distinguishable from the original
+ * upload failure. Never throws — cleanup reporting must not mask the export
+ * result.
+ *
+ * @param result     The failed CronExportResult from runCronExport().
+ * @param reasonCode Stable cleanup reason code (see CronExportCleanupReasonCode).
+ * @param detail     Optional human-readable detail (already redacted here).
+ */
+export async function sendCronExportCleanupAlert(
+  result: CronExportResult,
+  reasonCode: CronExportCleanupReasonCode,
+  detail?: string
+): Promise<void> {
+  const webhookUrl = process.env.CRON_EXPORT_ALERT_WEBHOOK_URL?.trim();
+  if (!webhookUrl) return;
+
+  const environment = process.env.NODE_ENV ?? "unknown";
+  const baseError = redactAlertText(result.error ?? "Unknown export failure");
+  const cleanupDetail = detail ? redactAlertText(detail) : undefined;
+  const error = cleanupDetail
+    ? `${baseError} [${reasonCode}: ${cleanupDetail}]`
+    : `${baseError} [${reasonCode}]`;
+
+  const payload: CronExportAlertPayload = {
+    source: "trustbridge-cron-export",
+    status: "error",
+    error,
+    startedAt: result.startedAt,
+    durationMs: result.durationMs,
+    environment,
+    reason_code: reasonCode,
+    text: `🚨 TrustBridge cron export cleanup failed (${environment})\nReason: ${reasonCode}\nError: ${error}\nStarted: ${result.startedAt} — took ${result.durationMs}ms`,
+  };
+
+  const pdKey = process.env.CRON_EXPORT_ALERT_PAGERDUTY_KEY?.trim();
+  if (pdKey) {
+    payload.routing_key = pdKey;
+    payload.event_action = "trigger";
+  }
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), ALERT_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(webhookUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      logger.warn("cron_export_cleanup_alert_non_ok", {
+        webhookUrl,
+        status: response.status,
+        reasonCode,
+      });
+    } else {
+      logger.info("cron_export_cleanup_alert_sent", {
+        webhookUrl,
+        status: response.status,
+        reasonCode,
+      });
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.warn("cron_export_cleanup_alert_failed", {
+      webhookUrl,
+      error: message,
+      reasonCode,
+    });
   } finally {
     clearTimeout(timeoutId);
   }
