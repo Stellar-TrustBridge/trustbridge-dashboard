@@ -746,3 +746,105 @@ normalized resolved Horizon and Soroban RPC URLs. All components are escaped,
 so no org/network can bleed into another's cached result. Public CORS,
 rate-limit headers, the 30 s TTL and its `Cache-Control` headers are unchanged.
 See [ACTION_LOOKUP_CACHE.md](./ACTION_LOOKUP_CACHE.md).
+
+---
+
+## Registry mode (`REGISTRY_MODE`)
+
+`src/lib/registry-mode.ts` exposes a single function `getRegistryMode()` that
+every contributor-facing REST endpoint reads to stamp `registryMode` onto its
+response payload.  The field tells the front-end (and downstream consumers such
+as Wave tooling) whether data freshness is driven by **manual maintainer
+rechecks** or by an **automated contract-sync job**.
+
+### Modes
+
+| Value | Meaning | Who keeps data fresh |
+|---|---|---|
+| `"live"` *(default)* | Postgres reflects the last manual Horizon recheck. Maintainers must trigger `POST /api/contributors` to refresh readiness data. | Maintainer, on demand |
+| `"synced"` | A scheduled `syncContractToPostgres()` job keeps Postgres in sync with on-chain registrations. Manual rechecks are still allowed but not required. | Background cron, automatically |
+
+**Reads are identical in both modes** — Postgres is always the source of truth.
+The mode only changes what the API reports about *expected freshness*, not what
+it queries.
+
+### Fail-open design
+
+An unrecognized or missing `REGISTRY_MODE` value falls back to `"live"` rather
+than refusing to boot.  This means a typo'd env var never breaks read endpoints
+— it just silently defaults.  Operators should validate their env vars using
+`GET /api/health`, which surfaces `registryMode` in its response.
+
+### Env var
+
+```bash
+# Optional. Accepts "live" (default) or "synced".
+# Value is normalised (trimmed, lowercased) before evaluation.
+REGISTRY_MODE=synced
+```
+
+### Where the value surfaces
+
+Both `GET /api/contributors` and `GET /api/contributors/paginated` include
+`registryMode` at the top level of their JSON response so the maintainer
+dashboard can display the correct freshness label:
+
+```json
+{
+  "contributors": [...],
+  "total": 42,
+  "registryMode": "synced"
+}
+```
+
+### Migrating between modes
+
+#### Switching from `"live"` to `"synced"`
+
+Prerequisites:
+1. Deploy `src/lib/contract-sync.ts` and verify at least one successful run
+   (`GET /api/contract-sync` → `lastRun.status === "ok"`).
+2. Confirm the contract-sync cron is configured and not in a `stalled` state
+   (`GET /api/health` → `checks.contractSync.lag.status === "ok"`).
+3. Run a final manual batch recheck (`POST /api/contributors`) so Postgres
+   starts the synced period with fresh Horizon data.
+
+Activation:
+```bash
+# Vercel
+vercel env add REGISTRY_MODE production  # value: synced
+# Then redeploy to pick up the new value.
+```
+
+The flag is read on every request — no restart beyond the redeploy is needed.
+
+Validation:
+- `GET /api/contributors` → response includes `"registryMode": "synced"`.
+- Maintainer dashboard heading changes from "Live" to "Synced" (if the UI
+  reads the field).
+
+#### Switching back from `"synced"` to `"live"`
+
+Remove or blank `REGISTRY_MODE` (or set it to `"live"`) and redeploy.  The
+fall-open default means no contributors are locked out during the transition.
+Run a manual batch recheck immediately after to ensure Horizon data is fresh.
+
+### Failure modes
+
+| Situation | Behaviour |
+|---|---|
+| `REGISTRY_MODE` unset | Falls back to `"live"` |
+| `REGISTRY_MODE` set to an invalid value (e.g. `"offline"`) | Falls back to `"live"` with no error |
+| `REGISTRY_MODE` set to whitespace-only | Treated as unset; falls back to `"live"` |
+| Contract-sync stalled while `REGISTRY_MODE=synced` | `GET /api/health` degrades `contractSync.lag.status`; operator alert fires via webhook. Data reads continue normally from Postgres — no 5xx. |
+| Contract-sync misconfigured (`SOROBAN_CONTRACT_ID` missing) | Sync skipped; `registryMode` still reports `"synced"` if configured — operator should revert to `"live"` or fix the contract ID. |
+
+### Testing
+
+```bash
+npx vitest run src/lib/registry-mode.test.ts
+```
+
+The test suite covers defaults, explicit values, normalisation
+(case-insensitive, whitespace trimming), all documented failure paths, type
+safety, and idempotency.  No DB or network is required.

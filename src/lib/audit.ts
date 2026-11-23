@@ -125,7 +125,11 @@ export async function recordRetentionDryRunAudit(input: {
       candidateCount: input.candidateCount,
       cutoff: input.cutoff,
       reasonCode: input.reasonCode ?? null,
+    },
+  });
+}
 
+/**
  * Record a DLQ replay attempt (success or failure).
  *
  * Wraps {@link recordAuditLog} with the canonical action name and a stable
