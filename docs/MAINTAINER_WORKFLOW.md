@@ -126,6 +126,70 @@ To prevent roster changes or rechecks from shuffling readiness states immediatel
 
 ---
 
+## 2a. Maintenance Banners (Planned Downtime Windows)
+
+Maintainers can schedule dashboard maintenance banners so wave contributors get
+notice before a freeze or deploy. Windows are stored and served by
+`src/lib/maintenance.ts` and exposed through `/api/maintenance`.
+
+### Public read
+
+`GET /api/maintenance` requires **no authentication** and returns the windows
+that are currently active or upcoming (past windows are omitted):
+
+```json
+{
+  "windows": [
+    {
+      "id": "mw-1",
+      "message": "Dashboard read-only during wave payout",
+      "startsAt": "2026-10-01T00:00:00.000Z",
+      "endsAt": "2026-10-01T02:00:00.000Z",
+      "severity": "warning",
+      "status": "active"
+    }
+  ]
+}
+```
+
+`status` is one of `upcoming`, `active`, or `ended` (ended windows are filtered
+out of the public response). `severity` is `info`, `warning`, or `critical`.
+
+### Maintainer write
+
+`POST /api/maintenance` (create), `PATCH /api/maintenance` (update), and
+`DELETE /api/maintenance?id=<id>` (cancel) require a maintainer session and the
+same-origin CSRF check used by other mutating routes. Unauthorized callers get
+HTTP `401`/`403` with an actionable `error`/`code` body — never a silent
+success.
+
+```bash
+curl -X POST https://dashboard.trustbridge.org/api/maintenance \
+  -H 'content-type: application/json' \
+  -H 'x-csrf-token: <token>' \
+  --data '{"message":"Read-only during payout","startsAt":"2026-10-01T00:00:00Z","endsAt":"2026-10-01T02:00:00Z","severity":"warning"}'
+```
+
+### Validation & reason codes
+
+Malformed or oversized input fails with a stable `code`:
+
+| Outcome | HTTP | `code` |
+|---|---|---|
+| Missing/empty message | 400 | `MAINTENANCE_MESSAGE_REQUIRED` |
+| Message over 280 chars | 400 | `MAINTENANCE_MESSAGE_TOO_LONG` |
+| Non-ISO-8601 timestamp | 400 | `MAINTENANCE_INVALID_TIMESTAMP` |
+| `endsAt` not after `startsAt` | 400 | `MAINTENANCE_INVALID_WINDOW` |
+| Unknown severity | 400 | `MAINTENANCE_INVALID_SEVERITY` |
+| Unknown window id | 404 | `MAINTENANCE_NOT_FOUND` |
+| Non-maintainer write | 403 | `MAINTENANCE_FORBIDDEN` |
+
+Writes are idempotent per window id: re-submitting the same payload for an
+existing id is a no-op update, and cancelling an already-cancelled window
+returns success without partial state.
+
+---
+
 ## 3. Horizon Latency Metrics
 
 - The maintainer metrics dashboard aggregates `horizonLatencyMs` from Horizon address checks.
@@ -197,107 +261,5 @@ When a contributor submits a Stellar address that another user already holds,
 
 The same body is returned by `POST /api/registrations/:id/restore` when the
 restored address has since been claimed. The copy lives in
-`src/lib/contributors.ts` (`WALLET_CLAIM_CONFLICT_MESSAGE`) and is locked by
-`tests/unit/contributors.test.ts`; change it there, not per route.
-
-Each rejected registration writes a `RegistrationConflict` row and a
-`registration.conflict` audit event. To resolve one:
-
-1. List open conflicts for your org: `GET /api/maintainer/conflicts`
-   (maintainer session required; `401` signed out, `403` non-maintainer).
-2. Ask the claimant to prove control of the address (e.g. a signed message).
-3. If they own it, soft-delete the existing registration so the claimant can
-   register; otherwise tell them to use a different wallet.
-
----
-
-## 5. Soroban Event Cursor Reset
-
-When operators need to re-index or re-sync Soroban events from a specific ledger or genesis:
-
-1. **Inspect existing cursors**:
-   ```sql
-   SELECT "maintainerOrgId", "eventType", "cursor", "lastPagingToken", "lastSyncedAt"
-   FROM "SorobanEventCursor"
-   WHERE "maintainerOrgId" = '<maintainer_org>';
-   ```
-
-2. **Reset to a previous ledger/token**:
-   ```sql
-   UPDATE "SorobanEventCursor"
-   SET "cursor" = '<target_ledger_or_token>',
-       "lastPagingToken" = NULL,
-       "lastSyncedAt" = NOW()
-   WHERE "maintainerOrgId" = '<maintainer_org>' AND "eventType" = 'contract';
-   ```
-
-3. **Full re-sync from scratch**:
-   Delete the cursor record to let the backfill worker start from genesis or the contract inception ledger:
-   ```sql
-   DELETE FROM "SorobanEventCursor"
-   WHERE "maintainerOrgId" = '<maintainer_org>' AND "eventType" = 'contract';
-   ```
-
-## Audit bundle verification (#685)
-
-`GET /api/audit` now includes a deterministic `hash` alongside `entries` and
-`summary`. When archiving an audit bundle for a Wave compliance review, save the
-response as-is and recompute `hashAuditBundle(entries)` before trusting the
-offline copy. Field order, ISO dates, and metadata key sorting are canonicalized;
-entry order is significant. See [AUDIT_BUNDLE_HASHING.md](./AUDIT_BUNDLE_HASHING.md)
-for the full verifier procedure and Node-version stability notes.
-
----
-
-## 6. Dispute Ticket Status Machine & Maintainer ACL
-
-Dispute tickets follow a strict state machine so closed Wave cases cannot be reopened without an audit trail.
-
-### Statuses
-
-| Status     | Meaning                                                        |
-| ---------- | -------------------------------------------------------------- |
-| `open`     | Filed by a contributor; awaiting maintainer triage.            |
-| `triage`   | A maintainer has picked up the dispute for review.             |
-| `resolved` | Terminal. Dispute upheld and settled.                          |
-| `rejected` | Terminal. Dispute dismissed.                                   |
-
-### Allowed Transitions
-
-| From     | To         | Actor       |
-| -------- | ---------- | ----------- |
-| `open`   | `triage`   | Maintainer  |
-| `triage` | `resolved` | Maintainer  |
-| `triage` | `rejected` | Maintainer  |
-
-Any other transition (including `resolved`/`rejected` → anything, and skipping
-`triage`) is rejected with HTTP `409 Conflict` and reason code
-`DISPUTE_INVALID_TRANSITION`. Terminal statuses cannot be reopened; file a new
-dispute instead.
-
-### Access Control
-
-- **Contributors** may only create disputes (`POST /api/disputes` with no
-  `status`/transition, resulting in `open`).
-- **Maintainers** (per existing org-scope rules) may perform `triage`,
-  `resolved`, and `rejected` transitions.
-- Non-maintainers attempting a transition receive HTTP `403 Forbidden` with
-  reason code `DISPUTE_MAINTAINER_REQUIRED`.
-
-### Audit Trail
-
-Every accepted transition is recorded via `src/lib/audit.ts` as
-`dispute.status_changed` with the previous status, next status, actor, and
-dispute id. Rejected transitions are recorded as
-`dispute.transition_rejected` with the attempted transition and reason code so
-operators can trace attempted reopenings.
-
-### Tests
-
-Automated coverage lives alongside the disputes API tests and covers the happy
-path (`open → triage → resolved`) plus failure paths for invalid transitions
-and non-maintainer actors. Run the targeted suite with:
-
-```bash
-npm test -- disputes
-```
+`src/lib/registration-errors.ts` so both routes stay in sync; update it there
+rather than duplicating strings in the UI.
