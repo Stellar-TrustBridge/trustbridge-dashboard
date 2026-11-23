@@ -26,6 +26,11 @@ vi.mock("@/lib/audit", () => ({
   recordAuditLog: vi.fn().mockResolvedValue(undefined),
 }));
 
+vi.mock("@/lib/rate-limit", () => ({
+  checkRateLimit: vi.fn(() => ({ allowed: true, retryAfter: 0, remaining: 9 })),
+  extractClientIp: vi.fn(() => "127.0.0.1"),
+}));
+
 vi.mock("@/lib/analytics", () => ({
   trackServerDisputeOpened: vi.fn(),
   trackServerDisputeClosed: vi.fn(),
@@ -147,7 +152,7 @@ describe("contributor mutation cache invalidation (#649)", () => {
     } as never);
 
     const res = await restorePOST(
-      request("http://localhost:3000/api/registrations/reg-1/restore", "POST"),
+      request("http://localhost:3000/api/registrations/reg-1/restore", "POST", { confirm: true }),
       { params: { id: "reg-1" } }
     );
 

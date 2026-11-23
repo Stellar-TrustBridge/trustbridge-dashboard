@@ -185,6 +185,20 @@ peer to act instead of retrying.
 
 ## 4a. Duplicate Wallet Claim Conflicts
 
+### Registration restore: rate limit and dual confirmation
+
+`POST /api/registrations/:id/restore` enforces two controls to prevent bulk-restore accidents that could undo Wave retention or compliance actions:
+
+1. **Explicit confirmation** — the request body must be `{ "confirm": true }`. Requests with a missing, false, or non-boolean field return `400 CONFIRM_REQUIRED` before any database work occurs.
+2. **Per-IP rate limit** — throttled to prevent burst restores. By default, 10 restores per 60-second window per IP. Exceeding the limit returns `429 RESTORE_RATE_LIMITED` with a `Retry-After` header. Rate-limited attempts are audited as `registration.restore.rate_limited`.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `RESTORE_RATE_LIMIT_WINDOW_MS` | `60000` (1 min) | Sliding window in ms |
+| `RESTORE_RATE_LIMIT_MAX` | `10` | Max restores per window per IP |
+
+Both controls apply regardless of the UI used. See [REGISTRATION_RETENTION.md](./REGISTRATION_RETENTION.md#authorization-and-response-semantics) for the full response matrix.
+
 When a contributor submits a Stellar address that another user already holds,
 `POST /api/register` returns `409` with:
 

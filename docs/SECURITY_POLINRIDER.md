@@ -121,3 +121,43 @@ This tooling **does not** rotate credentials. If malware was confirmed on a mach
 1. Stop using that machine for privileged work.
 2. From a clean device, rotate GitHub, npm, cloud, SSH, wallet, and CI secrets.
 3. Review recent publishes and force-pushes on your accounts.
+
+---
+
+## Network RPC URL change audit
+
+Changing `NEXT_PUBLIC_HORIZON_URL` or `SOROBAN_RPC_URL` without review is a
+supply-chain risk: a malicious or misconfigured RPC endpoint can redirect Wave
+traffic, return false readiness verdicts, or observe contributor addresses.
+
+`GET /api/settings/network` (maintainer-only, read-only) detects and audits RPC
+URL changes automatically:
+
+- **On the first request after a process restart** that sees a new URL value, the
+  route writes a `settings.network.rpc_url_changed` entry to `AuditLog` with the
+  `from` and `to` values for each changed URL. Credentials inside URLs are
+  redacted before they reach the audit log (`scheme://[redacted:credentials]@host`).
+- **Mismatch detection** (`network_config_mismatch_detected`) fires whenever
+  `NEXT_PUBLIC_HORIZON_URL` and `SOROBAN_RPC_URL` classify as two different known
+  networks. This cannot be silenced without a code change.
+
+### What to check after a URL change
+
+1. Query `GET /api/audit` and look for `settings.network.rpc_url_changed` entries
+   within the deployment window.
+2. Verify both the `from` and `to` host names are expected. A URL that points to
+   an unknown host or uses a non-HTTPS scheme is a red flag.
+3. Confirm the change was intended by cross-referencing with the deployment log
+   and the [network switching checklist](./ENVIRONMENT.md#network-switching-checklist).
+
+### Blast radius of an unaudited RPC change
+
+| Attack vector | Consequence |
+|---|---|
+| Horizon URL pointed at attacker-controlled node | Returns falsified balance / trustline data; contributors appear Ready when they are not (or vice versa) |
+| Soroban RPC URL redirected | Silently breaks contract sync; event timeline shows stale data; Soroban outbox deliveries may go to the wrong chain |
+| Credentials embedded in URL | URL logged to access logs, referrer headers, or audit trail; rotate immediately if observed |
+
+The PolinRider scanner checks for credential-bearing URLs in source files
+(pattern: `scheme://user:pass@host`). The runtime audit catches the same pattern
+in environment variables at deploy time.

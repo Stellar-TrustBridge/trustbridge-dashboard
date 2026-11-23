@@ -13,6 +13,7 @@ degrades to a silent no-op — so local development and CI never require a DSN.
 - [Setup](#setup)
 - [Environment variables](#environment-variables)
 - [Using the helpers](#using-the-helpers)
+- [Release health](#release-health)
 - [Redaction](#redaction)
 - [Instrumented routes](#instrumented-routes)
 - [Source maps (optional)](#source-maps-optional)
@@ -107,6 +108,8 @@ SENTRY_AUTH_TOKEN=<token-for-source-map-uploads>   # CI only
 | `NEXT_PUBLIC_SENTRY_DSN` | Optional | Sentry DSN. No-op when absent. |
 | `SENTRY_AUTH_TOKEN` | CI/CD only | Token for uploading source maps during build. |
 | `NEXT_PUBLIC_APP_ENV` | Optional | Sets the Sentry `environment` tag (`production`, `staging`, etc.). Defaults to `"development"`. |
+| `NEXT_PUBLIC_APP_VERSION` | Optional | Explicit release version (e.g. `1.4.2`). Used as the Sentry `release` tag and in `x-dashboard-release` response headers. Falls back to `VERCEL_GIT_COMMIT_SHA`, then `"unknown"`. |
+| `VERCEL_GIT_COMMIT_SHA` | Injected by Vercel | 40-char commit SHA. Used as the release identifier when `NEXT_PUBLIC_APP_VERSION` is absent. |
 
 ---
 
@@ -298,6 +301,113 @@ export async function POST(request: NextRequest) {
 
 ---
 
+## Release health
+
+Sentry's [Release Health](https://docs.sentry.io/product/releases/health/) feature tracks crash-free session rates and error volumes per dashboard version. This lets Wave maintainers correlate an incident alert in Sentry with the exact dashboard build that produced it.
+
+### How release naming works
+
+Every Sentry event is tagged with a `release` string in the format:
+
+```
+trustbridge-dashboard@<version>
+```
+
+`<version>` is resolved from two environment variables, in priority order:
+
+| Variable | When to use | Example |
+|---|---|---|
+| `NEXT_PUBLIC_APP_VERSION` | Explicit semantic version set during build (recommended) | `1.4.2`, `2026-11-24` |
+| `VERCEL_GIT_COMMIT_SHA` | Injected automatically by Vercel at build time | `deadbeef1234...` |
+| _(fallback)_ | Neither variable set (local dev, CI without releases) | `unknown` |
+
+The resolution logic lives in `resolveRelease()` and `buildReleaseTag()` in [`src/lib/sentry.ts`](../src/lib/sentry.ts).
+
+### Configuring the release in next.config.mjs
+
+Pass the resolved release tag to `withSentryConfig` so source-map uploads are associated with the same identifier that appears on events:
+
+```js
+// next.config.mjs
+import { withSentryConfig } from "@sentry/nextjs";
+import { buildReleaseTag } from "./src/lib/sentry.js";
+
+export default withSentryConfig(nextConfig, {
+  org: "your-sentry-org",
+  project: "trustbridge-dashboard",
+  release: buildReleaseTag(),   // "trustbridge-dashboard@1.4.2"
+  hideSourceMaps: true,
+  silent: true,
+});
+```
+
+### Setting the release in Sentry init files
+
+Pass the same value to the `release` option in each Sentry config file so session tracking and source maps agree:
+
+```ts
+// sentry.server.config.ts
+import * as Sentry from "@sentry/nextjs";
+import { buildReleaseTag } from "@/lib/sentry";
+
+Sentry.init({
+  dsn: process.env.NEXT_PUBLIC_SENTRY_DSN,
+  environment: process.env.NEXT_PUBLIC_APP_ENV ?? "development",
+  release: buildReleaseTag(),   // "trustbridge-dashboard@1.4.2"
+  tracesSampleRate: 0.1,
+});
+```
+
+Apply the same pattern to `sentry.client.config.ts` and `sentry.edge.config.ts`.
+
+### Source maps
+
+Source maps let Sentry show original TypeScript line numbers instead of minified bundle locations. They are uploaded during the build when `SENTRY_AUTH_TOKEN` is set:
+
+```bash
+# CI — GitHub Actions / Vercel build step
+NEXT_PUBLIC_APP_VERSION=1.4.2 SENTRY_AUTH_TOKEN=<token> npm run build
+```
+
+Source maps are **never served to browsers** when `hideSourceMaps: true` is set in `withSentryConfig` (the default). The `SENTRY_AUTH_TOKEN` is used only during the build to upload maps to Sentry's servers.
+
+### Correlating Wave incidents to dashboard versions
+
+When an alert fires in Sentry:
+
+1. Open the **Releases** tab in your Sentry project.
+2. Find the release tagged `trustbridge-dashboard@<version>`.
+3. The release page shows the crash-free session rate, new/regressed issues, and the diff of commits included in that build.
+4. Cross-reference with `DEPLOYMENT.md` and the CI run logs to identify the commit that introduced the regression.
+
+The `x-dashboard-release` response header (added by `annotateWithRelease()` in [`src/lib/error-handling.ts`](../src/lib/error-handling.ts)) is also emitted on API error responses, so Wave operators can read the version directly from HTTP response headers without Sentry access:
+
+```bash
+curl -sI -X POST https://your-dashboard.vercel.app/api/check \
+  -H "content-type: application/json" \
+  -d '{}' \
+  | grep x-dashboard-release
+# x-dashboard-release: 1.4.2
+```
+
+### CI workflow
+
+Add `NEXT_PUBLIC_APP_VERSION` to your CI build step so every deployment is versioned:
+
+```yaml
+# .github/workflows/ci.yml
+- name: Build
+  run: npm run build
+  env:
+    NEXT_PUBLIC_APP_VERSION: ${{ github.ref_name }}   # e.g. "v1.4.2" on a tag push
+    SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+    # ... other required env vars
+```
+
+Vercel automatically sets `VERCEL_GIT_COMMIT_SHA` on every deployment, so even without `NEXT_PUBLIC_APP_VERSION` you get a commit-SHA-based release identifier.
+
+---
+
 ## Source maps (optional)
 
 Source maps let Sentry show original TypeScript line numbers rather than
@@ -311,8 +421,6 @@ SENTRY_AUTH_TOKEN=<token> npm run build
 
 Source maps are **never sent to the browser** when `hideSourceMaps: true` is
 set in `next.config.mjs` (the default in the wizard-generated config).
-
----
 
 ## Testing
 

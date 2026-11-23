@@ -26,8 +26,14 @@ export const dynamic = "force-dynamic";
  * Delegates to `getContributorsPaginated` (src/lib/registrations.ts) — the
  * same cursor-pagination logic already used and tested elsewhere — rather
  * than re-implementing cursor handling against Prisma directly here.
+ *
+ * Performance target (p95): 1500 ms. See docs/PERFORMANCE_TESTING.md for
+ * the k6 scenario that enforces this. The `x-response-time-ms` header on
+ * every response allows operators to track latency without a full APM setup.
  */
 export async function GET(request: NextRequest) {
+  const start = Date.now();
+
   const session = await requireMaintainerSession();
   if (!session) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
@@ -55,11 +61,20 @@ export async function GET(request: NextRequest) {
     prisma.registration.count({ where: { deletedAt: null } }),
   ]);
 
-  return NextResponse.json({
-    contributors,
-    total,
-    hasMore,
-    nextCursor: nextCursor ?? undefined,
-    registryMode: getRegistryMode(),
-  });
+  const durationMs = Date.now() - start;
+
+  return NextResponse.json(
+    {
+      contributors,
+      total,
+      hasMore,
+      nextCursor: nextCursor ?? undefined,
+      registryMode: getRegistryMode(),
+    },
+    {
+      headers: {
+        "x-response-time-ms": String(durationMs),
+      },
+    }
+  );
 }

@@ -11,6 +11,12 @@
  *     `@sentry/nextjs`, keeping the surface area of the Sentry dependency to a
  *     single file.
  *
+ * Release health:
+ *  Set NEXT_PUBLIC_APP_VERSION (or VERCEL_GIT_COMMIT_SHA as a fallback) to
+ *  tag every Sentry event with the deployed dashboard version. This correlates
+ *  Wave incidents with specific releases in Sentry's Release Health view.
+ *  See docs/SENTRY.md for the full setup.
+ *
  * @see docs/SENTRY.md for setup, environment variables, and testing guidance.
  */
 
@@ -341,6 +347,50 @@ export async function flush(timeout = 2000): Promise<boolean> {
  */
 export function isSentryEnabled(): boolean {
   return Boolean(process.env.NEXT_PUBLIC_SENTRY_DSN?.trim());
+}
+
+// ---------------------------------------------------------------------------
+// Release health
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve the dashboard release identifier used to tag every Sentry event.
+ *
+ * Priority order:
+ *  1. `NEXT_PUBLIC_APP_VERSION` — explicit semantic version set during build
+ *     (e.g. `1.4.2` or `2026-11-24`).
+ *  2. `VERCEL_GIT_COMMIT_SHA` — 40-char commit SHA injected by Vercel at
+ *     build time; used when no explicit version is configured.
+ *  3. `"unknown"` — fallback so the release tag is never absent.
+ *
+ * The resolved value is used as the Sentry `release` string in
+ * `sentry.server.config.ts` / `sentry.client.config.ts`. Matching it to the
+ * `releases` configuration in `next.config.mjs` (`withSentryConfig` →
+ * `release`) ensures source-map uploads are associated with the same
+ * identifier, so stack traces in Sentry show original TypeScript line numbers.
+ *
+ * Wave operators: include the release identifier in incident reports so a
+ * maintainer can correlate an alert in Sentry's Release Health view with
+ * the exact dashboard version that produced it. See docs/SENTRY.md §
+ * "Release health" and docs/DEPLOYMENT.md for the CI workflow that sets
+ * `NEXT_PUBLIC_APP_VERSION`.
+ */
+export function resolveRelease(): string {
+  const explicit = process.env.NEXT_PUBLIC_APP_VERSION?.trim();
+  if (explicit) return explicit;
+  const sha = process.env.VERCEL_GIT_COMMIT_SHA?.trim();
+  if (sha) return sha;
+  return "unknown";
+}
+
+/**
+ * Build a Sentry release tag string in the format
+ * `trustbridge-dashboard@<version>` as recommended by Sentry's release naming
+ * convention. This matches what `withSentryConfig` emits when you pass
+ * `release` in `next.config.mjs`.
+ */
+export function buildReleaseTag(): string {
+  return `trustbridge-dashboard@${resolveRelease()}`;
 }
 
 /**

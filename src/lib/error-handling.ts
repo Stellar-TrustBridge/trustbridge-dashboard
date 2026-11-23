@@ -216,6 +216,45 @@ export function apiErrorResponse(
   });
 }
 
+// ---------------------------------------------------------------------------
+// Release health context
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns the current dashboard release identifier, matching the value used
+ * by `src/lib/sentry.ts`'s `resolveRelease()`. This is surfaced on API error
+ * responses via the `x-dashboard-release` header so Wave operators can
+ * correlate an HTTP error with a specific build in Sentry's Release Health
+ * view without needing access to Sentry itself.
+ *
+ * Priority: `NEXT_PUBLIC_APP_VERSION` → `VERCEL_GIT_COMMIT_SHA` → `"unknown"`.
+ */
+export function getCurrentRelease(): string {
+  const explicit = process.env.NEXT_PUBLIC_APP_VERSION?.trim();
+  if (explicit) return explicit;
+  const sha = process.env.VERCEL_GIT_COMMIT_SHA?.trim();
+  if (sha) return sha;
+  return 'unknown';
+}
+
+/**
+ * Annotate a `Response` with the `x-dashboard-release` header so error
+ * responses carry the release identifier. This is a lightweight alternative
+ * to requiring Sentry access when triaging a Wave incident.
+ *
+ * Usage in a route handler:
+ * ```ts
+ * return annotateWithRelease(
+ *   NextResponse.json({ error: "Internal error" }, { status: 500 })
+ * );
+ * ```
+ */
+export function annotateWithRelease(response: Response): Response {
+  const release = getCurrentRelease();
+  response.headers.set('x-dashboard-release', release);
+  return response;
+}
+
 /**
  * Match actual HTTP 5xx server status codes, or explicit server-error enums,
  * without misclassifying unrelated numeric fragments like "field 5".

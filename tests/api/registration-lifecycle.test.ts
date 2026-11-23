@@ -11,7 +11,12 @@ vi.mock("@/lib/prisma", () => ({
   prisma: { registration: { findFirst: vi.fn(), update: vi.fn() } },
 }));
 vi.mock("@/lib/audit", () => ({ recordAuditLog: vi.fn() }));
-
+vi.mock("@/lib/cache-tags", () => ({ invalidateContributorListCaches: vi.fn() }));
+// Mock rate-limit so restore calls always pass the rate limit in these tests
+vi.mock("@/lib/rate-limit", () => ({
+  checkRateLimit: vi.fn(() => ({ allowed: true, retryAfter: 0, remaining: 9 })),
+  extractClientIp: vi.fn(() => "127.0.0.1"),
+}));
 import { requireMaintainerSession } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { recordAuditLog } from "@/lib/audit";
@@ -21,8 +26,18 @@ const headers = {
   host: "localhost:3000",
 };
 
-function request(url: string, method: string) {
-  return new NextRequest(url, { method, headers });
+function request(url: string, method: string, body?: unknown) {
+  return new NextRequest(url, {
+    method,
+    headers: body
+      ? { ...headers, "content-type": "application/json" }
+      : headers,
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+}
+
+function restoreRequest(url: string) {
+  return request(url, "POST", { confirm: true });
 }
 
 const session = {
@@ -70,9 +85,8 @@ describe("registration lifecycle", () => {
     vi.mocked(prisma.registration.update).mockResolvedValue(restored as any);
 
     const response = await POST(
-      request(
-        "http://localhost:3000/api/registrations/reg-1/restore",
-        "POST"
+      restoreRequest(
+        "http://localhost:3000/api/registrations/reg-1/restore"
       ),
       { params: { id: "reg-1" } }
     );
@@ -99,7 +113,7 @@ describe("registration lifecycle", () => {
     vi.mocked(requireMaintainerSession).mockResolvedValue(null);
 
     const response = await POST(
-      request("http://localhost:3000/api/registrations/reg-1/restore", "POST"),
+      restoreRequest("http://localhost:3000/api/registrations/reg-1/restore"),
       { params: { id: "reg-1" } }
     );
 
@@ -119,7 +133,9 @@ describe("registration lifecycle", () => {
         headers: {
           origin: "https://evil.example",
           host: "localhost:3000",
+          "content-type": "application/json",
         },
+        body: JSON.stringify({ confirm: true }),
       }),
       { params: { id: "reg-1" } }
     );
@@ -135,7 +151,7 @@ describe("registration lifecycle", () => {
     vi.mocked(prisma.registration.findFirst).mockResolvedValue(null);
 
     const response = await POST(
-      request("http://localhost:3000/api/registrations/reg-1/restore", "POST"),
+      restoreRequest("http://localhost:3000/api/registrations/reg-1/restore"),
       { params: { id: "reg-1" } }
     );
 
@@ -158,14 +174,15 @@ describe("registration lifecycle", () => {
     );
 
     const response = await POST(
-      request("http://localhost:3000/api/registrations/reg-1/restore", "POST"),
+      restoreRequest("http://localhost:3000/api/registrations/reg-1/restore"),
       { params: { id: "reg-1" } }
     );
 
     expect(response.status).toBe(409);
-    expect(await response.json()).toEqual({
-      error: "This Stellar address is already actively registered",
-    });
+    // The 409 body comes from walletClaimConflictBody() in src/lib/contributors.ts
+    const json = await response.json();
+    expect(json.code).toBe("ADDRESS_TAKEN");
+    expect(typeof json.error).toBe("string");
     expect(recordAuditLog).not.toHaveBeenCalled();
   });
 
@@ -177,7 +194,7 @@ describe("registration lifecycle", () => {
     vi.mocked(prisma.registration.findFirst).mockResolvedValue(null);
 
     const response = await POST(
-      request("http://localhost:3000/api/registrations/reg-1/restore", "POST"),
+      restoreRequest("http://localhost:3000/api/registrations/reg-1/restore"),
       { params: { id: "reg-1" } }
     );
 

@@ -746,3 +746,30 @@ normalized resolved Horizon and Soroban RPC URLs. All components are escaped,
 so no org/network can bleed into another's cached result. Public CORS,
 rate-limit headers, the 30 s TTL and its `Cache-Control` headers are unchanged.
 See [ACTION_LOOKUP_CACHE.md](./ACTION_LOOKUP_CACHE.md).
+
+---
+
+## Operator-facing changes (recent)
+
+### Sentry release health
+
+Every API error response now carries an `x-dashboard-release` header containing the deployed dashboard version (`NEXT_PUBLIC_APP_VERSION` → `VERCEL_GIT_COMMIT_SHA` → `"unknown"`). This lets Wave operators correlate an HTTP error with a specific build without Sentry access. The same value is passed to `Sentry.init({ release })` so Sentry's Release Health view tracks crash-free session rates per version. See [SENTRY.md — Release health](./SENTRY.md#release-health).
+
+### Registration restore rate limit and dual confirmation
+
+`POST /api/registrations/:id/restore` now requires `{ "confirm": true }` in the request body and enforces a per-IP rate limit (default 10/60 s). Missing confirmation returns `400 CONFIRM_REQUIRED`; exceeding the rate limit returns `429 RESTORE_RATE_LIMITED` with a `Retry-After` header. Rate-limited attempts are audited as `registration.restore.rate_limited`. Configure via `RESTORE_RATE_LIMIT_WINDOW_MS` and `RESTORE_RATE_LIMIT_MAX`. See [REGISTRATION_RETENTION.md](./REGISTRATION_RETENTION.md#authorization-and-response-semantics) and [MAINTAINER_WORKFLOW.md](./MAINTAINER_WORKFLOW.md#registration-restore-rate-limit-and-dual-confirmation).
+
+### Contributor list p95 target and response-time header
+
+`GET /api/contributors/paginated` has a documented **p95 latency target of 1500 ms** (enforced by k6 thresholds). Every response includes an `x-response-time-ms` header with the handler's wall-clock duration so operators can spot-check latency without APM. See [PERFORMANCE_TESTING.md — Contributor list p95 targets](./PERFORMANCE_TESTING.md#contributor-list-p95-targets) and [LOGGING_AND_PAGINATION.md](./LOGGING_AND_PAGINATION.md#load-testing-the-paginated-read-path).
+
+### Network settings RPC URL change audit (dual-write)
+
+`GET /api/settings/network` now also writes `settings.network.rpc_url_changed` to `AuditLog` whenever either `NEXT_PUBLIC_HORIZON_URL` or `SOROBAN_RPC_URL` has changed since the previous in-process observation (i.e. the first request after a redeploy that modified a URL). Old and new values are captured in `metadata`; credentials are redacted. This audit fires in addition to the existing `network_config_mismatch_detected` entry. See [SECURITY_POLINRIDER.md — Network RPC URL change audit](./SECURITY_POLINRIDER.md#network-rpc-url-change-audit).
+
+**New audit action strings:**
+
+| Action | Trigger | Severity |
+|---|---|---|
+| `settings.network.rpc_url_changed` | Either RPC URL changed between deployments | Informational (investigate if unexpected) |
+| `registration.restore.rate_limited` | Per-IP restore rate limit exceeded | Warning |

@@ -125,7 +125,11 @@ export async function recordRetentionDryRunAudit(input: {
       candidateCount: input.candidateCount,
       cutoff: input.cutoff,
       reasonCode: input.reasonCode ?? null,
+    },
+  });
+}
 
+/**
  * Record a DLQ replay attempt (success or failure).
  *
  * Wraps {@link recordAuditLog} with the canonical action name and a stable
@@ -152,6 +156,63 @@ export async function recordDlqReplayAudit(input: {
       outcome: input.outcome,
       reason: input.reason ?? null,
       error: input.error ?? null,
+    },
+  });
+}
+
+/**
+ * Record a restore rate-limit rejection.
+ *
+ * Best-effort: an audit failure must not change the 429 response already
+ * returned to the caller (the route records this before returning, not in
+ * a try/catch that could mask the limiter result).
+ */
+export async function recordRestoreRateLimitAudit(input: {
+  actorId?: string | null;
+  actorLogin?: string | null;
+  registrationId: string;
+  retryAfterSeconds: number;
+  ip?: string | null;
+}): Promise<void> {
+  await recordAuditLog({
+    action: "registration.restore.rate_limited",
+    actorId: input.actorId ?? null,
+    actorLogin: input.actorLogin ?? null,
+    targetId: input.registrationId,
+    metadata: {
+      retryAfterSeconds: input.retryAfterSeconds,
+      ip: input.ip ?? null,
+    },
+  });
+}
+
+/**
+ * Record an RPC URL change detected by the network settings route.
+ *
+ * Best-effort like the underlying helper. Called when the in-process
+ * "last seen" RPC state differs from the currently resolved config,
+ * which happens on the first request after a redeploy that changed the
+ * network URLs. Old/new values are stored in `metadata`; credentials
+ * are redacted by the caller before this function is invoked.
+ */
+export async function recordRpcUrlChangeAudit(input: {
+  actorId?: string | null;
+  actorLogin?: string | null;
+  horizonUrl?: { from: string; to: string } | null;
+  sorobanUrl?: { from: string; to: string } | null;
+  horizonNetwork?: string | null;
+  sorobanNetwork?: string | null;
+}): Promise<void> {
+  await recordAuditLog({
+    action: "settings.network.rpc_url_changed",
+    actorId: input.actorId ?? null,
+    actorLogin: input.actorLogin ?? null,
+    targetLabel: "network-config",
+    metadata: {
+      ...(input.horizonUrl ? { horizonUrl: input.horizonUrl } : {}),
+      ...(input.sorobanUrl ? { sorobanUrl: input.sorobanUrl } : {}),
+      horizonNetwork: input.horizonNetwork ?? null,
+      sorobanNetwork: input.sorobanNetwork ?? null,
     },
   });
 }

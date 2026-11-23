@@ -17,6 +17,8 @@ const ORIGINAL_ENV = { ...process.env };
 
 afterEach(() => {
   process.env = { ...ORIGINAL_ENV };
+  // Reset the in-process RPC state so tests are isolated
+  networkRoute._resetRpcState();
   vi.clearAllMocks();
 });
 
@@ -75,7 +77,6 @@ describe("GET /api/settings/network", () => {
     expect(res.status).toBe(200);
     const json = await res.json();
     expect(json.mismatched).toBe(true);
-    expect(recordAuditLog).toHaveBeenCalledTimes(1);
     expect(recordAuditLog).toHaveBeenCalledWith(
       {
         action: "network_config_mismatch_detected",

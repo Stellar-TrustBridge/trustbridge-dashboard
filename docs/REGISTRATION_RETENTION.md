@@ -41,8 +41,25 @@ standard structured/redacted error reporting.
    `updatedAt`.
 3. **Restore** — `POST /api/registrations/:id/restore` (maintainer only,
    same-origin) finds a row where `id` matches, `deletedAt` is not null, and
-   `maintainerOrgId` matches the session's org when one is configured. It then
-   clears `deletedAt` in a single `update` and writes audit action
+   `maintainerOrgId` matches the session's org when one is configured.
+
+   **Rate limit:** the endpoint is rate-limited to prevent accidental bulk
+   restores. By default, a single IP may make 10 restore calls per 60 seconds.
+   Exceeding the limit returns `429` with:
+   ```json
+   { "error": "...", "code": "RESTORE_RATE_LIMITED", "retryAfter": <seconds> }
+   ```
+   and a `Retry-After` header. The limits are configurable via
+   `RESTORE_RATE_LIMIT_WINDOW_MS` and `RESTORE_RATE_LIMIT_MAX`. Rate-limited
+   attempts are audited as `registration.restore.rate_limited`.
+
+   **Dual confirmation:** every restore request must include an explicit
+   `{ "confirm": true }` JSON body. Requests without this field — or with
+   `confirm: false` — are rejected with `400 CONFIRM_REQUIRED` before any
+   database work is done. This prevents accidental bulk restores triggered by
+   broken scripts or mis-fired UI clicks.
+
+   On success: clears `deletedAt` in a single `update` and writes audit action
    `registration.restore` with `actorId`, `actorLogin`, `targetId` (registration
    id), `targetLabel` (stellar address), and a `restoredAt` metadata timestamp.
 4. **Cache invalidation** — after a successful delete or restore,
@@ -60,8 +77,11 @@ confirmation before calling the restore endpoint.
 |---|---|---|
 | Missing/invalid maintainer session | `403` `{ "error": "Forbidden" }` | No `findFirst`, `update`, audit entry, or cache invalidation |
 | Cross-origin request | `403` | `assertSameOrigin` runs before session lookup and any DB work |
+| Missing body | `400` `{ "code": "BODY_REQUIRED" }` | Request must include a JSON body |
+| Missing or false `confirm` field | `400` `{ "code": "CONFIRM_REQUIRED" }` | Must send `{ "confirm": true }` |
+| IP exceeds restore rate limit | `429` `{ "code": "RESTORE_RATE_LIMITED", "retryAfter": <s> }` + `Retry-After` header | Audited as `registration.restore.rate_limited` |
 | Registration id missing, already active, or in another org | `404` `{ "error": "Deleted registration not found" }` | Identical response for all three cases prevents tombstone enumeration |
-| Another active registration already uses the address | `409` `{ "error": "This Stellar address is already actively registered" }` | Prisma unique-constraint (`P2002`) from the `stellarAddress` index; no audit entry |
+| Another active registration already uses the address | `409` `{ "code": "ADDRESS_TAKEN" }` | Prisma unique-constraint (`P2002`) from the `stellarAddress` index; no audit entry |
 | Success | `200` `{ "success": true, "registration": ... }` | Audited and cache-invalidated |
 
 The deleted list follows the same `403` rule for non-maintainers. Org scoping

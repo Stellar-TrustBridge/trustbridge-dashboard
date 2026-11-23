@@ -333,12 +333,30 @@ const safeId = raw && isValidRequestId(raw) ? raw : null;
 - `contributors_paginated` in `scripts/k6/registration-open-day-load.js` (registration spike)
 
 Both require a maintainer `next-auth.session-token` cookie and validate the
-`contributors` / `hasMore` / `total` response fields with a p95 threshold of
-1500 ms. See [docs/PERFORMANCE_TESTING.md](./PERFORMANCE_TESTING.md) for the
+`contributors` / `hasMore` / `total` response fields with a **p95 threshold of
+1500 ms**. See [docs/PERFORMANCE_TESTING.md](./PERFORMANCE_TESTING.md) for the
 exact commands, env vars, and success criteria. Registration load also requires
 a contributor session, same-origin `Origin`/`Referer`, a non-public Horizon
 fixture, and a roster outside the freeze window; its rate limits are
 process-local.
+
+### Response-time header
+
+Every response from `GET /api/contributors/paginated` includes an
+`x-response-time-ms` header containing the handler's wall-clock duration in
+milliseconds. This lets operators measure latency without a full APM setup:
+
+```bash
+curl -sI "https://your-dashboard.vercel.app/api/contributors/paginated?limit=25" \
+  -H "Cookie: next-auth.session-token=<token>" \
+  | grep x-response-time-ms
+# x-response-time-ms: 142
+```
+
+The header is emitted on every response — including 403s and 400s — so it can
+be used to detect slow auth lookups or cursor-validation overhead as well as
+slow DB queries. See [PERFORMANCE_TESTING.md — Contributor list p95 targets](./PERFORMANCE_TESTING.md#contributor-list-p95-targets)
+for the measurement commands and failure-mode table.
 
 ## Pagination
 

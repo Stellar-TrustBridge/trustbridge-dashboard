@@ -253,3 +253,52 @@ See [docs/grafana/README.md](./grafana/README.md) for pre-built dashboards.
 
 Revoke test API keys and clear session cookies immediately after testing. See
 [docs/API_KEYS.md](./API_KEYS.md) for key rotation guidance.
+
+---
+
+## Contributor list p95 targets
+
+`GET /api/contributors/paginated` has a documented **p95 latency target of 1500 ms** under the stated hardware and roster size. This target is enforced by the k6 thresholds in both scripts 2 and 3 above.
+
+### Hardware and load assumptions
+
+| Component | Assumption |
+|---|---|
+| Dashboard host | Vercel Hobby/Pro — Node.js serverless function |
+| PostgreSQL | Neon / Supabase free tier with connection pooling enabled |
+| Contributor roster | Up to ~500 active registrations |
+| Concurrent maintainer sessions | Up to 5 |
+
+Exceeding these assumptions (larger rosters, no connection pool, unindexed queries) will push p95 past the threshold. Run the k6 suite before opening a Wave to confirm the deployment meets the target.
+
+### Measuring without k6
+
+Every `GET /api/contributors/paginated` response includes an `x-response-time-ms` header with the handler's wall-clock duration. Use it to spot-check latency without a full APM setup:
+
+```bash
+# Single measurement
+curl -sI "https://your-dashboard.vercel.app/api/contributors/paginated?limit=25" \
+  -H "Cookie: next-auth.session-token=<token>" \
+  | grep x-response-time-ms
+# x-response-time-ms: 142
+
+# Rough p95 over 20 sequential requests (bash/awk)
+for i in $(seq 1 20); do
+  curl -so /dev/null -w "%{time_total}\n" \
+    "https://your-dashboard.vercel.app/api/contributors/paginated?limit=25" \
+    -H "Cookie: next-auth.session-token=<token>"
+done | sort -n | awk 'NR==19{printf "p95: %.0fms\n", $1*1000}'
+```
+
+### Registration submit p95 target
+
+`POST /api/register` (the registration-spike scenario) has a **p95 latency target of 3000 ms** because it includes a Horizon `loadAccount` call, a database upsert, and cache invalidation. This is enforced by the `registration_spike` threshold in script 3.
+
+### Failure modes
+
+| Symptom | Likely cause | Remediation |
+|---|---|---|
+| `contributors_paginated` p95 > 1500 ms | Missing index on `(deletedAt, id)` | Apply migration; run `CREATE INDEX CONCURRENTLY` on `Registration` |
+| p95 spikes during recheck | `prisma.registration.count` scan | Ensure the route uses `where: { deletedAt: null }` (it does) |
+| Degraded under concurrent load | Connection exhaustion | Enable Neon/Supabase pooler or Prisma Accelerate; see [DEPLOYMENT.md](./DEPLOYMENT.md#monitoring--limits) |
+| `registration_spike` p95 > 3000 ms | Horizon cold calls or rate limiting | Use a non-public Horizon fixture; ensure the test IP is not rate-limited |

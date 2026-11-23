@@ -63,6 +63,17 @@ NEXT_PUBLIC_MIN_XLM_BALANCE=1
 METRICS_SCRAPE_TOKEN=<random-32+-byte-secret>
 ```
 
+For Sentry error tracking and release health, additionally set:
+
+```
+NEXT_PUBLIC_SENTRY_DSN=https://<key>@<org>.ingest.sentry.io/<project-id>
+NEXT_PUBLIC_APP_VERSION=<semver-or-date>   # e.g. "1.4.2" — correlates Wave incidents to builds
+NEXT_PUBLIC_APP_ENV=production
+```
+
+See [SENTRY.md — Release health](./SENTRY.md#release-health) for how release naming, source
+maps, and Wave incident correlation work together.
+
 `SOROBAN_RPC_URL`, `SOROBAN_NETWORK_PASSPHRASE`, and `SOROBAN_CONTRACT_ID` are
 optional individually, but the network panel warns when the Horizon and Soroban
 URLs classify as two different known networks. The dashboard's network

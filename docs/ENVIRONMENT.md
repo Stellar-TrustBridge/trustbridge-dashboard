@@ -443,9 +443,46 @@ Destination email address for automated nightly treasury CSV exports (`POST /api
 
 Minimum time between `/api/cron/export` runs; repeated triggers within this window return `{ status: "skipped" }` to prevent duplicate emails and scheduler retry storms. Defaults to `60000` (1 minute).
 
+### `RESTORE_RATE_LIMIT_WINDOW_MS`
+
+Sliding window in milliseconds for the per-IP rate limit on
+`POST /api/registrations/:id/restore`. Defaults to `60000` (1 minute).
+
+| Value | Behaviour |
+|-------|-----------|
+| Unset / invalid | Falls back to **60 000 ms (1 minute)** |
+| Any positive integer | Window resets after this many ms |
+
+### `RESTORE_RATE_LIMIT_MAX`
+
+Maximum number of restore operations a single IP may perform within one
+`RESTORE_RATE_LIMIT_WINDOW_MS` window. Defaults to `10`.
+
+| Value | Behaviour |
+|-------|-----------|
+| Unset / invalid | Falls back to **10 restores per window** |
+| Any positive integer | Requests beyond this threshold receive `429 RESTORE_RATE_LIMITED` with a `Retry-After` header |
+
+Both variables exist to prevent accidental bulk restores from undoing Wave
+retention or compliance actions. See
+[REGISTRATION_RETENTION.md](./REGISTRATION_RETENTION.md#authorization-and-response-semantics)
+for the full response matrix.
+
 ### `NEXT_PUBLIC_POSTHOG_API_KEY`
 
-PostHog project API key for browser analytics. When set, the dashboard tracks key events like registration completions, rechecks, and CSV exports. Server-side API events, including the dispute open/close funnel, use `POSTHOG_API_KEY` instead.
+PostHog project API key for browser analytics. When set, the dashboard tracks key events like registration completions, rechecks, and CSV exports.
+
+### `NEXT_PUBLIC_APP_VERSION`
+
+Explicit release version string for Sentry release health and the `x-dashboard-release` response header. Recommended format: semantic version (`1.4.2`) or build date (`2026-11-24`).
+
+| Priority | Variable | Example |
+|---|---|---|
+| 1 | `NEXT_PUBLIC_APP_VERSION` | `1.4.2` |
+| 2 | `VERCEL_GIT_COMMIT_SHA` _(injected by Vercel)_ | `deadbeef1234...` |
+| 3 | _(fallback)_ | `unknown` |
+
+Set this in your CI build step to tag every Sentry event and every API error response with the deployed dashboard version. See [SENTRY.md — Release health](./SENTRY.md#release-health) for how to wire it into `withSentryConfig` and correlate Wave incidents with specific builds. Server-side API events, including the dispute open/close funnel, use `POSTHOG_API_KEY` instead.
 
 - **Optional.** When unset, analytics events are silently ignored (no-op) or logged to console in development.
 - **Security:** This is a public key (prefixed with `NEXT_PUBLIC_`) — PostHog project API keys are safe to expose in the browser.
