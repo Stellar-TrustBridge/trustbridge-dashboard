@@ -121,3 +121,32 @@ This tooling **does not** rotate credentials. If malware was confirmed on a mach
 1. Stop using that machine for privileged work.
 2. From a clean device, rotate GitHub, npm, cloud, SSH, wallet, and CI secrets.
 3. Review recent publishes and force-pushes on your accounts.
+
+---
+
+## Sentry PII controls
+
+The Sentry integration at `src/lib/sentry.ts` applies two passes of redaction
+before any event leaves the process:
+
+**Pass 1 — Pattern rules** strip Stellar addresses (`G…`/`S…` 56-char base32),
+GitHub tokens (`ghp_`, `github_pat_`, etc.), connection-string credentials,
+bearer tokens, and email addresses from every string value.
+
+**Pass 2 — Semantic field scrubbers** pseudonymize context-bag keys whose
+*names* indicate user identity or wallet data (`githubUsername`, `username`,
+`login`, `stellarAddress`, `address`, …), even when the values don't match a
+pattern rule (e.g. a plain login like `"alice"`).
+
+Pseudonymization (`[pseudo:<12 hex chars>]`) is SHA-256 based and
+deterministic — the same contributor generates the same pseudonym across events
+so engineers can correlate without the raw PII ever reaching Sentry's storage.
+
+**What this protects against in the PolinRider threat model:**
+An implant that exfiltrates error-reporting payloads (e.g. via a rogue Sentry
+SDK shim or a patched `@sentry/nextjs`) receives pseudonyms and redaction
+markers rather than live wallet addresses or GitHub logins.
+
+**Coverage:** `tests/unit/sentry-privacy-scrubbers.test.ts` has table-driven
+tests for all key-name variants, nested payloads, empty values, and depth-cap
+behaviour. The suite is part of `npm test` and therefore runs on every CI push.

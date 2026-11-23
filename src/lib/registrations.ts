@@ -235,6 +235,13 @@ export async function getContributorsPaginated(
  * Shared by the single- and batch-recheck flows. Captures the readiness
  * before and after the check so callers can audit what actually changed,
  * rather than just the post-recheck state.
+ *
+ * Idempotency note: rechecks only update Horizon-derived fields (funded,
+ * trustline, balances). They do NOT trigger a Soroban mirror write — the
+ * Soroban write happens once at registration time via
+ * `mirrorRegistrationToSoroban` with its own idempotency key (see
+ * `src/lib/soroban-register.ts`). Calling recheck twice for the same
+ * registration is safe; the last Horizon result overwrites the previous.
  */
 async function recheckRegistration(
   registration: PersistedRegistration

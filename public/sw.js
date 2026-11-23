@@ -74,11 +74,14 @@ function isShellAsset(url) {
 // ─── Lifecycle ────────────────────────────────────────────────────────────────
 
 self.addEventListener("install", (event) => {
+  // Pre-cache shell assets. Do NOT call skipWaiting() here — if we did,
+  // the new SW would activate immediately and the UpdatePrompt would never
+  // get a chance to notify the user. The user triggers activation explicitly
+  // via postMessage({ type: "SKIP_WAITING" }) from the UpdatePrompt component.
   event.waitUntil(
     caches
       .open(CACHE_NAME)
       .then((cache) => cache.addAll(SHELL_ASSETS))
-      .then(() => self.skipWaiting())
   );
 });
 
@@ -95,6 +98,24 @@ self.addEventListener("activate", (event) => {
       )
       .then(() => self.clients.claim())
   );
+});
+
+// ─── Message handling ─────────────────────────────────────────────────────────
+
+/**
+ * Handle messages posted from the app (e.g. UpdatePrompt component).
+ *
+ * SKIP_WAITING: immediately activate this SW so the new version takes control
+ * of all clients. The UpdatePrompt component sends this when the user clicks
+ * "Reload", then reloads the page once the `controllerchange` event fires.
+ *
+ * Security note: only the SKIP_WAITING type is acted upon; all other message
+ * types are silently ignored. The SW never echoes message data back to callers.
+ */
+self.addEventListener("message", (event) => {
+  if (event.data && event.data.type === "SKIP_WAITING") {
+    self.skipWaiting();
+  }
 });
 
 // ─── Fetch strategy ───────────────────────────────────────────────────────────

@@ -152,3 +152,29 @@ Test ids currently relied on:
 | `freighter-proof-card`, `freighter-detection-status`, `freighter-challe
 
 /* … truncated 691 chars — edit only what you need near the top … */
+
+## PWA update prompt
+
+The `UpdatePrompt` component (`src/components/UpdatePrompt.tsx`) exposes three
+`data-testid` values:
+
+| Test id | Meaning |
+| --- | --- |
+| `update-prompt` | The banner itself — assert visibility |
+| `update-prompt-reload` | The "Reload" action button |
+| `update-prompt-dismiss` | The "Later" dismiss button |
+
+Unit tests live in `tests/unit/UpdatePrompt.test.tsx` and cover the happy path,
+dismiss, and no-update-pending paths without a real SW.
+
+For E2E coverage, inject a fake `serviceWorker.ready` with a `waiting` stub
+using `page.addInitScript()` before navigation, then assert:
+
+1. `data-testid="update-prompt"` is visible after mount.
+2. Clicking `update-prompt-reload` calls `postMessage({ type: "SKIP_WAITING" })`.
+3. Clicking `update-prompt-dismiss` removes the banner without reloading.
+
+```bash
+# Run update-prompt unit tests
+npx vitest run tests/unit/UpdatePrompt.test.tsx
+```

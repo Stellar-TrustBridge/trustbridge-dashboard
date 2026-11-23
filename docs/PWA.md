@@ -180,6 +180,63 @@ This is intentionally minimal. The following are explicitly out of scope:
 
 ---
 
+## Update prompt (`src/components/UpdatePrompt.tsx`)
+
+When a new deployment is available the browser downloads and installs the new service worker in the background, then holds it in the `waiting` state until all tabs running the old version are closed. Left unattended, contributors on a long-lived tab keep serving API calls against the old SW's cached shell — which can break after a deploy that changes the cache name or Next.js chunk hashes.
+
+The `UpdatePrompt` component solves this:
+
+1. After mount, it calls `navigator.serviceWorker.ready` and checks `registration.waiting`.
+2. If a waiting SW is found (or the `updatefound` → `statechange: installed` lifecycle fires), the component shows a blue info banner:
+
+   ```
+   ┌────────────────────────────────────────────────────────────────────┐
+   │ 🔄  A new version of TrustBridge is available. Reload to get the  │
+   │     latest.                                      [Reload]  [Later] │
+   └────────────────────────────────────────────────────────────────────┘
+   ```
+
+3. **Reload**: posts `{ type: "SKIP_WAITING" }` to the waiting SW. The SW activates and fires a `controllerchange` event, which the component listens for and responds to by calling `window.location.reload()`.
+4. **Later**: dismisses the banner. The user keeps the old version until they close the tab or reload manually.
+
+### Why `install` no longer calls `skipWaiting()`
+
+The original `sw.js` called `self.skipWaiting()` during install, which immediately replaced the old SW on every deploy. That meant the update prompt could never show — the new SW activated before the page had a chance to detect a waiting SW. As of this change, `skipWaiting()` is removed from the `install` handler; activation is user-initiated via the `SKIP_WAITING` message.
+
+**Operator note:** on the first deploy after this change, one generation of tabs will upgrade silently (the old SW had `skipWaiting()` in install). Every subsequent deploy will show the prompt.
+
+### Registration
+
+`UpdatePrompt` is mounted in `src/app/layout.tsx` between the `MaintenanceBanner` and `OfflineBanner`, so it appears at the top of every page without requiring route-level wiring.
+
+### Security notes
+
+- The only message the SW acts on is `{ type: "SKIP_WAITING" }`. All other message types are silently ignored.
+- The SW never echoes message data back to callers.
+- No API calls, no PII, and no Stellar data flow through this component.
+
+### Testing
+
+`UpdatePrompt` is covered by `tests/unit/UpdatePrompt.test.tsx`:
+
+```bash
+npx vitest run tests/unit/UpdatePrompt.test.tsx
+```
+
+Test cases:
+
+| Case | What is asserted |
+|------|-----------------|
+| Happy path (`forceShow=true`) | Banner visible, role/aria attributes correct |
+| Reload — no waiting SW | Falls back to `window.location.reload()` |
+| Reload — waiting SW present | Posts `{ type: "SKIP_WAITING" }` to the SW |
+| Dismiss (Later) | Banner disappears, no reload, no postMessage |
+| No update pending (default) | Component renders nothing |
+
+For E2E coverage add a Playwright spec that uses `page.evaluate()` to inject a fake `serviceWorker.ready` with a `waiting` stub, then asserts the banner appears and the Reload button triggers `postMessage`. See `docs/E2E_TESTING.md` for the selector and helper conventions to use.
+
+---
+
 ## Testing
 
 The offline banner is testable with `data-testid="offline-banner"`. A unit test can mock `navigator.onLine` and fire synthetic `offline`/`online` events:

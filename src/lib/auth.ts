@@ -1,4 +1,5 @@
 import { NextRequest } from "next/server";
+import type { AppRole } from "@/types";
 
 export type Role = "contributor" | "maintainer" | "admin";
 
@@ -7,6 +8,12 @@ export interface SessionUser {
   login: string;
   role: Role;
   orgs: string[];
+  /**
+   * Fine-grained RBAC role for maintainer actions.
+   * Present when the upstream auth proxy sets it; absent for contributors.
+   * Hierarchy: admin > operator > viewer (see src/lib/maintainers.ts).
+   */
+  appRole?: AppRole;
 }
 
 export interface AuthResult {
@@ -28,7 +35,7 @@ export function getSessionUser(req: NextRequest): SessionUser | null {
   const raw = req.headers.get("x-session-user");
   if (!raw) return null;
   try {
-    const parsed = JSON.parse(raw) as Partial<SessionUser>;
+    const parsed = JSON.parse(raw) as Partial<SessionUser & { appRole?: string }>;
     if (!parsed || typeof parsed.id !== "string" || typeof parsed.login !== "string") {
       return null;
     }
@@ -37,7 +44,11 @@ export function getSessionUser(req: NextRequest): SessionUser | null {
     const orgs = Array.isArray(parsed.orgs)
       ? parsed.orgs.filter((o): o is string => typeof o === "string")
       : [];
-    return { id: parsed.id, login: parsed.login, role, orgs };
+    const appRole: AppRole | undefined =
+      parsed.appRole === "admin" || parsed.appRole === "operator" || parsed.appRole === "viewer"
+        ? (parsed.appRole as AppRole)
+        : undefined;
+    return { id: parsed.id, login: parsed.login, role, orgs, appRole };
   } catch {
     return null;
   }
@@ -95,6 +106,38 @@ export function requireMaintainer(
   if (!auth.ok) return auth;
   if (!isMaintainerForOrg(auth.user, org)) {
     return { ok: false, error: "forbidden", status: 403 };
+  }
+  return auth;
+}
+
+/**
+ * Require a maintainer with a minimum AppRole level for role-gated actions.
+ *
+ * Uses the same `canBan` / `canInvite` / `canRestoreRegistration` /
+ * `canChangeNetworkSettings` predicates from `src/lib/maintainers.ts`
+ * so the permission table stays in one place.
+ *
+ * Returns stable reason codes:
+ *   `unauthenticated` — no session
+ *   `forbidden`       — authenticated but insufficient role
+ *   `role_required`   — maintainer but appRole missing or too low
+ *
+ * @param req        The incoming NextRequest.
+ * @param predicate  A permission predicate from `src/lib/maintainers.ts`
+ *                   e.g. `canBan`, `canInvite`.
+ */
+export function requireMaintainerWithRole(
+  req: NextRequest,
+  predicate: (role: AppRole | string | undefined | null) => boolean,
+): AuthResult {
+  const auth = requireUser(req);
+  if (!auth.ok) return auth;
+  const user = auth.user!;
+  if (!isMaintainer(user)) {
+    return { ok: false, error: "forbidden", status: 403 };
+  }
+  if (!predicate(user.appRole)) {
+    return { ok: false, error: "role_required", status: 403 };
   }
   return auth;
 }

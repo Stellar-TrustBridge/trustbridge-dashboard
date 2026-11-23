@@ -2,6 +2,100 @@ import type { Prisma } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
 import { recordAuditLog } from "@/lib/audit";
+import type { AppRole } from "@/types";
+
+// ---------------------------------------------------------------------------
+// Role hierarchy
+// ---------------------------------------------------------------------------
+
+/**
+ * Numeric weight for each role. Higher = more privileged.
+ * Keep in sync with `ROLE_HIERARCHY` in `src/lib/api-auth.ts`.
+ */
+export const MAINTAINER_ROLE_WEIGHTS: Record<AppRole, number> = {
+  admin: 3,
+  operator: 2,
+  viewer: 1,
+};
+
+/**
+ * Returns true when `role` meets or exceeds `minimum`.
+ * Missing / unknown roles map to weight 0 (below every defined role).
+ */
+export function hasRole(
+  role: AppRole | string | undefined | null,
+  minimum: AppRole
+): boolean {
+  if (!role) return false;
+  const weight = MAINTAINER_ROLE_WEIGHTS[role as AppRole] ?? 0;
+  return weight >= MAINTAINER_ROLE_WEIGHTS[minimum];
+}
+
+// ---------------------------------------------------------------------------
+// Permission predicates
+//
+// These are the canonical source of truth for which actions each role may
+// perform. The API routes, the CLI, and the UI all call through here so a
+// single change in one place propagates everywhere.
+//
+// Rule table (from MAINTAINER_WORKFLOW.md):
+//
+//   Action                | admin | operator | viewer
+//   ─────────────────────┼───────┼──────────┼───────
+//   ban contributor       |  ✓   |    ✓     |   ✗
+//   unban contributor     |  ✓   |    ✓     |   ✗
+//   invite (generate)     |  ✓   |    ✗     |   ✗
+//   restore registration  |  ✓   |    ✓     |   ✗
+//   change network config |  ✓   |    ✗     |   ✗
+//   read dashboard        |  ✓   |    ✓     |   ✓
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether the role may ban or unban contributors.
+ * Requires at minimum: operator.
+ */
+export function canBan(role: AppRole | string | undefined | null): boolean {
+  return hasRole(role, "operator");
+}
+
+/**
+ * Whether the role may generate or revoke invites.
+ * Requires: admin only.
+ */
+export function canInvite(role: AppRole | string | undefined | null): boolean {
+  return hasRole(role, "admin");
+}
+
+/**
+ * Whether the role may restore soft-deleted registrations.
+ * Requires at minimum: operator.
+ */
+export function canRestoreRegistration(
+  role: AppRole | string | undefined | null
+): boolean {
+  return hasRole(role, "operator");
+}
+
+/**
+ * Whether the role may change Horizon / Soroban network settings.
+ * Requires: admin only (network misconfiguration is a critical blast-radius
+ * change that can silently break Wave payout validation for the entire org).
+ */
+export function canChangeNetworkSettings(
+  role: AppRole | string | undefined | null
+): boolean {
+  return hasRole(role, "admin");
+}
+
+/**
+ * Whether the role may read the maintainer dashboard (contributors, stats).
+ * Requires at minimum: viewer — i.e. any authenticated maintainer.
+ */
+export function canReadDashboard(
+  role: AppRole | string | undefined | null
+): boolean {
+  return hasRole(role, "viewer");
+}
 
 export interface MaintainerNoteInput {
   registrationId: string;

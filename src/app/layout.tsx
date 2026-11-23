@@ -3,6 +3,7 @@ import { Inter } from "next/font/google";
 
 import { MaintenanceBanner } from "@/components/MaintenanceBanner";
 import { OfflineBanner } from "@/components/OfflineBanner";
+import { UpdatePrompt } from "@/components/UpdatePrompt";
 import { Providers } from "@/components/Providers";
 import { getMaintenanceMessage, isMaintenanceMode } from "@/lib/maintenance";
 
@@ -61,6 +62,8 @@ export default async function RootLayout({
          *     avoid console errors in Safari < 11.1 or non-HTTPS contexts
          *     (Next.js dev server uses HTTP, so the SW won't register locally
          *     unless --experimental-https is used — that is intentional).
+         *   - The SW listens for `{ type: "SKIP_WAITING" }` messages from
+         *     UpdatePrompt so it can activate immediately on user request.
          */}
         <script
           dangerouslySetInnerHTML={{
@@ -91,6 +94,8 @@ if ('serviceWorker' in navigator) {
             enabled={maintenance}
             message={getMaintenanceMessage()}
           />
+          {/* Update available prompt — shows when a new SW is waiting to activate */}
+          <UpdatePrompt />
           {/* Offline connectivity banner — client component, renders only when navigator.onLine is false */}
           <OfflineBanner />
           {children}

@@ -136,6 +136,29 @@ To prevent roster changes or rechecks from shuffling readiness states immediatel
 
 ## 4. Contributor Ban & Unban Management
 
+### Role hierarchy for privileged actions
+
+Maintainer roles follow a strict three-tier hierarchy: **admin > operator > viewer**. The table below documents which actions each role may perform. The predicates are defined in `src/lib/maintainers.ts` and re-used by every route and the CLI — a single change propagates everywhere.
+
+| Action | admin | operator | viewer | Source predicate |
+|--------|:-----:|:--------:|:------:|-----------------|
+| Ban / unban contributor | ✓ | ✓ | ✗ | `canBan` |
+| Generate / revoke invites | ✓ | ✗ | ✗ | `canInvite` |
+| Restore soft-deleted registration | ✓ | ✓ | ✗ | `canRestoreRegistration` |
+| Change Horizon / Soroban network settings | ✓ | ✗ | ✗ | `canChangeNetworkSettings` |
+| Read maintainer dashboard | ✓ | ✓ | ✓ | `canReadDashboard` |
+
+**Separation principle:** an operator can ban abusive contributors but cannot generate invites or change network config — operations with wider blast-radius require the `admin` tier. This limits the damage from a compromised operator credential.
+
+`requireMaintainerWithRole(req, predicate)` in `src/lib/auth.ts` enforces this for header-based auth routes; `requireRole(minimumRole)` / `requireAdmin()` in `src/lib/api-auth.ts` enforce it for session-based routes.
+
+**Testing:** `tests/unit/maintainers-role-hierarchy.test.ts` covers the full permission matrix including the ban-vs-invite separation. `tests/unit/auth-role-hierarchy.test.ts` covers `requireMaintainerWithRole` with the same matrix.
+
+```bash
+npx vitest run tests/unit/maintainers-role-hierarchy.test.ts
+npx vitest run tests/unit/auth-role-hierarchy.test.ts
+```
+
 - Maintainers can ban an abusive or compromised contributor via the maintainer dashboard or `POST /api/maintainer/ban` (`action: "ban"`, `githubUsername: "<username>"`, `reason: "<mandatory reason>"`).
 - Banning requires a non-empty reason and applies case-insensitively across current and future account re-registrations.
 - Unban via `POST /api/maintainer/ban` (`action: "unban"`, `githubUsername: "<username>"`).

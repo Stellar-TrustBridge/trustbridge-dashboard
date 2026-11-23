@@ -603,6 +603,39 @@ The write-through path is now implemented (`src/lib/soroban-register.ts`), wired
   - 30-second timeout for transaction submission
   - Never throws — all errors are caught and returned in the `errors` array
 
+### Idempotency keys
+
+`mirrorRegistrationToSoroban` derives a **deterministic idempotency key** from every payload before attempting the on-chain write. This prevents duplicate on-chain registrations caused by double-submitted HTTP requests (network retries, double-clicks, infrastructure replays).
+
+**Key derivation:**
+```
+key = SHA-256("soroban-register:" + registrationId + ":" + stellarAddress + ":" + githubUsername).hex[:32]
+```
+
+Properties:
+
+| Property | Guarantee |
+|----------|-----------|
+| Deterministic | Same payload → same key on every call, in every process |
+| Non-reversible | SHA-256 — a leaked key reveals nothing about the wallet address or identity |
+| Narrowly scoped | `"soroban-register:"` prefix prevents collisions with other hash uses |
+| 64-bit effective length | First 32 hex chars (128 bits); collision probability under 2³¹ registrations ≈ 1.8×10⁻⁹ |
+
+**Dedup stores (process-local):**
+
+| Store | Purpose |
+|-------|---------|
+| `IN_FLIGHT_KEYS` | Keys for mirror calls currently executing. Second concurrent call with the same key is skipped rather than racing to submit. |
+| `COMPLETED_KEYS` | Keys for calls that succeeded in this process lifetime. Duplicate retry → immediate skip. Bounded to 10,000 entries (FIFO eviction). |
+
+**Retry semantics:** a failed mirror (RPC error, invalid contract format) clears the key from `IN_FLIGHT_KEYS` but does **not** add it to `COMPLETED_KEYS`, so the next call can retry the write. Only a successful on-chain submission marks a key as completed.
+
+**Testing:** `tests/unit/soroban-register-idempotency.test.ts`
+
+```bash
+npx vitest run tests/unit/soroban-register-idempotency.test.ts
+```
+
 ### Edge cases
 
 | Case | Read path (today) | Write-through (design) |

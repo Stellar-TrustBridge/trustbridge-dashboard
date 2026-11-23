@@ -205,7 +205,11 @@ address ends up on a third-party service.
 Call sites therefore do **not** need to pre-scrub anything, and should not try
 to — passing the raw error is correct.
 
-### What is removed
+### What is removed / pseudonymized
+
+Redaction runs in two passes:
+
+#### Pass 1 — Pattern rules (applied to all string values)
 
 | Pattern | Replaced with | Why |
 |---|---|---|
@@ -216,14 +220,41 @@ to — passing the raw error is correct.
 | `Bearer` / `token` header values | `[redacted:token]` | Session and API credentials |
 | Email addresses | `[redacted:email]` | Personal data |
 
-Host names, ports, database names, status codes, timings, and ordinary
-diagnostic text are deliberately **kept** — they are the part that makes an
-event worth having.
-
 Additionally, any context key named `accessToken`, `refreshToken`,
 `authorization`, `cookie`, `password`, `secret`, `token`, `apiKey`,
 `sessionToken`, or `tokenEncryptionKey` (case-insensitive, with or without
-underscores) has its value dropped wholesale, whatever the value looks like.
+underscores) has its value dropped wholesale.
+
+#### Pass 2 — Semantic field scrubbers (applied to context bag keys)
+
+Context keys that carry user identity or wallet data are **pseudonymized** rather
+than dropped. This preserves cross-event correlation in Sentry (the same
+contributor generates the same pseudonym across events) without exposing the
+raw value to Sentry's storage and third-party integrations.
+
+| Key pattern | Action | Pseudonym format |
+|-------------|--------|-----------------|
+| `githubUsername`, `github_username`, `username`, `login`, `actorLogin`, `actor_login`, … | Pseudonymize | `[pseudo:<12 hex chars>]` |
+| `stellarAddress`, `stellar_address`, `walletAddress`, `wallet_address`, `address`, … | Pseudonymize | `[pseudo:<12 hex chars>]` |
+
+Key matching is **case-insensitive** and strips underscores, hyphens, and dots,
+so `stellarAddress`, `stellar_address`, `StellarAddress`, and `stellar-address`
+all hit the same rule.
+
+**Pseudonymization** (`pseudonymize(value)`):
+- SHA-256 of the trimmed value → first 12 hex chars → `[pseudo:<hex>]`.
+- Same input → same output on every call and every deploy (deterministic).
+- Non-reversible: SHA-256 is a one-way function; the original value cannot be
+  recovered from the pseudonym.
+- Engineers who need to correlate a pseudonym to a real contributor can
+  recompute it locally: `echo -n "alice" | sha256sum | cut -c1-12`.
+
+**Why pseudonymize instead of drop?** Dropping a username key entirely means
+Sentry shows no user context at all — debugging a maintainer-visible error
+becomes impossible without log access. Pseudonymization preserves the signal
+(same person filed N errors this deploy) while satisfying the privacy
+invariant (Sentry's UI, webhooks, and exports never see the raw GitHub login or
+Stellar address).
 
 ### What is deliberately kept
 
@@ -316,22 +347,37 @@ set in `next.config.mjs` (the default in the wizard-generated config).
 
 ## Testing
 
-Unit tests for `src/lib/sentry.ts` live in `tests/unit/sentry.test.ts` and
-cover:
+Unit tests for `src/lib/sentry.ts` live in two files:
 
-- No-op behaviour when `NEXT_PUBLIC_SENTRY_DSN` is absent
-- Graceful fallback when DSN is set but `@sentry/nextjs` is not installed
-- All public helper functions (`captureException`, `captureMessage`,
-  `captureExceptionWithScope`, `setSentryUser`, `flushSentry`,
-  `isSentryEnabled`)
-- Edge cases (blank DSN, non-Error thrown values, null user, empty tags)
+- `tests/unit/sentry.test.ts` — no-op / fallback / SDK-available behaviour for
+  all public helpers.
+- `tests/unit/sentry-redaction.test.ts` — pattern-based redaction rules
+  (`redactString`, `redactValue`, `redactException`, `redactContext`).
+- `tests/unit/sentry-privacy-scrubbers.test.ts` — semantic field scrubbers
+  (`pseudonymize`, `scrubUserFields`, `scrubAddressFields`) and their
+  integration into `redactValue` / `redactContext` for nested payloads.
 
-Run the unit suite:
+The privacy scrubber tests cover:
+
+| Case | What is asserted |
+|------|-----------------|
+| Happy path: `githubUsername` key | Pseudonymized to `[pseudo:<12 hex>]`, original login absent |
+| Happy path: `stellarAddress` key | Pseudonymized to `[pseudo:<12 hex>]`, original G-address absent |
+| Nested registration payload | Both keys pseudonymized, non-sensitive keys preserved |
+| Array of registrations | Each address gets its own distinct pseudonym |
+| Empty / blank values | Returns `[pseudo:empty]` |
+| Deeply nested (8 levels) | Depth cap reached without throwing; raw login absent from output |
+| Credential key `token` | Dropped as `[redacted]` before pseudonymize path is reached |
+| Idempotency | Same input → same pseudonym on repeated `redactContext` calls |
+
+Run the suites:
 
 ```bash
 npm test
 # or targeted:
 npx vitest run tests/unit/sentry.test.ts
+npx vitest run tests/unit/sentry-redaction.test.ts
+npx vitest run tests/unit/sentry-privacy-scrubbers.test.ts
 ```
 
 To test that real events reach Sentry in staging, set `NEXT_PUBLIC_SENTRY_DSN`
@@ -341,6 +387,11 @@ to your **test** project DSN and trigger an error:
 NEXT_PUBLIC_SENTRY_DSN=https://... npm run dev
 # Then hit POST /api/check with an invalid body to trigger a 500
 ```
+
+Verify in the Sentry UI that:
+1. No `G…` Stellar addresses appear in breadcrumbs or context.
+2. No raw GitHub logins appear — only `[pseudo:<12 hex>]` values.
+3. `user.id` and `user.username` (Sentry's first-class user fields) are set correctly and are not pseudonymized.
 
 ---
 

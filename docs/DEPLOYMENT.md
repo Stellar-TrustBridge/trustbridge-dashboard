@@ -259,6 +259,15 @@ DATABASE_URL="postgresql://trustbridge:trustbridge-dev-password@localhost:5432/t
 Use maintenance mode when deploying during a Wave, running a migration, or
 otherwise doing work that must not race with maintainer writes.
 
+> **User-facing change:** As of the PWA update prompt addition, tabs that have
+> the app open during a deploy will see a blue banner ("A new version of
+> TrustBridge is available") at the top of the page. The user can click **Reload**
+> to activate the new version immediately, or **Later** to defer. The banner
+> disappears on dismissal and reappears on the next deploy. This replaces the
+> prior behavior where the new SW activated silently in the background.
+> Operators deploying during a Wave should be aware that some contributors may
+> be served the old shell until they reload.
+
 ### Turning it on / off
 
 Set the **`MAINTENANCE`** environment variable to a truthy value (`1`, `true`,
