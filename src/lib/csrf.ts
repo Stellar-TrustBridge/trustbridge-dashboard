@@ -138,7 +138,7 @@ const CSRF_EXPIRY_MS = 24 * 60 * 60 * 1000; // 24 hours
  */
 export function generateCsrfToken(userId: string): string {
   if (!userId) {
-    throw new Error("userId is required to generate a CSRF token");
+  throw new Error("userId is required to generate a CSRF token");
   }
   const timestamp = Date.now().toString();
   const salt = crypto.randomBytes(16).toString("hex");
@@ -257,3 +257,93 @@ export const CSRF_INVALID_TOKEN_ERROR = "Invalid CSRF token";
  * same-origin Origin/Referer check. Documented in docs/CSRF.md.
  */
 export const CSRF_INVALID_ORIGIN_ERROR = "Invalid request origin";
+
+/**
+ * Stable error code returned when the CSRF cookie attribute matrix would
+ * emit an insecure cookie in production. Documented in docs/CSRF.md.
+ */
+export const CSRF_INSECURE_COOKIE_ERROR = "Insecure CSRF cookie configuration";
+
+/**
+ * Cookie attribute matrix for the double-submit CSRF cookie.
+ *
+ * | Attribute | local / dev | production |
+ * |-----------|-------------|------------|
+ * | SameSite  | Lax         | Strict     |
+ * | Secure    | false       | true       |
+ * | HttpOnly  | false       | false      |
+ * | Path      | /           | /          |
+ * | Max-Age   | 86400       | 86400      |
+ *
+ * `HttpOnly` is intentionally `false` in both environments: the
+ * double-submit pattern requires client JS to read the cookie and echo it
+ * back via the `x-csrf-token` header.
+ */
+export interface CsrfCookieAttributes {
+  sameSite: "lax" | "strict";
+  secure: boolean;
+  httpOnly: boolean;
+  path: string;
+  maxAge: number;
+}
+
+/**
+ * Returns true when the current runtime is a production deployment.
+ * `NODE_ENV` is the canonical signal; `VERCEL_ENV` is honored as a
+ * secondary signal for Vercel-hosted deployments.
+ */
+export function isProductionEnv(): boolean {
+  return (
+    process.env.NODE_ENV === "production" ||
+    process.env.VERCEL_ENV === "production"
+  );
+}
+
+/**
+ * Resolves the CSRF cookie attribute matrix for the current environment.
+ *
+ * Fails closed: throws {@link CSRF_INSECURE_COOKIE_ERROR} when production
+ * would emit an insecure cookie (e.g. `SameSite=None` without `Secure`, or
+ * `Secure` missing in prod).
+ */
+export function getCsrfCookieAttributes(): CsrfCookieAttributes {
+  const production = isProductionEnv();
+
+  const attributes: CsrfCookieAttributes = production
+    ? {
+        sameSite: "strict",
+        secure: true,
+        httpOnly: false,
+        path: "/",
+        maxAge: CSRF_EXPIRY_MS / 1000,
+      }
+    : {
+        sameSite: "lax",
+        secure: false,
+        httpOnly: false,
+        path: "/",
+        maxAge: CSRF_EXPIRY_MS / 1000,
+      };
+
+  if (production) {
+    const insecure =
+      !attributes.secure ||
+      attributes.sameSite === "lax" ||
+      attributes.path !== "/";
+    if (insecure) {
+      throw new Error(CSRF_INSECURE_COOKIE_ERROR);
+    }
+  }
+
+  return attributes;
+}
+
+/**
+ * Builds the `Set-Cookie` options for the double-submit CSRF cookie using
+ * the environment-appropriate attribute matrix from
+ * {@link getCsrfCookieAttributes}. Fails closed in production when the
+ * matrix would be insecure.
+ */
+export function getCsrfCookieOptions(): CsrfCookieAttributes {
+  return getCsrfCookieAttributes();
+}
