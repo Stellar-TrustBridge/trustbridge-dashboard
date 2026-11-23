@@ -98,3 +98,25 @@ export function requireMaintainer(
   }
   return auth;
 }
+
+/**
+ * Redaction mode for address-history exports.
+ *
+ * - `self`: the caller may only see their own addresses; other parties are
+ *   fully masked.
+ * - `admin`: maintainers/admins may see the full history, but sensitive
+ *   addresses are still masked per the documented masking policy.
+ */
+export type RedactionMode = "self" | "admin";
+
+/**
+ * Derive the address-history redaction mode from the authenticated role.
+ *
+ * Maintainers and admins get `admin` mode; everyone else (including
+ * unauthenticated callers, which callers must reject before use) gets the
+ * least-privileged `self` mode. This keeps the decision centralized so the
+ * route handler and library stay consistent.
+ */
+export function getRedactionMode(user: SessionUser | null | undefined): RedactionMode {
+  return isMaintainer(user) ? "admin" : "self";
+}

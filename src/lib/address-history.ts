@@ -199,11 +199,20 @@ export async function getLatestAddress(userId: string): Promise<string | null> {
 export type AddressHistoryExportFormat = "json" | "csv";
 
 /**
+ * Redaction modes for address-history exports. `self` exposes the caller's
+ * own addresses verbatim; `admin` applies the documented masking policy so
+ * operator-facing exports never leak raw addresses.
+ */
+export type AddressHistoryRedactionMode = "self" | "admin";
+
+/**
  * Stable error codes surfaced by the address-history export flow.
  */
 export type AddressHistoryExportErrorCode =
   | "invalid_format"
-  | "empty_history";
+  | "invalid_redaction_mode"
+  | "empty_history"
+  | "forbidden";
 
 /**
  * Raised when an export request cannot be fulfilled. Carries a stable code
@@ -220,6 +229,10 @@ export class AddressHistoryExportError extends Error {
 }
 
 const EXPORT_FORMATS: readonly AddressHistoryExportFormat[] = ["json", "csv"];
+const REDACTION_MODES: readonly AddressHistoryRedactionMode[] = [
+  "self",
+  "admin",
+];
 
 /**
  * Normalizes and validates a requested export format. Defaults to JSON when
@@ -238,6 +251,37 @@ export function parseExportFormat(
   return raw as AddressHistoryExportFormat;
 }
 
+/**
+ * Normalizes and validates a requested redaction mode. Defaults to `self`
+ * when unspecified; rejects unknown modes with a stable error.
+ */
+export function parseRedactionMode(
+  raw: unknown
+): AddressHistoryRedactionMode {
+  if (raw === undefined || raw === null || raw === "") return "self";
+  if (
+    typeof raw !== "string" ||
+    !REDACTION_MODES.includes(raw as AddressHistoryRedactionMode)
+  ) {
+    throw new AddressHistoryExportError(
+      "invalid_redaction_mode",
+      `Unsupported redaction mode. Expected one of: ${REDACTION_MODES.join(", ")}.`
+    );
+  }
+  return raw as AddressHistoryRedactionMode;
+}
+
+/**
+ * Derives the redaction mode from the authenticated viewer. Self viewers
+ * export their own addresses; maintainers exporting another user's history
+ * use the admin masking policy.
+ */
+export function resolveRedactionMode(
+  viewer: AddressHistoryViewer
+): AddressHistoryRedactionMode {
+  return viewer.isSelf ? "self" : "admin";
+}
+
 function escapeCsvField(value: string): string {
   if (/[",\n\r]/.test(value)) {
     return `"${value.replace(/"/g, '""')}"`;
@@ -247,15 +291,27 @@ function escapeCsvField(value: string): string {
 
 /**
  * Serializes address history records into the requested export format.
- * Reuses the same record shape returned by `getAddressHistory`.
+ * Reuses the same record shape returned by `getAddressHistory`. When a
+ * redaction mode is supplied, each address is projected through the
+ * documented masking policy before serialization.
  */
 export function serializeAddressHistory(
   records: Awaited<ReturnType<typeof getAddressHistory>>,
-  format: AddressHistoryExportFormat
+  format: AddressHistoryExportFormat,
+  redactionMode: AddressHistoryRedactionMode = "self"
 ): { contentType: string; body: string } {
+  const projected = records.map((record) => {
+    if (redactionMode === "self") return record;
+    return {
+      stellarAddress: pseudonymizeAddress(record.stellarAddress),
+      changeType: record.changeType,
+      recordedAt: record.recordedAt,
+    };
+  });
+
   if (format === "csv") {
     const header = "stellarAddress,changeType,recordedAt";
-    const rows = records.map((record) =>
+    const rows = projected.map((record) =>
       [
         escapeCsvField(record.stellarAddress),
         escapeCsvField(record.changeType),
@@ -271,7 +327,7 @@ export function serializeAddressHistory(
   return {
     contentType: "application/json; charset=utf-8",
     body: JSON.stringify({
-      records: records.map((record) => ({
+      records: projected.map((record) => ({
         stellarAddress: record.stellarAddress,
         changeType: record.changeType,
         recordedAt: record.recordedAt.toISOString(),
@@ -288,9 +344,11 @@ export function serializeAddressHistory(
 export async function buildAddressHistoryExport(
   userId: string,
   requestedUserId: string | null | undefined,
-  rawFormat: unknown
+  rawFormat: unknown,
+  rawRedactionMode?: unknown
 ): Promise<{
   format: AddressHistoryExportFormat;
+  redactionMode: AddressHistoryRedactionMode;
   contentType: string;
   body: string;
   filename: string;
@@ -302,10 +360,12 @@ export async function buildAddressHistoryExport(
     );
   }
 
+  const redactionMode = parseRedactionMode(rawRedactionMode);
+
   if (requestedUserId && requestedUserId !== userId) {
     throw new AddressHistoryExportError(
-      "empty_history",
-      "Address history export is scoped to the authenticated user."
+      "forbidden",
+      "You may only export your own address history."
     );
   }
 
@@ -315,14 +375,19 @@ export async function buildAddressHistoryExport(
   if (records.length === 0) {
     throw new AddressHistoryExportError(
       "empty_history",
-      "No address history available to export."
+      "No address history is available to export."
     );
   }
 
-  const { contentType, body } = serializeAddressHistory(records, format);
+  const { contentType, body } = serializeAddressHistory(
+    records,
+    format,
+    redactionMode
+  );
 
   return {
     format,
+    redactionMode,
     contentType,
     body,
     filename: `address-history.${format}`,
