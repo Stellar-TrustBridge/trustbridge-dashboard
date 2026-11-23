@@ -3,8 +3,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   clearSorobanOutbox,
   enqueueSorobanOutbox,
+  getInMemoryOutboxMetrics,
   getSorobanOutboxEntry,
+  isEntryParked,
+  listPoisonedEntries,
   listSorobanOutbox,
+  OUTBOX_DEFAULT_MAX_ATTEMPTS,
   setSorobanOutboxSink,
   type SorobanOutboxEntry,
 } from "./soroban-outbox";
@@ -253,5 +257,197 @@ describe("in-memory Soroban outbox", () => {
     expect(entry.id).toBe("large-payload");
     expect(duplicate).toBe(entry);
     expect(listSorobanOutbox()).toEqual([entry]);
+  });
+});
+
+// ── Retry budget and poison-message parking ──────────────────────────────────
+
+describe("retry budget and poison-message park", () => {
+  beforeEach(() => {
+    clearSorobanOutbox();
+    setSorobanOutboxSink(undefined);
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+  });
+
+  afterEach(() => {
+    clearSorobanOutbox();
+    setSorobanOutboxSink(undefined);
+    vi.useRealTimers();
+  });
+
+  it("OUTBOX_DEFAULT_MAX_ATTEMPTS is 5", () => {
+    expect(OUTBOX_DEFAULT_MAX_ATTEMPTS).toBe(5);
+  });
+
+  it("new entries carry the default maxAttempts budget", async () => {
+    const entry = await enqueueSorobanOutbox({ registrationId: "reg-budget-1" });
+    expect(entry.maxAttempts).toBe(OUTBOX_DEFAULT_MAX_ATTEMPTS);
+  });
+
+  it("new entries accept a custom maxAttempts budget", async () => {
+    const entry = await enqueueSorobanOutbox(
+      { registrationId: "reg-budget-2" },
+      { idempotencyKey: "budget-custom", maxAttempts: 2 }
+    );
+    expect(entry.maxAttempts).toBe(2);
+  });
+
+  it("isEntryParked returns false for a pending entry", async () => {
+    const entry = await enqueueSorobanOutbox({ registrationId: "reg-park-1" });
+    expect(isEntryParked(entry)).toBe(false);
+  });
+
+  it("isEntryParked returns false for a FAILED entry within budget", async () => {
+    const failSink = vi.fn(() => { throw new Error("fail"); });
+    // budget=2, first failure uses attempts=1, still < maxAttempts=2
+    await expect(
+      enqueueSorobanOutbox({ registrationId: "reg-park-2" }, {
+        idempotencyKey: "within-budget",
+        sink: failSink,
+        maxAttempts: 2,
+      })
+    ).rejects.toThrow();
+
+    const entry = getSorobanOutboxEntry("within-budget")!;
+    expect(entry.attempts).toBe(1);
+    expect(entry.maxAttempts).toBe(2);
+    expect(isEntryParked(entry)).toBe(false);
+  });
+
+  it("isEntryParked returns true once attempts reach maxAttempts", async () => {
+    const failSink = vi.fn(() => { throw new Error("poison"); });
+
+    // Exhaust a budget of 1 in one shot.
+    await expect(
+      enqueueSorobanOutbox({ registrationId: "reg-poison" }, {
+        idempotencyKey: "poison-key",
+        sink: failSink,
+        maxAttempts: 1,
+      })
+    ).rejects.toThrow("poison");
+
+    const parked = getSorobanOutboxEntry("poison-key")!;
+    expect(parked.attempts).toBe(1);
+    expect(parked.maxAttempts).toBe(1);
+    expect(isEntryParked(parked)).toBe(true);
+  });
+
+  it("re-enqueue of a parked entry returns the parked entry without retrying", async () => {
+    const failSink = vi.fn(() => { throw new Error("poison"); });
+    const opts = { idempotencyKey: "poison-park", sink: failSink, maxAttempts: 1 };
+
+    // First attempt — exhausts the budget.
+    await expect(enqueueSorobanOutbox({ v: 1 }, opts)).rejects.toThrow("poison");
+
+    const parked = getSorobanOutboxEntry("poison-park")!;
+    expect(isEntryParked(parked)).toBe(true);
+
+    // Second call — should return the parked entry untouched, not retry.
+    const secondSink = vi.fn();
+    const returned = await enqueueSorobanOutbox(
+      { v: 2 },
+      { idempotencyKey: "poison-park", sink: secondSink }
+    );
+
+    expect(returned).toBe(parked);
+    expect(returned.attempts).toBe(1); // unchanged
+    expect(secondSink).not.toHaveBeenCalled();
+    expect(failSink).toHaveBeenCalledTimes(1);
+  });
+
+  it("listPoisonedEntries returns only budget-exhausted FAILED entries", async () => {
+    const failSink = vi.fn(() => { throw new Error("poison"); });
+
+    // Poison entry (budget=1 → parked after first failure).
+    await expect(
+      enqueueSorobanOutbox({ id: 1 }, { idempotencyKey: "dlq-poison", sink: failSink, maxAttempts: 1 })
+    ).rejects.toThrow();
+
+    // Within-budget failed entry (budget=3 → 1 failure, not yet parked).
+    await expect(
+      enqueueSorobanOutbox({ id: 2 }, { idempotencyKey: "dlq-within", sink: failSink, maxAttempts: 3 })
+    ).rejects.toThrow();
+
+    // Healthy pending entry.
+    await enqueueSorobanOutbox({ id: 3 }, { idempotencyKey: "dlq-healthy" });
+
+    const poisoned = listPoisonedEntries();
+    expect(poisoned).toHaveLength(1);
+    expect(poisoned[0].id).toBe("dlq-poison");
+  });
+});
+
+// ── DLQ metrics ──────────────────────────────────────────────────────────────
+
+describe("in-memory DLQ metrics", () => {
+  beforeEach(() => {
+    clearSorobanOutbox();
+    setSorobanOutboxSink(undefined);
+  });
+
+  afterEach(() => {
+    clearSorobanOutbox();
+    setSorobanOutboxSink(undefined);
+  });
+
+  it("reports zeros on an empty outbox", () => {
+    expect(getInMemoryOutboxMetrics()).toEqual({
+      total: 0,
+      pending: 0,
+      completed: 0,
+      failed: 0,
+      parked: 0,
+    });
+  });
+
+  it("counts pending, completed, failed, and parked entries correctly", async () => {
+    const failSink = vi.fn(() => { throw new Error("fail"); });
+    const successSink = vi.fn();
+
+    // 1 pending (no sink)
+    await enqueueSorobanOutbox({ n: 1 }, { idempotencyKey: "m-pending" });
+
+    // 1 completed
+    await enqueueSorobanOutbox({ n: 2 }, { idempotencyKey: "m-ok", sink: successSink });
+
+    // 1 failed within budget (maxAttempts=5, attempts=1)
+    await expect(
+      enqueueSorobanOutbox({ n: 3 }, { idempotencyKey: "m-fail", sink: failSink, maxAttempts: 5 })
+    ).rejects.toThrow();
+
+    // 1 parked (budget=1 exhausted)
+    await expect(
+      enqueueSorobanOutbox({ n: 4 }, { idempotencyKey: "m-parked", sink: failSink, maxAttempts: 1 })
+    ).rejects.toThrow();
+
+    const metrics = getInMemoryOutboxMetrics();
+    expect(metrics.total).toBe(4);
+    expect(metrics.pending).toBe(1);
+    expect(metrics.completed).toBe(1);
+    expect(metrics.failed).toBe(2);   // both "m-fail" and "m-parked" are FAILED
+    expect(metrics.parked).toBe(1);    // only "m-parked" is budget-exhausted
+  });
+
+  it("parked count decreases after a manual clear (operator reset)", async () => {
+    const failSink = vi.fn(() => { throw new Error("fail"); });
+    await expect(
+      enqueueSorobanOutbox({ n: 1 }, { idempotencyKey: "reset-parked", sink: failSink, maxAttempts: 1 })
+    ).rejects.toThrow();
+
+    expect(getInMemoryOutboxMetrics().parked).toBe(1);
+    clearSorobanOutbox();
+    expect(getInMemoryOutboxMetrics().parked).toBe(0);
+  });
+
+  it("happy-path delivery increments completed and leaves parked at zero", async () => {
+    const successSink = vi.fn();
+    await enqueueSorobanOutbox({ n: 1 }, { sink: successSink });
+    await enqueueSorobanOutbox({ n: 2 }, { sink: successSink });
+
+    const metrics = getInMemoryOutboxMetrics();
+    expect(metrics.completed).toBe(2);
+    expect(metrics.parked).toBe(0);
+    expect(metrics.failed).toBe(0);
   });
 });

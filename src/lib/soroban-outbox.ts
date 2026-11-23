@@ -5,7 +5,7 @@ import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 
 /**
- * Unified Soroban outbox adapter (Issue #488).
+ * Unified Soroban outbox adapter (Issue #488 / #199).
  *
  * Two complementary paths share one entry point:
  *
@@ -17,6 +17,15 @@ import { prisma } from "@/lib/prisma";
  *   worker loop; a delivered entry becomes `COMPLETED`, a throwing sink
  *   marks it `FAILED` (attempts + 1) and rethrows.
  *
+ * **Retry budget and poison-message parking:**
+ * Each entry carries a `maxAttempts` budget (default: 5). Once `attempts`
+ * reaches `maxAttempts` the entry is **parked** — its status stays `FAILED`
+ * and re-enqueue calls are silently rejected (the entry is returned as-is so
+ * callers can observe the parked state without crashing). `listPoisonedEntries()`
+ * enumerates all parked entries so an operator dashboard or cron can surface
+ * them. `isEntryParked()` is the single predicate callers use to check that
+ * boundary.
+ *
  * Statuses are UPPERCASE to match the persisted rows the worker writes
  * (`PENDING` / `COMPLETED` / `FAILED`).
  */
@@ -26,11 +35,23 @@ export type SorobanOutboxStatus =
   | "COMPLETED"
   | "FAILED";
 
+/**
+ * Default maximum delivery attempts before an entry is parked as a
+ * poison message. Matches the `maxAttempts` default in `processSorobanOutbox`.
+ */
+export const OUTBOX_DEFAULT_MAX_ATTEMPTS = 5;
+
 export interface SorobanOutboxEntry {
   id: string;
   payload: unknown;
   status: SorobanOutboxStatus;
   attempts: number;
+  /**
+   * Delivery budget: once `attempts >= maxAttempts` the entry is parked as a
+   * poison message and no further delivery is attempted. Defaults to
+   * `OUTBOX_DEFAULT_MAX_ATTEMPTS` for new entries.
+   */
+  maxAttempts: number;
   lastError?: string;
   createdAt: string;
   updatedAt: string;
@@ -45,6 +66,12 @@ export interface EnqueueSorobanOutboxOptions {
   maintainerOrgId?: string;
   /** Outbox action discriminator. Defaults to "register". */
   action?: string;
+  /**
+   * Maximum delivery attempts before this entry is parked as a poison message.
+   * Defaults to `OUTBOX_DEFAULT_MAX_ATTEMPTS`. Only applied to new entries;
+   * re-enqueued failed entries inherit the existing budget.
+   */
+  maxAttempts?: number;
 }
 
 export type SorobanOutboxSink = (
@@ -66,6 +93,12 @@ export function setSorobanOutboxSink(next?: SorobanOutboxSink): void {
 
 /**
  * Enqueue a Soroban mirror payload for asynchronous delivery.
+ *
+ * **Retry budget:** when re-enqueuing a previously-failed entry, the call is
+ * rejected (entry returned as-is, parked) once `attempts >= maxAttempts`.
+ * This prevents infinite retry loops on poison messages. For the production
+ * Prisma path, the budget is enforced by `processSorobanOutbox`; for the
+ * in-memory path it is enforced here.
  *
  * Failures are surfaced (thrown) rather than swallowed so callers such as the
  * register route can report a real error instead of a silent no-op.
@@ -98,15 +131,26 @@ export async function enqueueSorobanOutbox(
   const id = options.idempotencyKey ?? randomUUID();
 
   const existing = outbox.get(id);
+
+  // If the entry exists and is not FAILED, return it without re-delivering.
   if (existing && existing.status !== "FAILED") {
     return existing;
   }
+
+  // Poison-message gate: a FAILED entry that has exhausted its budget is
+  // parked — return it as-is so callers can observe the state.
+  if (existing && isEntryParked(existing)) {
+    return existing;
+  }
+
+  const budget = existing?.maxAttempts ?? options.maxAttempts ?? OUTBOX_DEFAULT_MAX_ATTEMPTS;
 
   const entry: SorobanOutboxEntry = {
     id,
     payload,
     status: "PENDING",
     attempts: existing?.attempts ?? 0,
+    maxAttempts: budget,
     createdAt: existing?.createdAt ?? now,
     updatedAt: now,
   };
@@ -148,4 +192,62 @@ export function listSorobanOutbox(): SorobanOutboxEntry[] {
 
 export function clearSorobanOutbox(): void {
   outbox.clear();
+}
+
+/**
+ * Returns `true` when an entry has been parked as a poison message: it is in
+ * the `FAILED` state **and** has exhausted its delivery budget
+ * (`attempts >= maxAttempts`). The entry will not be retried by
+ * `enqueueSorobanOutbox` until an operator resets it.
+ */
+export function isEntryParked(entry: SorobanOutboxEntry): boolean {
+  return entry.status === "FAILED" && entry.attempts >= entry.maxAttempts;
+}
+
+/**
+ * Enumerate all entries that are currently parked as poison messages.
+ * These are `FAILED` entries whose delivery budget has been exhausted.
+ * Surfaced so an operator dashboard or monitoring cron can page on them.
+ */
+export function listPoisonedEntries(): SorobanOutboxEntry[] {
+  return Array.from(outbox.values()).filter(isEntryParked);
+}
+
+/**
+ * In-memory DLQ metrics: counts by status across all entries in the
+ * process-local store. The production Prisma path exposes equivalent counts
+ * via `getSorobanOutboxMetrics` in `soroban-outbox-worker.ts`.
+ */
+export interface InMemoryOutboxMetrics {
+  total: number;
+  pending: number;
+  completed: number;
+  failed: number;
+  /** Entries that have exhausted their retry budget (poison messages). */
+  parked: number;
+}
+
+export function getInMemoryOutboxMetrics(): InMemoryOutboxMetrics {
+  let pending = 0;
+  let completed = 0;
+  let failed = 0;
+  let parked = 0;
+
+  for (const entry of outbox.values()) {
+    switch (entry.status) {
+      case "PENDING":
+      case "PROCESSING":
+        pending++;
+        break;
+      case "COMPLETED":
+        completed++;
+        break;
+      case "FAILED":
+        failed++;
+        if (isEntryParked(entry)) parked++;
+        break;
+    }
+  }
+
+  return { total: outbox.size, pending, completed, failed, parked };
 }

@@ -39,6 +39,8 @@ import type { HorizonCheckResult } from "@/types";
  * Horizon circuit-open signal. See `docs/ARCHITECTURE.md` for the topology.
  */
 
+import { computeJitteredDelay } from "@/lib/retry";
+
 /** How long to wait for `/api/check` before treating the request as timed out. */
 export const CHECK_TIMEOUT_MS = 10_000;
 
@@ -47,6 +49,14 @@ export const CHECK_MAX_ATTEMPTS = 3;
 
 /** Base backoff between retries, in milliseconds (exponential). */
 export const CHECK_RETRY_BASE_MS = 250;
+
+/**
+ * Ceiling on any single inter-attempt wait, in milliseconds. Prevents a
+ * large Retry-After header from holding up the UI for more than this long.
+ * Shared with {@link computeJitteredDelay} so the ceiling is enforced by the
+ * same helper the outbox worker uses.
+ */
+export const CHECK_MAX_DELAY_MS = CHECK_TIMEOUT_MS;
 
 /**
  * Circuit-breaker key for the Horizon dependency. Kept distinct from the
@@ -264,18 +274,20 @@ export async function checkAddressViaApi(
     const isLastAttempt = attempt === CHECK_MAX_ATTEMPTS - 1;
     if (isLastAttempt) break;
 
-    // Honor a server-provided Retry-After when present, otherwise use
-    // exponential backoff. Cap the wait so a large Retry-After does not
-    // stall the UI indefinitely.
-    const backoff = CHECK_RETRY_BASE_MS * 2 ** attempt;
+    // Honor a server-provided Retry-After when present (capped to our max
+    // delay budget), otherwise use the shared jittered-backoff helper so the
+    // ceiling and jitter are identical to the outbox worker.
+    const jitteredBackoff = computeJitteredDelay(attempt + 1, {
+      delayMs: CHECK_RETRY_BASE_MS,
+      backoffFactor: 2,
+      maxDelayMs: CHECK_MAX_DELAY_MS,
+      jitter: true,
+    });
     const retryAfterMs =
       outcome.kind === "rate_limited" && outcome.retryAfterSeconds !== null
-        ? outcome.retryAfterSeconds * 1000
+        ? Math.min(outcome.retryAfterSeconds * 1000, CHECK_MAX_DELAY_MS)
         : 0;
-    const waited = await sleep(
-      Math.min(Math.max(backoff, retryAfterMs), CHECK_TIMEOUT_MS),
-      options.signal
-    );
+    const waited = await sleep(Math.max(jitteredBackoff, retryAfterMs), options.signal);
     if (waited === "aborted") return { kind: "aborted" };
   }
 
@@ -286,21 +298,33 @@ export async function checkAddressViaApi(
  * Human-readable, actionable message for a `CheckOutcome`. UI code should
  * render this instead of re-deriving copy per outcome kind, so degraded
  * states (circuit open, timeout, network failure) stay consistent.
+ *
+ * Copy rules:
+ * - `rate_limited`: surface the server-provided wait when present, so the
+ *   operator knows exactly how long to pause. Otherwise encourage a brief
+ *   retry.
+ * - `circuit_open`: use "Stellar services" (not "Horizon") so the message is
+ *   still accurate when the breaker protects a different upstream in future.
+ * - `network_error`: ask the contributor to check their connection first;
+ *   avoids blaming server-side when the client is offline.
  */
 export function describeCheckOutcome(outcome: CheckOutcome): string {
   switch (outcome.kind) {
     case "ok":
       return "Check completed.";
     case "rate_limited":
-      return outcome.errors[0] ?? "Rate limit exceeded. Please try again later.";
+      if (outcome.retryAfterSeconds !== null) {
+        return `Too many requests. Please retry in ${outcome.retryAfterSeconds}s.`;
+      }
+      return "Too many requests. Please try again shortly.";
     case "circuit_open":
-      return "Horizon is temporarily unavailable. Contributor checks are paused; other dashboard features remain available.";
+      return "Stellar services are temporarily unavailable. Please try again in a moment.";
     case "timeout":
       return "The check timed out. Please try again.";
     case "aborted":
       return "Check cancelled.";
     case "network_error":
-      return "Network error while checking the address. Please try again.";
+      return "Network error while checking the address. Please check your connection and retry.";
     case "error":
       return outcome.errors[0] ?? "Failed to check address.";
     default:

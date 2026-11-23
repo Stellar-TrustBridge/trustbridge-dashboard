@@ -313,6 +313,24 @@ reserve check above therefore runs against `spendableXlmBalance`
 `xlm_balance`, so a funded account with trustlines eating its reserve is
 correctly flagged `low_reserve` rather than `ready`.
 
+### Readiness → Action reason code parity
+
+`READINESS_ACTION_PARITY_TABLE` in `src/lib/readiness.ts` is the **single
+source of truth** mapping each `ReadinessStatus` to its `WizardAction` reason
+code and the minimum `HorizonCheckResult` fields that produce it. Tests in
+`src/lib/readiness-copy.test.ts` drive every row through the full pipeline
+(`buildCheckResult` → `computeReadiness` → `getReadinessConfig` →
+`computeNextAction`) to prevent drift between the dashboard readiness check and
+the trustbridge-action `reason_codes`.
+
+| `readiness` | `action` (reason code) | Condition |
+|---|---|---|
+| `not_ready` | `fund_account` | Account not funded |
+| `not_ready` | `add_trustline` | Funded, no USDC trustline |
+| `not_ready` | `await_trustline_authorization` | Trustline present but unauthorized |
+| `low_reserve` | `increase_reserve` | Authorized trustline, spendable XLM below floor |
+| `ready` | `none` | Fully funded, authorized trustline, sufficient XLM |
+
 ---
 
 ## Registration flow
@@ -615,9 +633,35 @@ The write-through path is now implemented (`src/lib/soroban-register.ts`), wired
 
 End-to-end/browser coverage (e.g. Playwright) for the event timeline panel and any future write-through flow is a deliberate follow-up, not a gap in this pass — this repo currently has no Playwright/e2e harness, and adding one is a separate infrastructure change (new CI browser setup) tracked independently of this documentation and unit/API test work.
 
+## Wave Public Status Banner
+
+`GET /api/wave-status` (public, 60 req/min rate-limited) returns a typed
+`WavePublicStatus` payload computed by `getWavePublicStatus()` in
+[`src/lib/wave-status.ts`](../src/lib/wave-status.ts). It merges two
+independent operational signals:
+
+| Signal | Source | Active when |
+|--------|--------|-------------|
+| Freeze window | `isFreezeWindowActive()` | `FREEZE_WINDOW_ENABLED=true` and now is in `[start, end]` |
+| Contract-sync queue lag | `getContractSyncLagState()` | lag.status is `lagging` or `stalled` |
+
+The combined `overallStatus` field drives the `WaveStatusBanner` component:
+
+| `overallStatus` | Meaning |
+|---|---|
+| `ok` | No active issues. |
+| `frozen` | Roster frozen; rechecks and address changes disabled. |
+| `degraded` | Contract sync is lagging or stalled; dashboard data may be stale. |
+| `frozen_and_degraded` | Both signals active simultaneously. |
+
+`getWavePublicStatus()` accepts an `options` parameter with injectable
+`freezeState`, `lagState`, and `now` for deterministic unit testing without
+I/O. If either subsystem throws at runtime the corresponding signal defaults to
+the safest non-alarming value so the route never returns 500.
+
 ---
 
-## Webhook module layout
+
 
 GitHub webhook logic is separated from Next.js App Router route files so that:
 
@@ -670,7 +714,26 @@ To ensure reliable write-through to Soroban without losing registrations during 
 1. **Unified Outbox Abstraction (`src/lib/soroban-outbox.ts`):** Unifies production transactional writes with an in-memory adapter sink (`setSorobanOutboxSink`) for unit tests. In production runtime, `enqueueSorobanOutbox()` creates persistent `SorobanOutbox` rows in PostgreSQL (scoped by `maintainerOrgId`). In tests, the registered sink handles delivery directly in memory without database dependencies.
 2. **Transactional Enqueue:** During registration write paths, `enqueueSorobanOutbox()` stages the mirror payload with `status: PENDING`. Duplicate exports have been consolidated under `src/lib/soroban-outbox.ts`.
 3. **Outbox Worker (`processSorobanOutbox()`):** Background workers (`scripts/worker.mjs` / `src/lib/soroban-outbox-worker.ts`) periodically fetch pending outbox rows and invoke `mirrorRegistrationToSoroban()`.
-4. **At-Least-Once Delivery & Audit Trail:** On success, outbox records transition to `COMPLETED`. On failures, records retry with exponential backoff up to `maxAttempts` (default 5). If `maxAttempts` is exhausted, status transitions to `FAILED` and an audit event (`soroban_outbox_exhausted`) is logged.
+4. **Bounded Retry Budget and Poison-Message Parking:** Each outbox entry carries a `maxAttempts` budget (default: 5). The delivery worker respects this budget — on each failure it increments `attempts`; once `attempts >= maxAttempts` the entry transitions to `FAILED` and is **parked** (never retried again). The in-memory path enforces the same gate in `enqueueSorobanOutbox()`: re-enqueuing a parked entry returns it unchanged so callers can observe the state without crashing. Parked entries are enumerable via `listPoisonedEntries()` (in-memory) or `listSorobanOutboxDeadLetters()` (Prisma).
+5. **Jittered Exponential Backoff:** Failed (but not yet parked) entries are rescheduled using the shared `computeJitteredDelay` helper from `src/lib/retry.ts` via `computeOutboxRetryDelayMs()`. The schedule is base 2 s, factor 4, ceiling 5 min, full jitter — identical to the check-API-client retry schedule so there is one backoff implementation in the codebase.
+6. **DLQ Metrics:** `getSorobanOutboxMetrics(maintainerOrgId?)` returns live counts broken down by status (`pending`, `processing`, `completed`, `failed`, `total`). Exposed by `GET /api/soroban/outbox/dlq`. The in-memory path exposes equivalent counts via `getInMemoryOutboxMetrics()` which also includes a `parked` counter (budget-exhausted FAILED entries).
+7. **At-Least-Once Delivery & Audit Trail:** On success, outbox records transition to `COMPLETED`. When `maxAttempts` is exhausted and an entry is parked, an audit event (`soroban_outbox_exhausted`) is logged via `recordAuditLog()`.
+
+#### Retry schedule (`computeOutboxRetryDelayMs`)
+
+| Attempt | Cap (before jitter) | Jitter range |
+|---------|-------------------|--------------|
+| 1 | 2 s | [0, 2 s] |
+| 2 | 8 s | [0, 8 s] |
+| 3 | 32 s | [0, 32 s] |
+| 4 | 128 s (~2 min) | [0, 128 s] |
+| ≥ 5 | 300 s (5 min ceiling) | [0, 300 s] |
+
+#### Reason codes
+
+| Audit action | When |
+|---|---|
+| `soroban_outbox_exhausted` | An entry's `attempts` reached `maxAttempts`; entry parked as poison message. |
 
 ---
 

@@ -7,11 +7,51 @@ import { logger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
 import { recordAuditLog } from "@/lib/audit";
 import { redactString } from "@/lib/sentry";
+import { computeJitteredDelay } from "@/lib/retry";
 import {
   mirrorRegistrationToSoroban,
   type MirrorRegistrationPayload,
   type MirrorResult,
 } from "@/lib/soroban-register";
+
+/**
+ * Outbox retry schedule (shared with the DLQ metrics tests).
+ *
+ * Uses the same `computeJitteredDelay` helper as `check-api-client.ts` so
+ * there is one jitter implementation in the codebase. The outbox worker calls
+ * this once per failed delivery to compute `nextAttemptAt`.
+ *
+ * Base 2 s, factor 4, ceiling 5 min, full jitter:
+ *   attempt 1 → [0, 2 s]
+ *   attempt 2 → [0, 8 s]
+ *   attempt 3 → [0, 32 s]
+ *   attempt 4 → [0, 128 s (~2 min)]
+ *   attempt 5 → [0, 300 s (ceiling)]
+ */
+export const OUTBOX_RETRY_BASE_MS = 2_000;
+export const OUTBOX_RETRY_FACTOR = 4;
+export const OUTBOX_RETRY_CEILING_MS = 5 * 60 * 1_000; // 5 minutes
+
+/**
+ * Compute the jittered delay (ms) before the next outbox attempt, given the
+ * total number of attempts already made. Exported so the DLQ metrics endpoint
+ * can surface the schedule without coupling to the worker internals.
+ *
+ * Uses full jitter so bursts of concurrent failures are spread apart; the
+ * `random` parameter is injectable for deterministic tests.
+ */
+export function computeOutboxRetryDelayMs(
+  attemptsMade: number,
+  random: () => number = Math.random,
+): number {
+  return computeJitteredDelay(attemptsMade, {
+    delayMs: OUTBOX_RETRY_BASE_MS,
+    backoffFactor: OUTBOX_RETRY_FACTOR,
+    maxDelayMs: OUTBOX_RETRY_CEILING_MS,
+    jitter: true,
+    random,
+  });
+}
 
 /**
  * Soroban outbox worker.
@@ -275,8 +315,9 @@ export async function processSorobanOutbox(options: OutboxProcessOptions = {}) {
           metadata: { action: item.action, attempts: nextAttempts, error: lastError },
         });
       } else {
-        // Exponential backoff retry: 5s, 25s, 125s...
-        const backoffMs = Math.pow(5, nextAttempts) * 1000;
+        // Jittered exponential backoff: use the shared helper so the schedule
+        // is identical to what `computeOutboxRetryDelayMs` advertises.
+        const backoffMs = computeOutboxRetryDelayMs(nextAttempts);
         const nextAttemptAt = new Date(Date.now() + backoffMs);
 
         await prisma.sorobanOutbox.update({

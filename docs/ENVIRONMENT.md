@@ -280,6 +280,10 @@ While a freeze window is active:
 - **`POST /api/register`** (address change) returns `423 WAVE_FREEZE_ACTIVE`.
 - **`GET /api/freeze-status`** returns `{ "active": true, ... }` — the maintainer
   dashboard polls this every 30 s and shows a **FreezeWindowBanner** automatically.
+- **`GET /api/wave-status`** returns a combined `WavePublicStatus` payload that
+  merges the freeze signal with the contract-sync queue lag signal (see
+  [`src/lib/wave-status.ts`](../src/lib/wave-status.ts) for the full shape).
+  `overallStatus` is one of `ok | frozen | degraded | frozen_and_degraded`.
 - The banner disappears as soon as `active` flips back to `false` (i.e. the window
   ends or `FREEZE_WINDOW_ENABLED` is changed to `false` and the 30 s poll fires).
 
@@ -692,6 +696,7 @@ These follow the [IETF RateLimit Headers draft](https://datatracker.ietf.org/doc
 | Endpoint | Limit | Window | Notes |
 |----------|-------|--------|-------|
 | `GET /api/freeze-status` | 60 req | 1 min | Public unauthenticated; generous for polling UI, protects against polling storms during Wave events (#519) |
+| `GET /api/wave-status` | 60 req | 1 min | Public unauthenticated; combined freeze + queue-lag banner signal |
 | `GET /api/stats` | 120 req | 1 min | Public |
 | `GET /api/actions/lookup` | 60 req | 1 min | Public |
 | `POST /api/check` | 10 req | 1 min | Per env default (`RATE_LIMIT_MAX_REQUESTS`) |
