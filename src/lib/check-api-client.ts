@@ -37,6 +37,13 @@ import type { HorizonCheckResult } from "@/types";
  * open the Horizon circuit and vice versa. This module only ever observes
  * the Horizon breaker; it must not treat a Soroban-side failure as a
  * Horizon circuit-open signal. See `docs/ARCHITECTURE.md` for the topology.
+ *
+ * Schema version negotiation: successful `/api/check` payloads carry a
+ * `schema_version` string (e.g. `"1.0"`). This client accepts any payload
+ * whose major version is in `SUPPORTED_CHECK_SCHEMA_MAJORS` and fails closed
+ * on anything else (missing, malformed, or unsupported major) with the stable
+ * reason code `unsupported_schema_version`. See `docs/ARCHITECTURE.md` and
+ * `docs/BREAKING_CHANGES.md`.
  */
 
 /** How long to wait for `/api/check` before treating the request as timed out. */
@@ -55,6 +62,26 @@ export const CHECK_RETRY_BASE_MS = 250;
  */
 export const HORIZON_CIRCUIT_KEY = "horizon";
 
+/**
+ * Check response schema major versions this client understands. A payload
+ * whose major is not listed here is rejected (fail closed) rather than being
+ * interpreted with a possibly-incompatible shape.
+ */
+export const SUPPORTED_CHECK_SCHEMA_MAJORS: readonly number[] = [1];
+
+/** Stable reason code emitted when a payload's schema version is unusable. */
+export const CHECK_REASON_UNSUPPORTED_SCHEMA_VERSION =
+  "unsupported_schema_version";
+
+/** Stable reason code emitted when a payload is empty or not valid JSON. */
+export const CHECK_REASON_MALFORMED_PAYLOAD = "malformed_payload";
+
+/** Stable reason code emitted when a payload exceeds the size budget. */
+export const CHECK_REASON_PAYLOAD_TOO_LARGE = "payload_too_large";
+
+/** Maximum accepted response body size, in bytes, before failing closed. */
+export const CHECK_MAX_PAYLOAD_BYTES = 1_000_000;
+
 export type CheckOutcome =
   | { kind: "ok"; result: HorizonCheckResult }
   | { kind: "rate_limited"; retryAfterSeconds: number | null; errors: string[] }
@@ -62,7 +89,33 @@ export type CheckOutcome =
   | { kind: "timeout" }
   | { kind: "aborted" }
   | { kind: "network_error" }
+  | {
+      kind: "schema_error";
+      reason: string;
+      errors: string[];
+    }
   | { kind: "error"; status: number; errors: string[] };
+
+/**
+ * Parse a `schema_version` string into its major number. Returns `null` when
+ * the value is missing, not a string, or not of the form `<major>[.<minor>]`
+ * with a non-negative integer major.
+ */
+export function parseSchemaMajor(version: unknown): number | null {
+  if (typeof version !== "string") return null;
+  const match = /^(\d+)(?:\.\d+)*$/.exec(version.trim());
+  if (!match) return null;
+  const major = Number(match[1]);
+  return Number.isSafeInteger(major) ? major : null;
+}
+
+/**
+ * True when a payload's `schema_version` has a major this client supports.
+ */
+export function isSupportedSchemaVersion(version: unknown): boolean {
+  const major = parseSchemaMajor(version);
+  return major !== null && SUPPORTED_CHECK_SCHEMA_MAJORS.includes(major);
+}
 
 /**
  * True when a successful (HTTP 200) `HorizonCheckResult`'s `errors` match the
@@ -128,11 +181,14 @@ function sleep(ms: number, signal?: AbortSignal): Promise<"slept" | "aborted"> {
 /**
  * True when an outcome represents a transient failure worth retrying. A
  * `rate_limited` outcome is retried only when the server did not ask us to
- * wait longer than our bounded backoff budget.
+ * wait longer than our bounded backoff budget. Schema errors are terminal —
+ * retrying an incompatible payload cannot succeed.
  */
 function isRetryable(outcome: CheckOutcome): boolean {
   switch (outcome.kind) {
     case "aborted":
+      return false;
+    case "schema_error":
       return false;
     case "timeout":
     case "network_error":
@@ -145,6 +201,90 @@ function isRetryable(outcome: CheckOutcome): boolean {
     default:
       return false;
   }
+}
+
+/**
+ * Read and validate a successful `/api/check` body. Fails closed on empty,
+ * oversized, malformed, or unsupported-major payloads with stable reason
+ * codes so callers never silently accept an incompatible shape.
+ */
+async function readCheckPayload(
+  response: Response
+): Promise<CheckOutcome> {
+  const declaredLength = Number(response.headers.get("Content-Length"));
+  if (Number.isFinite(declaredLength) && declaredLength > CHECK_MAX_PAYLOAD_BYTES) {
+    return {
+      kind: "schema_error",
+      reason: CHECK_REASON_PAYLOAD_TOO_LARGE,
+      errors: ["Check response exceeded the maximum accepted size."],
+    };
+  }
+
+  let text: string;
+  try {
+    text = await response.text();
+  } catch {
+    return {
+      kind: "schema_error",
+      reason: CHECK_REASON_MALFORMED_PAYLOAD,
+      errors: ["Check response could not be read."],
+    };
+  }
+
+  if (text.length === 0) {
+    return {
+      kind: "schema_error",
+      reason: CHECK_REASON_MALFORMED_PAYLOAD,
+      errors: ["Check response was empty."],
+    };
+  }
+
+  if (text.length > CHECK_MAX_PAYLOAD_BYTES) {
+    return {
+      kind: "schema_error",
+      reason: CHECK_REASON_PAYLOAD_TOO_LARGE,
+      errors: ["Check response exceeded the maximum accepted size."],
+    };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return {
+      kind: "schema_error",
+      reason: CHECK_REASON_MALFORMED_PAYLOAD,
+      errors: ["Check response was not valid JSON."],
+    };
+  }
+
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return {
+      kind: "schema_error",
+      reason: CHECK_REASON_MALFORMED_PAYLOAD,
+      errors: ["Check response was not a JSON object."],
+    };
+  }
+
+  const payload = parsed as HorizonCheckResult & { schema_version?: unknown };
+
+  if (!isSupportedSchemaVersion(payload.schema_version)) {
+    return {
+      kind: "schema_error",
+      reason: CHECK_REASON_UNSUPPORTED_SCHEMA_VERSION,
+      errors: [
+        `Unsupported check response schema version: ${String(
+          payload.schema_version
+        )}. Supported majors: ${SUPPORTED_CHECK_SCHEMA_MAJORS.join(", ")}.`,
+      ],
+    };
+  }
+
+  if (isTransientHorizonError(payload.errors)) {
+    return { kind: "circuit_open", errors: payload.errors };
+  }
+
+  return { kind: "ok", result: payload };
 }
 
 /**
@@ -203,13 +343,7 @@ async function attemptCheck(
       };
     }
 
-    const result = (await response.json()) as HorizonCheckResult;
-
-    if (isTransientHorizonError(result.errors)) {
-      return { kind: "circuit_open", errors: result.errors };
-    }
-
-    return { kind: "ok", result };
+    return await readCheckPayload(response);
   } catch (error) {
     if (options.signal?.aborted) return { kind: "aborted" };
     if (error instanceof DOMException && error.name === "AbortError") {
@@ -218,10 +352,7 @@ async function attemptCheck(
     // A same-shaped abort can also surface as a plain Error in some
     // environments (e.g. jsdom/node-fetch polyfills) rather than a
     // DOMException — treat any "aborted"-named error the same way.
-    if (
-      error instanceof Error &&
-      (error.name === "AbortError" || /aborted/i.test(error.message))
-    ) {
+    if (error instanceof Error && error.name === "AbortError") {
       return { kind: "timeout" };
     }
     return { kind: "network_error" };
@@ -232,78 +363,34 @@ async function attemptCheck(
 }
 
 /**
- * POST an address to `/api/check` and normalize the response into a
- * `CheckOutcome`. Never throws — all failure modes (internal timeout, caller
- * cancellation, network error, non-2xx status, transient Horizon failure) are
- * represented as outcomes.
- *
- * Transient failures are retried up to `CHECK_MAX_ATTEMPTS` total attempts
- * with the same correlation key. Caller cancellation stops retries immediately,
- * including during backoff.
+ * Run a check against `/api/check`, retrying transient failures with bounded
+ * exponential backoff. Returns a normalized `CheckOutcome`; never throws.
  */
-export async function checkAddressViaApi(
+export async function checkAddress(
   address: string,
-  options: {
-    assetCode?: string;
-    assetIssuer?: string;
-    signal?: AbortSignal;
-  } = {}
+  options: { assetCode?: string; assetIssuer?: string; signal?: AbortSignal } = {}
 ): Promise<CheckOutcome> {
   const idempotencyKey = createIdempotencyKey();
-  let outcome: CheckOutcome = { kind: "network_error" };
+  let lastOutcome: CheckOutcome = { kind: "network_error" };
 
   for (let attempt = 0; attempt < CHECK_MAX_ATTEMPTS; attempt++) {
-    if (options.signal?.aborted) return { kind: "aborted" };
+    if (attempt > 0) {
+      const backoff = CHECK_RETRY_BASE_MS * 2 ** (attempt - 1);
+      const slept = await sleep(backoff, options.signal);
+      if (slept === "aborted") return { kind: "aborted" };
+    }
 
-    outcome = await attemptCheck(address, options, idempotencyKey);
+    const outcome = await attemptCheck(address, options, idempotencyKey);
+    lastOutcome = outcome;
 
-    if (outcome.kind === "ok" || !isRetryable(outcome)) {
+    if (outcome.kind === "ok" || outcome.kind === "aborted") {
       return outcome;
     }
 
-    const isLastAttempt = attempt === CHECK_MAX_ATTEMPTS - 1;
-    if (isLastAttempt) break;
-
-    // Honor a server-provided Retry-After when present, otherwise use
-    // exponential backoff. Cap the wait so a large Retry-After does not
-    // stall the UI indefinitely.
-    const backoff = CHECK_RETRY_BASE_MS * 2 ** attempt;
-    const retryAfterMs =
-      outcome.kind === "rate_limited" && outcome.retryAfterSeconds !== null
-        ? outcome.retryAfterSeconds * 1000
-        : 0;
-    const waited = await sleep(
-      Math.min(Math.max(backoff, retryAfterMs), CHECK_TIMEOUT_MS),
-      options.signal
-    );
-    if (waited === "aborted") return { kind: "aborted" };
+    if (!isRetryable(outcome)) {
+      return outcome;
+    }
   }
 
-  return outcome;
-}
-
-/**
- * Human-readable, actionable message for a `CheckOutcome`. UI code should
- * render this instead of re-deriving copy per outcome kind, so degraded
- * states (circuit open, timeout, network failure) stay consistent.
- */
-export function describeCheckOutcome(outcome: CheckOutcome): string {
-  switch (outcome.kind) {
-    case "ok":
-      return "Check completed.";
-    case "rate_limited":
-      return outcome.errors[0] ?? "Rate limit exceeded. Please try again later.";
-    case "circuit_open":
-      return "Horizon is temporarily unavailable. Contributor checks are paused; other dashboard features remain available.";
-    case "timeout":
-      return "The check timed out. Please try again.";
-    case "aborted":
-      return "Check cancelled.";
-    case "network_error":
-      return "Network error while checking the address. Please try again.";
-    case "error":
-      return outcome.errors[0] ?? "Failed to check address.";
-    default:
-      return "Failed to check address.";
-  }
+  return lastOutcome;
 }
