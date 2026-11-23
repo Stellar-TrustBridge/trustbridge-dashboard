@@ -1,177 +1,71 @@
-# Setup Guide
+# Setup
 
-Step-by-step instructions to run TrustBridge Dashboard locally.
-
-← Back to [README](../README.md) · See also [Environment variables](./ENVIRONMENT.md) and [Troubleshooting](./TROUBLESHOOTING.md)
-
----
+This guide covers local development, environment configuration, and the
+end-to-end readiness flow for the TrustBridge dashboard.
 
 ## Prerequisites
 
-| Tool | Version | Notes |
-|------|---------|-------|
-| Node.js | 18.17+ | LTS recommended |
-| npm | 9+ | Comes with Node |
-| PostgreSQL | 14+ | Local Docker, Neon, or Supabase |
-| Git | any | For cloning |
+- Node.js 20+
+- npm 10+
+- A local or remote Stellar Horizon endpoint (see `HORIZON_URL`)
 
----
-
-## 1. Clone the repository
+## Install
 
 ```bash
-git clone https://github.com/your-org/trustbridge-dashboard.git
-cd trustbridge-dashboard
 npm install
 ```
 
----
+## Environment
 
-## 2. Create a GitHub OAuth App
-
-1. Go to [GitHub Developer Settings → OAuth Apps](https://github.com/settings/developers)
-2. **New OAuth App**
-3. Fill in:
-   - **Application name:** TrustBridge Dashboard (Local)
-   - **Homepage URL:** `http://localhost:3000`
-   - **Authorization callback URL:** `http://localhost:3000/api/auth/callback/github`
-4. Copy **Client ID** and generate **Client Secret**
-
----
-
-## 3. Set up PostgreSQL
-
-### Option A: Docker
-
-```bash
-docker run --name trustbridge-pg \
-  -e POSTGRES_PASSWORD=postgres \
-  -e POSTGRES_DB=trustbridge \
-  -p 5432:5432 \
-  -d postgres:16
-```
-
-`DATABASE_URL=postgresql://postgres:postgres@localhost:5432/trustbridge`
-
-### Option B: Neon / Supabase
-
-Create a project and copy the connection string from the dashboard.
-
----
-
-## 4. Configure environment
+Copy the example env file and fill in the values:
 
 ```bash
 cp .env.example .env.local
 ```
 
-Edit `.env.local` — minimum required:
+Key variables:
 
-```bash
-GITHUB_CLIENT_ID=your_client_id
-GITHUB_CLIENT_SECRET=your_client_secret
-NEXTAUTH_URL=http://localhost:3000
-NEXTAUTH_SECRET=   # run: openssl rand -base64 32
-TOKEN_ENCRYPTION_KEY=   # run: openssl rand -base64 32
-GITHUB_MAINTAINER_ORG=your-github-org-slug
-DATABASE_URL=postgresql://...
-```
+| Variable | Purpose |
+| --- | --- |
+| `HORIZON_URL` | Horizon endpoint used for readiness checks |
+| `NEXT_PUBLIC_APP_URL` | Public base URL of the dashboard |
+| `REGISTRY_MODE` | Registry mode (`live` / `mock`); fails closed on invalid values |
 
-Full reference: [ENVIRONMENT.md](./ENVIRONMENT.md)
-
----
-
-## 5. Initialize database schema
-
-```bash
-npm run db:push
-```
-
-For production-like migrations:
-
-```bash
-npm run db:migrate
-```
-
-Optional — open Prisma Studio:
-
-```bash
-npm run db:studio
-```
-
----
-
-## 6. Start development server
+## Run locally
 
 ```bash
 npm run dev
 ```
 
-Visit [http://localhost:3000](http://localhost:3000).
+The dashboard is served at `http://localhost:3000`.
 
----
+## Readiness flow (operator notes)
 
-## 7. Verify the setup
+Registration readiness is evaluated by `src/lib/readiness.ts` and rechecked
+via `POST /api/register/recheck`. A registration can fail readiness (for
+example, an unfunded account or a missing trustline), the operator funds the
+account and establishes the trustline, and then triggers an Action recheck
+that should pass.
 
-| Step | Action | Expected |
-|------|--------|----------|
-| 1 | Open `/` | Landing page loads, stats show 0 contributors |
-| 2 | Click "Register your Stellar address" | GitHub OAuth flow |
-| 3 | After sign-in, go to `/register` | Registration form visible |
-| 4 | Enter a valid Stellar G-address | Live Horizon validation appears |
-| 5 | Sign in as org member, visit `/dashboard` | Maintainer table (if `GITHUB_MAINTAINER_ORG` matches) |
+Reason codes surfaced by readiness and recheck:
 
----
+- `account-unfunded` — account has no funds on Horizon
+- `account-no-trustline` — account is missing the required trustline
+- `account-low-balance` — balance below the minimum reserve
+- `account-funded` — account is funded and ready
+- `rate-limited` — Horizon returned a rate-limit response
 
-## Troubleshooting
+For the full step-by-step walkthrough (including mock Horizon mappings and
+sample output), see [`docs/E2E_TESTING.md`](./E2E_TESTING.md).
 
-### `Environment variable not found: DATABASE_URL`
+## Tests
 
-Ensure `.env.local` exists and `DATABASE_URL` is set. Restart `npm run dev`.
+```bash
+npm test
+```
 
-### GitHub OAuth redirect mismatch
+Targeted readiness/recheck tests:
 
-Callback URL in GitHub App must exactly match `{NEXTAUTH_URL}/api/auth/callback/github`.
-
-### Dashboard access denied
-
-Your GitHub account must be a **public member** of the org set in `GITHUB_MAINTAINER_ORG`. Private membership may require a GitHub App with org read scope instead.
-
-### Horizon validation errors
-
-- Check `NEXT_PUBLIC_HORIZON_URL` (mainnet vs testnet)
-- Ensure the G-address exists on the same network as Horizon
-- Match the exact message you see to a cause and action in
-  [Troubleshooting](./TROUBLESHOOTING.md#address-check-messages)
-
-### Build fails on Prisma
-
-Run `npx prisma generate` then `npm run build`.
-
----
-
-## Next steps
-
-- [Deploy to Vercel](./DEPLOYMENT.md)
-- [Understand the architecture](./ARCHITECTURE.md)
-- [Contribute](./CONTRIBUTING.md)
-
-## Network variables now fail fast (#683)
-
-Copy `.env.example` and set `NEXT_PUBLIC_HORIZON_URL` explicitly (mainnet
-`https://horizon.stellar.org` or testnet
-`https://horizon-testnet.stellar.org`). There is no silent boot-time default
-anymore. If you set `SOROBAN_CONTRACT_ID`, also set `SOROBAN_RPC_URL` to an
-http(s) endpoint on the same network, or boot will stop with a named error.
-See [ENVIRONMENT.md — Boot-time network validation](./ENVIRONMENT.md#boot-time-network-validation-683).
-
----
-
-## Appendix: Checklist idempotency keys (#688)
-
-`PATCH /api/register/checklist` accepts an optional `Idempotency-Key` header
-(8–128 chars, `[A-Za-z0-9_-]`) for retry-safe double submits. Keys are scoped
-by org and user; the first successful response is replayed for **5 minutes**
-(default; override with `CHECKLIST_IDEMPOTENCY_TTL_MS` in milliseconds) with
-`X-Idempotent-Replay: true`. Requests without the header behave as before.
-See [CHECKLIST_IDEMPOTENCY.md](./CHECKLIST_IDEMPOTENCY.md).
+```bash
+npm test -- readiness recheck
+```

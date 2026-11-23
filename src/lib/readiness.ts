@@ -243,3 +243,33 @@ export function describeReadinessWithNextStep(status: ReadinessStatus): string {
   const config = getReadinessConfig(status);
   return `${config.description} ${config.nextStep}`;
 }
+
+/**
+ * Stable reason codes surfaced by the readiness check and the register
+ * recheck route. Documented in `docs/E2E_TESTING.md` and `docs/READINESS_MODEL.md`
+ * so the E2E fail → fund/trustline → recheck-pass path can assert on them.
+ */
+export type ReadinessReasonCode =
+  | "account_unfunded"
+  | "account_no_trustline"
+  | "account_trustline_unauthorized"
+  | "account_low_balance"
+  | "account_ready"
+  | "horizon_rate_limited"
+  | "horizon_error";
+
+/**
+ * Map a Horizon check result to a single stable reason code. The recheck route
+ * returns this alongside `readiness` so E2E tests and the UI can branch on a
+ * documented value instead of parsing free-form error strings.
+ */
+export function getReadinessReasonCode(
+  result: HorizonCheckResult
+): ReadinessReasonCode {
+  if (result.readiness === "ready") return "account_ready";
+  if (result.readiness === "low_reserve") return "account_low_balance";
+  if (!result.funded) return "account_unfunded";
+  if (!result.trustline) return "account_no_trustline";
+  if (!result.trustline_authorized) return "account_trustline_unauthorized";
+  return "account_unfunded";
+}

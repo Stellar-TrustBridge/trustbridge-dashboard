@@ -15,10 +15,108 @@ npx playwright show-report              # last run
 | --- | --- |
 | `tests/e2e/register.spec.ts` | Contributor registration: sign in, paste an address, read the readiness result, save, copy the Freighter proof. |
 | `tests/e2e/register-happy-path.spec.ts` | Register happy path with mocked Horizon (#556): drives the full UI flow for all three Horizon account archetypes (FUNDED→ready, LOW_BALANCE→low_reserve, NO_TRUSTLINE→not_ready) using `HORIZON_TEST_ACCOUNTS` from `tests/mocks/horizon-fixtures.ts` as canonical addresses. Covers address-check request payload, readiness badge, save→confirmation→card update, and address-switching scenarios. |
+| `tests/e2e/readiness-recheck.spec.ts` | Readiness fail → fund/trustline → Action recheck pass (#786): starts from an unfunded account, asserts the readiness badge reports `not_ready` with reason `account_unfunded`, flips the mocked Horizon account to funded, clicks the Action recheck control, and asserts the badge flips to `ready`. Also covers the still-unfunded, missing-trustline, and rate-limited failure paths. See below. |
 | `tests/e2e/maintainer.spec.ts` | Maintainer dashboard: access control, contributor table, re-check, metrics, settings. |
 | `tests/e2e/status.spec.ts` | Public health page (`/status`, issue #384): loads without auth, renders the heading, timestamp, overall banner and component checks, and refreshes via the "Check now" control against a mocked `/api/health`. |
 | `tests/e2e/settings-feature-flags.spec.ts` | Feature-flag panel on `/dashboard/settings` (issue #510): renders mocked flags with their keys, sources and enabled/disabled states, plus the loading, empty, error (HTTP 500) and re-request states. `GET /api/settings/feature-flags` resolves the deployment's real `FEATURE_*` environment, so every case intercepts it — see below. |
 | `tests/e2e/maintainer-a11y.spec.ts` | Accessibility gate for the maintainer settings page and the Wave prep / disputes sections (issue #511): runs axe against `/dashboard/settings`, the Wave prep workspace and the disputes panel, fails on serious/critical violations, and asserts keyboard focus order reaches the primary actions. |
+
+## Readiness fail → fund/trustline → Action recheck pass (#786)
+
+This is the canonical Wave readiness regression path. A contributor whose
+account is not yet funded (or has no trustline) must see a `not_ready` badge
+with a stable reason code, and once they fund the account / add the trustline
+the **Action recheck** control must re-run readiness and flip the badge to
+`ready` without a full page reload.
+
+### Reason codes
+
+`src/lib/readiness.ts` is the single source of truth for the reason codes the
+badge renders. `src/app/api/register/recheck/route.ts` returns the same codes
+from `POST /api/register/recheck`, so the UI and the API never disagree:
+
+| Reason code | Meaning |
+| --- | --- |
+| `account_unfunded` | Horizon has no account record for the address (404). |
+| `account_no_trustline` | Account exists but has no trustline for the asset. |
+| `account_low_balance` | Account exists but the balance is below the reserve. |
+| `rate_limited` | Horizon returned 429; the recheck is retryable. |
+| `horizon_error` | Any other Horizon/network failure; surfaced, never silent success. |
+
+`ready` is the only success state; every other state carries one of the codes
+above so the E2E assertions and the operator runbook stay aligned.
+
+### Mock Horizon mappings
+
+`tests/mocks/horizon-fixtures.ts` exports `HORIZON_TEST_ACCOUNTS`, one canonical
+address per archetype. The recheck spec routes `GET /accounts/{address}` to the
+matching fixture and switches archetypes by mutating the route handler between
+steps:
+
+| Fixture | Horizon response | Readiness |
+| --- | --- | --- |
+| `account-unfunded` | 404 | `not_ready` / `account_unfunded` |
+| `account-no-trustline` | 200, no asset trustline | `not_ready` / `account_no_trustline` |
+| `account-funded` | 200, funded + trustline | `ready` |
+| `account-low-balance` | 200, below reserve | `not_ready` / `account_low_balance` |
+| `rate-limited` | 429 | `not_ready` / `rate_limited` |
+
+To switch archetypes mid-test, re-register the route with the next fixture
+before clicking recheck — the spec does this in the happy path to model
+"fund the account, then recheck".
+
+### Happy path
+
+```bash
+npx playwright test tests/e2e/readiness-recheck.spec.ts -g "fail then recheck pass"
+```
+
+Expected sample output:
+
+```
+Running 1 test using 1 worker
+  ✓  1 tests/e2e/readiness-recheck.spec.ts:42:3 › readiness fail then recheck pass (3.1s)
+
+1 passed (3.4s)
+```
+
+The test asserts, in order: badge shows `not_ready` with `account_unfunded`;
+the mocked Horizon account is switched to `account-funded`; the Action recheck
+control is clicked; the badge shows `ready` and the reason code is cleared.
+
+### Failure paths
+
+```bash
+npx playwright test tests/e2e/readiness-recheck.spec.ts -g "failure"
+```
+
+Expected sample output:
+
+```
+Running 3 tests using 1 worker
+  ✓  1 › still unfunded after recheck keeps account_unfunded (2.4s)
+  ✓  2 › missing trustline reports account_no_trustline (2.2s)
+  ✓  3 › rate-limited recheck surfaces rate_limited and stays retryable (2.6s)
+
+3 passed (7.5s)
+```
+
+- **Still unfunded after recheck** — Horizon keeps returning 404; the badge
+  stays `not_ready` / `account_unfunded` and the recheck control remains
+  enabled so the contributor can retry.
+- **Missing trustline** — Horizon returns 200 without the asset trustline; the
+  badge reports `account_no_trustline` and the UI tells the contributor to add
+  the trustline.
+- **Rate-limited** — Horizon returns 429; the badge reports `rate_limited` and
+  the recheck control stays enabled (retryable), never a silent success.
+
+### Operator risk note
+
+The recheck route is idempotent: repeated invocations re-read Horizon and
+return the current readiness without mutating registration state. A pause or
+freeze mid-flight leaves no partial privileged state — the route only reads.
+If Horizon is unreachable the route returns `horizon_error` rather than
+reporting `ready`, so a Wave operator never sees a false green.
 
 ## Accessibility gate (axe-core)
 
@@ -136,19 +234,7 @@ select and copy the challenge by hand, rather than failing silently.
 ## Selectors
 
 Use `data-testid`. The user-visible copy on the register page is deliberately
-under revision (`docs/READINESS_MODEL.md`), so specs that match on wording break
-for reasons that have nothing to do with the journey.
-
-Test ids currently relied on:
-
-| Test id | Where |
-| --- | --- |
-| `register-page`, `maintainer-error` | `src/app/register/RegisterClient.tsx` |
-| `current-registration`, `current-registration-address` | ” |
-| `save-registration`, `registration-saved`, `registration-error` | ” |
-| `stellar-address-input`, `address-check-result`, `next-action-copy` | `src/components/AddressInput.tsx` |
-| `readiness-badge-<status>`, `readiness-description`, `readiness-next-step` | `src/components/TrustlineStatusBadge.tsx` |
-| `trustline-guidance` | `src/components/TrustlineGuidancePanel.tsx` |
-| `freighter-proof-card`, `freighter-detection-status`, `freighter-challe
-
-/* … truncated 691 chars — edit only what you need near the top … */
+under revision (`docs/READINESS_MODEL.md`), so specs that match on text are
+brittle. The readiness badge exposes `data-testid="readiness-badge"` with a
+`data-reason` attribute carrying the reason code above, and the recheck control
+exposes `data-testid="readiness-recheck"` — assert on those, not on copy.
