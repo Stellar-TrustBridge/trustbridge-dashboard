@@ -1,8 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   buildActionLookupResult,
   computeNextAction,
+  lookupActionRepo,
+  NEGATIVE_CACHE_TTL_MS,
+  resetActionLookupNegativeCache,
 } from "@/lib/action-lookup";
 import type { HorizonCheckResult } from "@/types";
 
@@ -102,5 +105,61 @@ describe("buildActionLookupResult", () => {
       ...horizonResult,
       nextAction: "none",
     });
+  });
+});
+
+describe("lookupActionRepo negative caching", () => {
+  beforeEach(() => {
+    resetActionLookupNegativeCache();
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    resetActionLookupNegativeCache();
+  });
+
+  it("caches a 404 so repeated lookups skip the fetcher (happy path)", async () => {
+    const fetcher = vi.fn().mockResolvedValue({ status: 404 });
+
+    const first = await lookupActionRepo("acme/missing", { fetcher });
+    const second = await lookupActionRepo("acme/missing", { fetcher });
+
+    expect(first).toEqual({ found: false, cached: false });
+    expect(second).toEqual({ found: false, cached: true });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not cache non-404 failures and surfaces the error", async () => {
+    const fetcher = vi.fn().mockResolvedValue({ status: 500 });
+
+    const first = await lookupActionRepo("acme/broken", { fetcher });
+    const second = await lookupActionRepo("acme/broken", { fetcher });
+
+    expect(first.found).toBe(false);
+    expect(first.error).toMatch(/500/);
+    expect(second.found).toBe(false);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it("expires the negative entry after the short TTL", async () => {
+    const fetcher = vi.fn().mockResolvedValue({ status: 404 });
+
+    await lookupActionRepo("acme/missing", { fetcher });
+    vi.advanceTimersByTime(NEGATIVE_CACHE_TTL_MS + 1);
+    await lookupActionRepo("acme/missing", { fetcher });
+
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not cache successful lookups as negative entries", async () => {
+    const fetcher = vi.fn().mockResolvedValue({ status: 200, data: { id: 1 } });
+
+    const first = await lookupActionRepo("acme/present", { fetcher });
+    const second = await lookupActionRepo("acme/present", { fetcher });
+
+    expect(first.found).toBe(true);
+    expect(second.found).toBe(true);
+    expect(fetcher).toHaveBeenCalledTimes(2);
   });
 });

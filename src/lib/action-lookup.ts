@@ -12,6 +12,14 @@ import type { HorizonCheckResult } from "@/types";
 export const ACTION_LOOKUP_CACHE_TTL_MS = 30_000;
 
 /**
+ * Negative cache lifetime for lookups that resolved to a missing Action repo
+ * or ref (HTTP 404). Deliberately shorter than the positive TTL so a repo that
+ * is created or a ref that is pushed shortly after a miss is picked up quickly,
+ * while still absorbing repeated 404 bursts on Wave registration pages.
+ */
+export const ACTION_LOOKUP_NEGATIVE_CACHE_TTL_MS = 5_000;
+
+/**
  * Component escaping for cache keys.
  *
  * `encodeURIComponent` escapes `:`, `|`, `/` and whitespace, so no component
@@ -47,6 +55,31 @@ export function buildActionLookupCacheKey(scope: {
   return [
     "action-lookup",
     // Org identity is case-insensitive everywhere else in the dashboard.
+    normalizeKeyPart(scope.orgId.toLowerCase(), "orgId"),
+    normalizeKeyPart(scope.network, "network"),
+    normalizeKeyPart(scope.address, "address"),
+    normalizeKeyPart(scope.assetCode, "assetCode"),
+    normalizeKeyPart(scope.assetIssuer, "assetIssuer"),
+  ].join(":");
+}
+
+/**
+ * Build the negative cache key for a lookup that resolved to a missing Action
+ * repo/ref (HTTP 404).
+ *
+ * Uses a distinct `action-lookup-miss` namespace so a negative entry can never
+ * be confused with — or overwrite — a positive result for the same scope. The
+ * scope components are identical to {@link buildActionLookupCacheKey}.
+ */
+export function buildActionLookupNegativeCacheKey(scope: {
+  orgId: string;
+  network: string;
+  address: string;
+  assetCode: string;
+  assetIssuer: string;
+}): string {
+  return [
+    "action-lookup-miss",
     normalizeKeyPart(scope.orgId.toLowerCase(), "orgId"),
     normalizeKeyPart(scope.network, "network"),
     normalizeKeyPart(scope.address, "address"),
