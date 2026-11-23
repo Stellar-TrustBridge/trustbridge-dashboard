@@ -167,6 +167,10 @@ const envSchema = z.object({
   SOROBAN_CONTRACT_ID: z.string().optional(),
   SOROBAN_RPC_URL: httpUrlField("SOROBAN_RPC_URL").optional(),
 
+  // Registry mode selector. When set to "contract" the dashboard must have
+  // both SOROBAN_CONTRACT_ID and SOROBAN_RPC_URL; otherwise it fails closed.
+  NEXT_PUBLIC_REGISTRY_MODE: z.enum(["mock", "contract"]).optional(),
+
   // Webhook secret (optional at boot, but required for org membership sync — requests are rejected if missing)
   GITHUB_WEBHOOK_SECRET: z.string().optional(),
 
@@ -234,6 +238,32 @@ const envSchema = z.object({
         "SOROBAN_RPC_URL is required when SOROBAN_CONTRACT_ID is set; point it at the same Stellar network as NEXT_PUBLIC_HORIZON_URL",
     });
   }
+
+  // Contract registry mode must be fully configured. Half-configured contract
+  // mode corrupts Wave registration attempts, so fail closed at boot with a
+  // stable reason code rather than silently falling back to mock mode.
+  if (env.NEXT_PUBLIC_REGISTRY_MODE === "contract") {
+    const hasContractId = Boolean(env.SOROBAN_CONTRACT_ID && env.SOROBAN_CONTRACT_ID.trim());
+    const hasRpcUrl = Boolean(env.SOROBAN_RPC_URL && env.SOROBAN_RPC_URL.trim());
+
+    if (!hasRpcUrl) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["SOROBAN_RPC_URL"],
+        message:
+          "[registry_mode_missing_rpc] NEXT_PUBLIC_REGISTRY_MODE=contract requires SOROBAN_RPC_URL; set it or switch to mock mode",
+      });
+    }
+
+    if (!hasContractId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["SOROBAN_CONTRACT_ID"],
+        message:
+          "[registry_mode_missing_contract_id] NEXT_PUBLIC_REGISTRY_MODE=contract requires SOROBAN_CONTRACT_ID; set it or switch to mock mode",
+      });
+    }
+  }
 });
 
 export type Environment = z.infer<typeof envSchema>;
@@ -247,23 +277,12 @@ export function validateEnv(): Environment {
   if (!result.success) {
     const errors = result.error.flatten();
     const fieldErrors = Object.entries(errors.fieldErrors)
-      .map(([field, msgs]) => `${field}: ${msgs?.join(", ")}`)
+      .map(([field, messages]) => `  ${field}: ${(messages ?? []).join(", ")}`)
       .join("\n");
-
-    const message = `❌ Environment validation failed:\n${fieldErrors}`;
-    console.error(message);
-
-    throw new Error(message);
+    const formErrors = errors.formErrors.map((m) => `  ${m}`).join("\n");
+    const details = [fieldErrors, formErrors].filter(Boolean).join("\n");
+    throw new Error(`Invalid environment configuration:\n${details}`);
   }
 
   return result.data;
-}
-
-let cachedEnv: Environment | null = null;
-
-export function getValidatedEnv(): Environment {
-  if (!cachedEnv) {
-    cachedEnv = validateEnv();
-  }
-  return cachedEnv;
 }
