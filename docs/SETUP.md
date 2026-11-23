@@ -165,6 +165,24 @@ anymore. If you set `SOROBAN_CONTRACT_ID`, also set `SOROBAN_RPC_URL` to an
 http(s) endpoint on the same network, or boot will stop with a named error.
 See [ENVIRONMENT.md — Boot-time network validation](./ENVIRONMENT.md#boot-time-network-validation-683).
 
+### Contract-backed registry mode (`REGISTRY_MODE=synced`) (#796)
+
+When running in contract-backed mode (`REGISTRY_MODE=synced`), boot validation
+(`src/lib/env-validation.ts`) fails fast unless all Soroban outbox/worker
+variables are configured with real http(s) URLs (no placeholders):
+
+```bash
+REGISTRY_MODE=synced
+SOROBAN_CONTRACT_ID=C...
+SOROBAN_RPC_URL=https://soroban-testnet.stellar.org
+SOROBAN_OUTBOX_WORKER_URL=https://worker.trustbridge.internal/outbox
+SOROBAN_OUTBOX_INTERVAL_MS=15000
+```
+
+If you are developing locally without a Soroban contract or outbox worker, leave
+`REGISTRY_MODE` unset (or set `REGISTRY_MODE=live`). See
+[ENVIRONMENT.md — `REGISTRY_MODE`](./ENVIRONMENT.md#registry_mode).
+
 ---
 
 ## Appendix: Checklist idempotency keys (#688)
