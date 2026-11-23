@@ -149,3 +149,52 @@ export function listSorobanOutbox(): SorobanOutboxEntry[] {
 export function clearSorobanOutbox(): void {
   outbox.clear();
 }
+
+/**
+ * Outbox lag snapshot consumed by the readiness deep health probe
+ * (Issue #772).
+ *
+ * `oldestPendingAgeMs` is the age of the oldest still-undelivered entry
+ * (`PENDING` / `PROCESSING`), or `0` when the outbox is drained. `pending`
+ * counts undelivered entries and `failed` counts entries whose last delivery
+ * attempt threw. The probe in `src/lib/health.ts` compares
+ * `oldestPendingAgeMs` against a configurable threshold to surface silent
+ * outbox lag that would desync Wave on-chain state from the UI.
+ */
+export interface SorobanOutboxLagSnapshot {
+  pending: number;
+  failed: number;
+  oldestPendingAgeMs: number;
+}
+
+/**
+ * Compute the current outbox lag from the in-memory store.
+ *
+ * Read-only and idempotent: repeated calls never mutate entries. Throws are
+ * not swallowed here — the caller (health probe) is responsible for mapping
+ * a query failure to a stable reason code.
+ */
+export function getSorobanOutboxLag(
+  now: number = Date.now(),
+): SorobanOutboxLagSnapshot {
+  let pending = 0;
+  let failed = 0;
+  let oldestPendingAgeMs = 0;
+
+  for (const entry of outbox.values()) {
+    if (entry.status === "PENDING" || entry.status === "PROCESSING") {
+      pending += 1;
+      const createdAt = Date.parse(entry.createdAt);
+      if (!Number.isNaN(createdAt)) {
+        const age = now - createdAt;
+        if (age > oldestPendingAgeMs) {
+          oldestPendingAgeMs = age;
+        }
+      }
+    } else if (entry.status === "FAILED") {
+      failed += 1;
+    }
+  }
+
+  return { pending, failed, oldestPendingAgeMs };
+}
