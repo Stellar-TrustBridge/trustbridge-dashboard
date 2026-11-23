@@ -297,4 +297,25 @@ export function isGraphQLIntrospectionAllowed(): boolean {
   return process.env.GRAPHQL_ALLOW_INTROSPECTION?.trim().toLowerCase() === "true";
 }
 
+/**
+ * Extract the org-scope identifier from a session.
+ *
+ * Returns `session.user.maintainerOrgId` when present (set by the JWT
+ * callback for all sessions created after the multi-org migration).  Falls
+ * back to `"default"` for older sessions that pre-date the field so every
+ * downstream query has a stable, non-null value to filter on.
+ *
+ * Usage:
+ *   const orgId = getMaintainerOrgId(session);
+ *   // then pass to prisma: where: { maintainerOrgId: orgId }
+ */
+export function getMaintainerOrgId(session: Session | null): string {
+  if (!session?.user) return "default";
+  const orgId = (session.user as Record<string, unknown>).maintainerOrgId;
+  if (typeof orgId === "string" && orgId.trim().length > 0) {
+    return orgId.trim();
+  }
+  return "default";
+}
+
 export { hasMinimumRole, ROLE_HIERARCHY };

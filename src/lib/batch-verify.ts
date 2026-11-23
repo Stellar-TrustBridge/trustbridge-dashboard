@@ -36,6 +36,18 @@ export interface BatchVerificationOptions {
   minXlmReserve?: number;
   jobId?: string;
   onProgress?: (event: BatchVerificationProgressEvent) => void | Promise<void>;
+  /**
+   * Optional AbortSignal. When the signal fires, the in-flight worker stops
+   * claiming new addresses after completing the current one, leaving partial
+   * progress safely persisted via `onProgress`. No partial state is discarded —
+   * completed checks remain in `results` and are reflected in the final return
+   * value.
+   *
+   * The abort is cooperative: an already-running verification for a single
+   * address is never interrupted mid-flight (the per-address timeout still
+   * applies). Only the loop that picks the _next_ address checks the signal.
+   */
+  signal?: AbortSignal;
 }
 
 export interface BatchVerificationProgressEvent {
@@ -87,7 +99,7 @@ export async function batchVerify(
   verifyFn: (address: string) => Promise<VerificationCheckResult>,
   options: BatchVerificationOptions = {},
 ): Promise<VerificationCheckResult[]> {
-  const { concurrency = 5, timeout = 10_000, jobId = "batch-verify", onProgress } = options;
+  const { concurrency = 5, timeout = 10_000, jobId = "batch-verify", onProgress, signal } = options;
 
   const results: VerificationCheckResult[] = [];
   const queue = [...verifications];
@@ -97,6 +109,12 @@ export async function batchVerify(
 
   const worker = async () => {
     while (queue.length > 0) {
+      // ── Cancellation checkpoint ────────────────────────────────────────────
+      // Check the signal BEFORE claiming the next address so that completed
+      // results are safely flushed via the emitter before the worker stops.
+      // An already-running per-address check is never interrupted mid-flight.
+      if (signal?.aborted) break;
+
       const item = queue.shift();
       if (!item) break;
 

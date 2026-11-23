@@ -99,10 +99,48 @@ on `--card`, and the border tokens used by visible status badges against their
 surfaces. The shared badge variants have `border-transparent`, so they claim no
 separate non-text boundary.
 
+### Primary-action focus ring contrast (issue #675)
+
+Keyboard focus states on primary buttons are audited in the same Vitest gate:
+
+```bash
+npx vitest run src/lib/dark-mode-contrast-audit.test.ts
+```
+
+The audit covers WCAG 2.1 success criterion **1.4.11 (Non-text Contrast)**,
+which requires a 3:1 ratio between the focus indicator and every adjacent
+colour.
+
+**CSS tokens** (`src/app/globals.css`):
+
+| Token | Light value | Dark value | Requirement |
+|---|---|---|---|
+| `--focus-ring` | `hsl(252, 79%, 38%)` | `hsl(252, 79%, 72%)` | ≥ 3:1 against background, card, and button surface |
+| `--focus-ring-offset` | `hsl(0, 0%, 100%)` (white) | `hsl(222.2, 84%, 4.9%)` (== `--background`) | Offset gap colour |
+
+**What is tested:**
+
+| Test | Minimum ratio |
+|---|---|
+| Dark ring vs `--background` | 3:1 |
+| Dark ring vs `--card` | 3:1 |
+| Dark ring vs dark `--primary` button surface | 3:1 |
+| Light ring vs white background | 3:1 |
+| Light ring vs light `--primary` button surface | 3:1 |
+| Light ring vs `--secondary` button surface | 3:1 |
+| Token ordering: dark ring brighter than dark primary | structural |
+| Token ordering: dark ring not brighter than foreground | structural |
+| Pre-fix ring at L=58% fails 3:1 against background (regression guard) | documents failure |
+
+**When to update snapshots:** updating `--focus-ring` or `--primary` tokens in
+`globals.css` requires re-running the audit and verifying the ratios before
+regenerating Playwright screenshots.
+
 ### Exceptions register
 
-No exceptions are currently approved. Any waiver must be reviewed and given an
-owner and expiry here before the gate is relaxed:
+No exceptions are currently approved for either status chips or focus rings.
+Any waiver must be reviewed and given an owner and expiry here before the gate
+is relaxed:
 
 | Component | Pair | Ratio | Reason | Owner | Expiry |
 |---|---|---|---|---|---|

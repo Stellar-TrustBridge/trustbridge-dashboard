@@ -586,6 +586,22 @@ This section covers the full lifecycle of Soroban integration: the read path tha
 - No caching layer sits in front of this call today (unlike `/api/actions/lookup`, which caches Horizon reads for 30s in `src/lib/cache.ts`); each request re-queries the RPC endpoint. A cache would be a reasonable addition if this panel sees high-frequency polling.
 - Unit coverage: `src/lib/soroban.test.ts` (success, missing config, RPC failure) and `src/app/api/soroban/events/route.test.ts` (maintainer guard: 403 for anonymous/non-maintainer, 200 with the timeline payload for a maintainer).
 
+### Cursor validation for `/api/soroban/events`
+
+`GET /api/soroban/events` accepts an optional `?cursor=` query parameter for pagination.  Validation lives in `src/lib/soroban-cursor.ts`:
+
+| Cursor value | Behaviour |
+|---|---|
+| Omitted or empty string | First page (latest event window). |
+| Whitespace only | Treated as omitted — first page. |
+| `"<ledger>"` e.g. `"12345"` | Decimal ledger sequence — forwarded to the RPC. |
+| `"<ledger>-<event>"` e.g. `"12345-3"` | Ledger + event-index pair — forwarded to the RPC. |
+| Any other value, or string > 128 chars | **400** with `{ error, code: "INVALID_CURSOR", message, remediation }`. |
+
+**Auth fires before cursor validation.** An unauthenticated request with a malformed cursor gets `403`, not `400`, so the route's existence cannot be probed via cursor error responses.
+
+**Org scope.** The session's `maintainerOrgId` is forwarded as `orgId` to `getSorobanEventTimeline()`. Org resolution follows the same `getMaintainerOrgId()` helper used by other maintainer routes — sessions without the field fall back to `"default"`.
+
 ### Write-through path (implemented)
 
 The write-through path is now implemented (`src/lib/soroban-register.ts`), wired into `/api/register`'s `POST` handler, with real on-chain execution logic:

@@ -102,6 +102,40 @@ overwrites that field entirely, so the completed-job result shape is unchanged.
 `useJobProgress()` (`src/lib/use-job-progress.ts`) exposes the event fields to
 the dashboard without closing the stream on `progress`.
 
+### Batch-verify cancellation checkpoints
+
+`batchVerify()` in `src/lib/batch-verify.ts` accepts an optional `signal`
+(`AbortSignal`) in its options bag. When present, the worker checks the signal
+**between addresses** — after recording the current result but before claiming
+the next one.
+
+**Cancellation is cooperative, not preemptive.** A per-address Horizon check
+that is already in-flight runs to completion (or times out). Only the loop
+that picks the _next_ address is interrupted. This means:
+
+- Partial results are never discarded. Every address that completed before the
+  abort appears in both the return value and the `onProgress` stream, so the
+  queue job's persisted `result.progress` reflects real work done.
+- A pre-aborted signal (aborted before `batchVerify` is called) causes the
+  function to return immediately with an empty results array and no Horizon
+  calls.
+- Aborting during a freeze window leaves the job in a cancellable state; the
+  maintainer can retry the job without data loss.
+
+**Triggering cancellation from an API route** — pass the `AbortController`
+signal through the queue job handler:
+
+```ts
+const controller = new AbortController();
+// wire up to request lifecycle / freeze-window detection
+job.signal = controller.signal;
+
+await batchVerify(addresses, verifyFn, { signal: controller.signal });
+```
+
+If the caller never passes `signal`, behaviour is unchanged from before this
+change — the full batch always completes.
+
 ### Security & Protocol Constraints
 - **HTTPS Enforcement**: Unencrypted HTTP (`http://`) endpoints are strictly rejected by the CLI to protect API keys and contributor information.
 - **Log Masking**: API keys and tokens are never printed in full to logs or error outputs.

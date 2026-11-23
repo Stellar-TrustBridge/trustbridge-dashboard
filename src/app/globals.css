@@ -31,6 +31,17 @@
     --input: 214.3 31.8% 91.4%;
     --ring: 252 79% 48%;
     --radius: 0.75rem;
+    /*
+     * Focus ring tokens (issue #675 / primary actions a11y).
+     * `--focus-ring` is the visible outline drawn around focused interactive
+     * elements (buttons, links, inputs). It must clear WCAG 1.4.11 non-text
+     * contrast (3:1) against both the page background and the element's own
+     * surface. `--focus-ring-offset` is the gap between the element border and
+     * the ring; a 2 px offset on a white background creates a visible
+     * light-gap that counts toward the contrast budget.
+     */
+    --focus-ring: 252 79% 38%;
+    --focus-ring-offset: 0 0% 100%;
   }
 
   .dark {
@@ -66,6 +77,16 @@
     --border-strong: 215 20.2% 42%;
     --input: 217.2 32.6% 28%;
     --ring: 252 79% 66%;
+    /*
+     * Dark-mode focus ring tokens.
+     * `--focus-ring` lightness is raised to 72% so the ring clears 3:1 against
+     * the dark card (L≈6%) and the dark background (L≈4.9%).
+     * `--focus-ring-offset` matches `--background` so the gap reads as the
+     * page surface rather than a second ring, keeping the visible focus
+     * indicator to a single high-contrast band.
+     */
+    --focus-ring: 252 79% 72%;
+    --focus-ring-offset: 222.2 84% 4.9%;
   }
 }
 

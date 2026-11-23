@@ -114,6 +114,49 @@ Self-test **must fail the nested scan** (exit 0 from self-test wrapper means fix
 - Binary packing / novel obfuscators may evade static markers — treat unexpected `folderOpen` tasks and text “fonts” as high signal.
 - Scanner does not rotate credentials or quarantine developer machines. If you opened an infected tree in VS Code with auto-tasks enabled, treat the machine as compromised and rotate secrets from a clean device.
 
+## Org membership removal and dashboard access revocation
+
+Removing a user from the GitHub maintainer org triggers immediate session
+revocation via the `POST /api/webhooks/github-org-membership` webhook handler.
+
+### What happens on removal
+
+1. GitHub sends a `membership` event with `action: "member_removed"`.
+2. `revokeSessionsForUser()` (`src/lib/github-org-membership-webhook.ts`) deletes
+   all `Session` rows for that user atomically in a single `deleteMany` call.
+3. An audit log entry records `sessionsRevoked` (count) or `revocationError: true`
+   if the database call failed.
+
+### Delay expectations
+
+The JWT-vs-database session distinction affects how quickly access is terminated:
+
+| Session strategy | Access terminated |
+|---|---|
+| `strategy: "database"` (Prisma adapter) | Immediately on the next request after webhook delivery |
+| `strategy: "jwt"` (default) | After JWT expiry (default 30 days — shorten `maxAge` if needed) |
+
+**During a Wave incident requiring immediate revocation**, switch to database
+sessions (`strategy: "database"`) or rotate `NEXTAUTH_SECRET` to invalidate all
+existing JWTs across all users.
+
+### Race safety
+
+Concurrent `member_removed` webhooks for the same user are both handled safely:
+the first call deletes the existing sessions; the second sees `count: 0` and
+records `sessionsRevoked: 0`. Neither call throws or leaves a partial state.
+
+A `member_removed` followed immediately by a `member_added` does **not**
+re-grant session access: `member_added` only upserts the `User` row (so the
+contributor can register after re-joining), it never creates a `Session` row.
+A fresh OAuth sign-in is required to establish a new session.
+
+### Webhook configuration
+
+Set `GITHUB_WEBHOOK_SECRET` to the secret configured in GitHub's webhook
+settings. Without it every incoming event is rejected with 401 and no sessions
+are revoked. Rotate it in the same procedure as other secrets below.
+
 ## Credential exposure
 
 This tooling **does not** rotate credentials. If malware was confirmed on a machine that had GitHub/npm/cloud access:

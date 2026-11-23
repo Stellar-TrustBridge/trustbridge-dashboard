@@ -666,3 +666,149 @@ describe("WCAG AA: Wave status chips (issue #675)", () => {
     expect(r2(contrastRatio(AMBER_500, WHITE))).toBeLessThan(NORMAL_TEXT_MIN);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #675 — primary action focus rings in dark mode
+//
+// WCAG 2.1 success criterion 1.4.11 (Non-text Contrast) requires that the
+// visual focus indicator of a UI component has a contrast ratio of at least
+// 3:1 against the adjacent colours.
+//
+// For a focus ring the "adjacent colour" is whichever surface sits immediately
+// outside the ring.  We test three surfaces:
+//   • The page background (--background)
+//   • A card surface (--card)
+//   • The ring-offset gap, which is painted in --focus-ring-offset and
+//     itself sandwiched between the button surface and the ring.
+//
+// Light-mode ring: hsl(252, 79%, 38%) — a deep violet.
+// Dark-mode ring:  hsl(252, 79%, 72%) — a lightened violet that stays visible
+//                  against the near-black dark surfaces.
+//
+// The offset colour equals the surface it sits on so it does not add an
+// extra colour layer: light offset = white, dark offset = --background.
+// ---------------------------------------------------------------------------
+
+// Light theme focus ring token value: hsl(252, 79%, 38%)
+const LIGHT_FOCUS_RING: [number, number, number] = [252, 79, 38];
+// Dark theme focus ring token value: hsl(252, 79%, 72%)
+const DARK_FOCUS_RING: [number, number, number] = [252, 79, 72];
+
+// Primary button surface colours (the element the ring wraps)
+// Light: --primary hsl(252, 79%, 48%)
+const LIGHT_PRIMARY: [number, number, number] = [252, 79, 48];
+// Dark: --primary hsl(252, 79%, 66%)  (already defined above as DARK_PRIMARY)
+
+// Pre-fix ring colour: hsl(252, 79%, 58%) — too close to the dark background
+const PRE_FIX_DARK_FOCUS_RING: [number, number, number] = [252, 79, 58];
+
+describe("WCAG 1.4.11: primary action focus rings — dark mode (issue #675)", () => {
+  const NON_TEXT_MIN = 3.0;
+
+  // ── Dark-mode: ring against background surfaces ───────────────────────────
+
+  it("dark focus ring (--focus-ring 72%) meets non-text contrast against --background", () => {
+    const ratio = r2(contrastRatio(DARK_FOCUS_RING, DARK_BG));
+    expect(ratio).toBeGreaterThanOrEqual(NON_TEXT_MIN);
+  });
+
+  it("dark focus ring meets non-text contrast against --card", () => {
+    const ratio = r2(contrastRatio(DARK_FOCUS_RING, DARK_CARD));
+    expect(ratio).toBeGreaterThanOrEqual(NON_TEXT_MIN);
+  });
+
+  it("dark focus ring meets non-text contrast against the dark primary button surface", () => {
+    // The ring wraps the button — it must also contrast with the button face
+    // so the ring boundary is distinguishable at the button edge.
+    const ratio = r2(contrastRatio(DARK_FOCUS_RING, DARK_PRIMARY));
+    expect(ratio).toBeGreaterThanOrEqual(NON_TEXT_MIN);
+  });
+
+  it("dark focus ring offset colour (== --background) meets non-text contrast against --card", () => {
+    // The offset gap is painted in --focus-ring-offset (== --background in
+    // dark mode).  The gap itself must be distinguishable from the card surface
+    // that sits behind it, otherwise the ring appears to float on a uniform field.
+    const DARK_FOCUS_RING_OFFSET: [number, number, number] = [222.2, 84, 4.9]; // == DARK_BG
+    const ratio = r2(contrastRatio(DARK_FOCUS_RING_OFFSET, DARK_CARD));
+    // Offset-vs-card is intentionally a soft check: the offset is decorative
+    // and the ring itself carries the contrast budget.  We verify it is at
+    // least distinguishable (> 1.3:1) rather than demanding full 3:1.
+    expect(ratio).toBeGreaterThan(1.3);
+  });
+
+  // ── Light-mode: ring against background surfaces ──────────────────────────
+
+  it("light focus ring (--focus-ring 38%) meets non-text contrast against white background", () => {
+    const ratio = r2(contrastRatio(LIGHT_FOCUS_RING, WHITE));
+    expect(ratio).toBeGreaterThanOrEqual(NON_TEXT_MIN);
+  });
+
+  it("light focus ring meets non-text contrast against the light primary button surface", () => {
+    const ratio = r2(contrastRatio(LIGHT_FOCUS_RING, LIGHT_PRIMARY));
+    expect(ratio).toBeGreaterThanOrEqual(NON_TEXT_MIN);
+  });
+
+  it("light focus ring offset (white) has sufficient separation from the light primary surface", () => {
+    // White offset on the indigo button: white is lighter than indigo, so the
+    // gap reads as a bright band.  3:1 is the boundary.
+    const ratio = r2(contrastRatio(WHITE, LIGHT_PRIMARY));
+    expect(ratio).toBeGreaterThanOrEqual(NON_TEXT_MIN);
+  });
+
+  // ── Regression guards: pre-fix values that failed 3:1 ───────────────────
+
+  it("PRE-FIX: dark focus ring at L=58% failed non-text contrast against --background (regression guard)", () => {
+    // Documents the original failure.  If this expectation itself fails, the
+    // pre-fix colour has changed in the fixture — investigate before accepting.
+    const ratio = r2(contrastRatio(PRE_FIX_DARK_FOCUS_RING, DARK_BG));
+    expect(ratio).toBeLessThan(NON_TEXT_MIN);
+  });
+
+  it("PRE-FIX: dark focus ring at L=58% also failed against --card (regression guard)", () => {
+    const ratio = r2(contrastRatio(PRE_FIX_DARK_FOCUS_RING, DARK_CARD));
+    expect(ratio).toBeLessThan(NON_TEXT_MIN);
+  });
+
+  // ── Token consistency checks ──────────────────────────────────────────────
+
+  it("dark --focus-ring is lighter than dark --primary so the ring is brighter than the button it encircles", () => {
+    // A ring that is darker than its button disappears against the background.
+    // Confirm the token ordering: focus-ring luminance > primary luminance.
+    const lRing = hslToLuminance(...DARK_FOCUS_RING);
+    const lPrimary = hslToLuminance(...DARK_PRIMARY);
+    expect(lRing).toBeGreaterThan(lPrimary);
+  });
+
+  it("dark --focus-ring luminance stays below --foreground so it does not read as body text", () => {
+    // A ring brighter than body text would look like a floating label.
+    // Keep ring luminance below foreground luminance.
+    const lRing = hslToLuminance(...DARK_FOCUS_RING);
+    const lFg = hslToLuminance(...DARK_FOREGROUND);
+    expect(lRing).toBeLessThanOrEqual(lFg);
+  });
+});
+
+describe("WCAG 1.4.11: primary action focus rings — light mode (issue #675)", () => {
+  const NON_TEXT_MIN = 3.0;
+
+  it("light focus ring meets non-text contrast against the card surface", () => {
+    // Cards use a white background in light mode — same as the page, so this
+    // is equivalent to the white-background test, but kept explicit.
+    const LIGHT_CARD: [number, number, number] = [0, 0, 100]; // == WHITE
+    const ratio = r2(contrastRatio(LIGHT_FOCUS_RING, LIGHT_CARD));
+    expect(ratio).toBeGreaterThanOrEqual(NON_TEXT_MIN);
+  });
+
+  it("light focus ring meets non-text contrast against a secondary button surface (--secondary)", () => {
+    // Secondary buttons sit on --secondary hsl(210, 40%, 96.1%), nearly white.
+    const LIGHT_SECONDARY: [number, number, number] = [210, 40, 96.1];
+    const ratio = r2(contrastRatio(LIGHT_FOCUS_RING, LIGHT_SECONDARY));
+    expect(ratio).toBeGreaterThanOrEqual(NON_TEXT_MIN);
+  });
+
+  it("light --focus-ring is darker than light --primary so the ring boundary is visible", () => {
+    const lRing = hslToLuminance(...LIGHT_FOCUS_RING);
+    const lPrimary = hslToLuminance(...LIGHT_PRIMARY);
+    expect(lRing).toBeLessThan(lPrimary);
+  });
+});

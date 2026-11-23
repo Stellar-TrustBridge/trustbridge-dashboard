@@ -53,8 +53,55 @@ Session flows are exercised by the end-to-end suite. See `docs/E2E_TESTING.md`
 for how to run the E2E tests that cover sign-in, session persistence, and
 sign-out.
 
+## Org membership revocation
+
+When a user is removed from the GitHub maintainer org, the
+`POST /api/webhooks/github-org-membership` endpoint immediately revokes
+all active `Session` rows for that user via `revokeSessionsForUser()`
+(`src/lib/github-org-membership-webhook.ts`).
+
+**How it works:**
+
+1. GitHub delivers a `membership` webhook with `action: "member_removed"`.
+2. The webhook handler resolves the user by `githubUsername` (case-insensitive).
+3. `prisma.session.deleteMany({ where: { userId } })` deletes all sessions in
+   one atomic write — no loop, no TOCTOU window.
+4. Any subsequent request that presents a session token for the removed user
+   finds no matching row and is treated as unauthenticated.
+5. An audit log entry records `sessionsRevoked` count (or `revocationError: true`
+   if the deletion failed).
+
+**Important caveats:**
+
+- The dashboard uses **JWT sessions** by default (`strategy: "jwt"` in
+  `authOptions`). JWTs are self-contained and cannot be revoked server-side
+  until they expire. Session-row deletion only takes effect when the
+  `Session` table is populated (i.e. `strategy: "database"` or when the
+  NextAuth Prisma adapter is active). Operators who rely on immediate JWT
+  invalidation should set a short `maxAge` and pair this with a database
+  session strategy.
+- Revocation failure is **non-fatal**: a Prisma error returns `sessionsRevoked: -1`
+  and sets `revocationError: true` in the audit log but does not cause the
+  webhook to return a non-2xx status. GitHub would otherwise retry, potentially
+  creating duplicate audit entries.
+- The user record and registration data are **not deleted** — the maintainer
+  decides whether to remove the account manually.
+
+**Delay expectations:**
+
+| Scenario | Latency |
+|---|---|
+| Database session strategy | Immediate on next request after webhook delivery |
+| JWT session strategy (default) | Up to JWT `maxAge` (default 30 days) |
+| JWT + short `maxAge` (e.g. 15 min) | At most 15 minutes |
+
+For Wave incidents requiring immediate access termination, switch to database
+sessions or manually invalidate the JWT secret rotation procedure documented
+in [SECURITY_POLINRIDER.md](./SECURITY_POLINRIDER.md).
+
 ## Related documentation
 
 - [`docs/FEATURE_FLAGS.md`](./FEATURE_FLAGS.md) — feature flag configuration.
 - [`docs/CSRF.md`](./CSRF.md) — CSRF protection used with sessions.
 - [`docs/E2E_TESTING.md`](./E2E_TESTING.md) — end-to-end test guide.
+- [`docs/SECURITY_POLINRIDER.md`](./SECURITY_POLINRIDER.md) — incident response and credential rotation.

@@ -31,6 +31,8 @@ export interface ProcessEventResult {
   handled: boolean;
   action: string;
   login: string | null;
+  /** Number of active sessions revoked on member_removed (0 for all other actions). */
+  sessionsRevoked?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -89,6 +91,67 @@ export function verifyWebhookSignature(
 }
 
 // ---------------------------------------------------------------------------
+// Session revocation
+// ---------------------------------------------------------------------------
+
+/**
+ * Immediately revoke all active NextAuth `Session` rows for a given
+ * GitHub login.
+ *
+ * The dashboard uses JWT sessions by default (no server-side `Session` row),
+ * but the NextAuth Prisma adapter creates `Session` rows when database
+ * sessions are enabled.  Deleting the rows forces every future request that
+ * resolves a session token to find nothing — the user is signed out on the
+ * next request regardless of whether the JWT has not yet expired.
+ *
+ * Design decisions:
+ * - **Lookup by githubUsername, not githubId** — the webhook payload carries
+ *   a login string; we do a case-insensitive match so a username that changed
+ *   capitalisation is still revoked.
+ * - **deleteMany, not deleteOne** — a user may have concurrent sessions from
+ *   multiple browsers or devices.  All are revoked atomically so no lingering
+ *   session survives a race where one tab is mid-request.
+ * - **Never throws** — a Prisma error must not block the webhook response or
+ *   leave the audit log silent; callers should handle failures via the return
+ *   value and audit trail.
+ *
+ * Returns the number of sessions deleted, or -1 on error (error is logged).
+ */
+export async function revokeSessionsForUser(login: string): Promise<number> {
+  if (!login || typeof login !== "string" || login.trim().length === 0) {
+    return 0;
+  }
+
+  const normalizedLogin = login.trim().toLowerCase();
+
+  try {
+    // Resolve the user id first so we can target the Session foreign key
+    // exactly, without relying on a cascading join through prisma.session.
+    const user = await prisma.user.findFirst({
+      where: {
+        githubUsername: { equals: normalizedLogin, mode: "insensitive" },
+      },
+      select: { id: true },
+    });
+
+    if (!user) {
+      // No matching user — nothing to revoke, not an error.
+      return 0;
+    }
+
+    const result = await prisma.session.deleteMany({
+      where: { userId: user.id },
+    });
+
+    return result.count;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error("[webhook] revokeSessionsForUser failed:", message);
+    return -1;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Event processor
 // ---------------------------------------------------------------------------
 
@@ -97,8 +160,10 @@ export function verifyWebhookSignature(
  *
  * - `member_added` / `member_invited`: ensures a User row exists for the
  *   GitHub login so the contributor can register immediately after joining.
- * - `member_removed`: marks the registration as needing a re-check (does not
- *   delete data — the maintainer decides what to do).
+ * - `member_removed`: revokes all active dashboard sessions for the removed
+ *   user so access is terminated promptly, without waiting for JWT expiry.
+ *   The user record and registration data are preserved — the maintainer
+ *   decides whether to fully delete the account.
  *
  * All outcomes are appended to the audit log for traceability.
  * The function never throws; unhandled actions are logged and returned with
@@ -135,18 +200,30 @@ export async function processGithubOrgMembershipEvent(
       metadata: { org, role: payload.membership?.role ?? null },
     });
 
-    return { handled: true, action, login };
+    return { handled: true, action, login, sessionsRevoked: 0 };
   }
 
   if (action === "member_removed") {
+    // Revoke sessions before writing the audit log so a concurrent request
+    // that checks the audit log cannot infer whether the session deletion
+    // succeeded or failed independently.
+    let sessionsRevoked = 0;
+    if (login) {
+      sessionsRevoked = await revokeSessionsForUser(login);
+    }
+
     await recordAuditLog({
       action: "webhook.github_org_membership.member_removed",
       actorLogin: payload.sender?.login ?? null,
       targetLabel: login,
-      metadata: { org },
+      metadata: {
+        org,
+        sessionsRevoked: sessionsRevoked >= 0 ? sessionsRevoked : null,
+        revocationError: sessionsRevoked === -1 ? true : undefined,
+      },
     });
 
-    return { handled: true, action, login };
+    return { handled: true, action, login, sessionsRevoked };
   }
 
   // Unrecognised action — log for visibility, return unhandled.
@@ -157,5 +234,5 @@ export async function processGithubOrgMembershipEvent(
     metadata: { action, org },
   });
 
-  return { handled: false, action, login };
+  return { handled: false, action, login, sessionsRevoked: 0 };
 }
