@@ -6,6 +6,33 @@ TrustBridge Dashboard uses **origin validation** (`assertSameOrigin`) for mutati
 
 ---
 
+## Cookie attribute matrix
+
+CSRF and session cookies must be emitted with attributes that match the deployment environment. `src/lib/csrf.ts` exposes `resolveCsrfCookieAttributes()` which returns the attribute matrix below and **fails closed** with a stable reason code when production would emit an insecure cookie.
+
+| Attribute | local / dev / test | production |
+|-----------|--------------------|------------|
+| `SameSite` | `Lax` | `Strict` |
+| `Secure` | `false` (plain HTTP localhost) | `true` (required) |
+| `HttpOnly` | `true` | `true` |
+| `Path` | `/` | `/` |
+| `Max-Age` | `86400` (24h) | `86400` (24h) |
+
+### Fail-closed reason codes
+
+`resolveCsrfCookieAttributes()` throws a `CsrfCookieConfigError` (with a stable `code`) instead of returning an insecure cookie in production:
+
+| Reason code | Trigger |
+|-------------|---------|
+| `CSRF_COOKIE_INSECURE_SAMESITE_NONE` | `SameSite=None` requested without `Secure` |
+| `CSRF_COOKIE_INSECURE_MISSING_SECURE` | Production would emit a cookie with `Secure=false` |
+| `CSRF_COOKIE_INSECURE_SAMESITE` | Production would emit `SameSite=None` (cross-site) |
+| `CSRF_COOKIE_INVALID_MAX_AGE` | `Max-Age` is not a positive integer |
+
+Operators see these codes surfaced through `src/lib/auth.ts` (`describeCsrfCookieConfigError`) so a misconfigured deployment fails loudly at startup rather than silently weakening Wave CSRF defenses. See [DEPLOYMENT — CSRF cookie attributes](./DEPLOYMENT.md#csrf-cookie-attributes) for the operator runbook.
+
+---
+
 ## Threat model
 
 Without CSRF protection, a malicious page could trick an authenticated user into performing unwanted actions:
@@ -89,84 +116,4 @@ field-projected, non-cacheable, and audited without address values. See
 The following maintainer mutation routes are covered by the double-submit cookie integration tests in `src/lib/__tests__/csrf.test.ts`. Each route must reject requests that are missing the `csrf_token` cookie, missing the `x-csrf-token` header, or present a mismatched pair. The tests assert the happy path (matching cookie + header) and at least two distinct failure paths (missing token, mismatched token) for every route below.
 
 | Route | Method | Happy path | Missing token | Mismatched token |
-|-------|--------|------------|---------------|------------------|
-| `/api/maintainer/ban` | POST | 200 | 403 | 403 |
-| `/api/registrations/[id]/restore` | POST | 200 | 403 | 403 |
-| `/api/settings/network` | POST | 200 | 403 | 403 |
-| `/api/settings/feature-flags` | POST | 200 | 403 | 403 |
-
-**Documented exceptions:** none. All maintainer mutation routes enforce the double-submit cookie contract; there are no CSRF-exempt maintainer mutations. Scheduler/API-key callers (e.g. `/api/cron/export`) are exempt only because they carry no browser session cookie — see the API key bearer section below.
-
----
-
-## Webhook routes (signature-based, not CSRF)
-
-Webhook endpoints are public (no session) but use **HMAC signature verification** instead of the browser-origin CSRF mechanism. They do not require `x-csrf-token` because there is no session cookie to steal.
-
-| Route | Method | Signature | Header |
-|-------|--------|-----------|--------|
-| `/api/webhooks/github-org-membership` | POST | HMAC-SHA256 | `X-Hub-Signature-256` |
-| `/api/webhooks/trustbridge-action` | POST | HMAC-SHA256 | `X-TrustBridge-Signature` |
-
-Replay endpoints (admin-only):
-
-| Route | Method | Signature | Header |
-|-------|--------|-----------|--------|
-| `/api/webhooks/github-org-membership/replay` | POST | HMAC-SHA256 | `X-Hub-Signature-256` (admin-only; skipped if `GITHUB_WEBHOOK_SECRET` unset) |
-
----
-
-## API key bearer routes (CSRF-exempt)
-
-Routes protected by **API key bearer tokens** (e.g., `Authorization: Bearer <key>` for cron/scrapers) are CSRF-exempt. There is no browser session cookie to steal, so same-origin CSRF protection is not applicable. However, they still require the API key credentials to be present and valid.
-
-| Route | Method | Auth | Notes |
-|-------|--------|------|-------|
-| `/api/settings/api-keys` | GET, POST | API key (`requireOperator`) | No CSRF (no session) |
-| `/api/settings/api-keys/[id]` | DELETE | API key (`requireOperator`) | No CSRF (no session) |
-| `/api/metrics/prometheus` | GET | Api key or allowlisted | Protected by bearer token |
-
----
-
-## Mechanism
-
-`src/lib/csrf.ts` enforces two layers:
-
-### Layer 1: `assertSameOrigin`
-
-Compares the request `Origin` (falling back to `Referer`) against the configured app origin. Requests with a missing or mismatched origin are rejected with `403`. Non-browser clients (no `Origin`/`Referer`) are allowed through so server-to-server callers keep working.
-
-### Layer 2: `validateCsrfToken` (double-submit cookie)
-
-Reads the `csrf_token` cookie and compares it to the `x-csrf-token` header (or `csrfToken` query param). The pair must be present and equal; otherwise the request is rejected with `403`. This layer is used for sensitive reads and for maintainer mutation routes that must be hardened beyond origin checks.
-
----
-
-## Testing
-
-Run the CSRF integration tests:
-
-```bash
-npm test -- src/lib/__tests__/csrf.test.ts
-```
-
-Expected output (abridged):
-
-```
-PASS src/lib/__tests__/csrf.test.ts
-  double-submit cookie contract
-    ✓ accepts matching cookie + header (happy path)
-    ✓ rejects missing csrf_token cookie
-    ✓ rejects mismatched cookie/header pair
-    ✓ rejects missing x-csrf-token header
-```
-
----
-
-## Client wiring
-
-1. Read the `csrf_token` cookie (set by the server on session bootstrap).
-2. Echo it back as the `x-csrf-token` header on every mutating request.
-3. Send the request from the same origin so `assertSameOrigin` passes.
-
-If the cookie is absent, fetch a fresh token from the session bootstrap endpoint before retrying the mutation.
+|-------|--------|------------|---------
