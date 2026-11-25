@@ -118,6 +118,113 @@ freeze mid-flight leaves no partial privileged state — the route only reads.
 If Horizon is unreachable the route returns `horizon_error` rather than
 reporting `ready`, so a Wave operator never sees a false green.
 
+## Maintainer ban → conflict → restore smoke path (#721)
+
+This is the canonical smoke outline for the moderation flow. It exercises
+`POST /api/maintainer/ban` (see `src/app/api/maintainer/ban/route.ts`) end to
+end: a maintainer bans a contributor, a second ban attempt hits the conflict
+path, and a restore returns the contributor to the active state. Keep this
+section, `docs/MAINTAINER_WORKFLOW.md`, and the ban route consistent — if you
+change a reason code, request field, or status code, update all three.
+
+### 1. Seed / obtain test users
+
+Two identities are required:
+
+- **Maintainer** — a signed-in user whose session carries the maintainer flag.
+  In Playwright, `signInAsContributor(context, page, { isMaintainer: true })`
+  mints a JWT with `isMaintainer: true` (see "Signing in without GitHub").
+- **Target contributor** — a non-maintainer account in the same org scope as
+  the maintainer. Seed it via the existing fixtures (or reuse a contributor
+  created by `register.spec.ts`); record its address so the ban request and
+  the UI assertions reference the same target.
+
+Org scope matters: the ban route only acts on targets within the maintainer's
+org. A target outside that scope must fail (see failure paths below), so seed
+one in-scope and, for the negative case, one out-of-scope address.
+
+### 2. Authenticate as the maintainer
+
+```ts
+await signInAsContributor(context, page, { isMaintainer: true });
+await page.goto("/dashboard");
+```
+
+Assert the maintainer dashboard renders (the contributor table is visible).
+A non-maintainer session must be redirected away — that is the auth failure
+path, covered by `maintainer.spec.ts`.
+
+### 3. CSRF setup for mutating requests
+
+The ban and restore endpoints are mutating `POST`s and are protected by the
+same CSRF scheme documented in `docs/CSRF.md`. Before any ban/restore call:
+
+1. Load a page that issues the CSRF cookie (the dashboard does this on first
+   render). Read the token from the `csrf-token` cookie via
+   `context.cookies()`.
+2. Send the token back in the `x-csrf-token` header on every mutating request.
+   The UI does this automatically; a direct `page.request.post(...)` in a spec
+   must set it explicitly.
+
+```ts
+const csrf = (await context.cookies()).find((c) => c.name === "csrf-token");
+await page.request.post("/api/maintainer/ban", {
+  headers: { "x-csrf-token": csrf!.value },
+  data: { address: targetAddress, reason: "smoke-test" },
+});
+```
+
+**Expected 403 behavior.** A request with a missing, stale, or mismatched
+CSRF token is rejected with `403` and a stable error body — it must not mutate
+state. Assert this explicitly: after a token-less ban attempt, re-fetch the
+contributor and confirm it is still active. This is one of the required
+failure paths.
+
+### 4. Ban
+
+Drive the ban through the UI (open the contributor's row action, confirm the
+ban dialog) so the smoke path covers the real wiring, then assert:
+
+- The API responded `200` and the contributor's status is now banned.
+- The dashboard row reflects the banned state after the invalidate-and-refetch
+  (the same pattern the register spec relies on).
+
+### 5. Conflict path
+
+Re-issue the ban for the already-banned target (or ban an out-of-scope
+address). Assert the documented conflict response — a non-2xx status with a
+stable reason code — and that the contributor's state is unchanged (still
+banned, not double-applied). Repeated invocations must be idempotent where the
+route promises it; the smoke path asserts no partial privileged state is left
+behind.
+
+### 6. Restore
+
+Restore the contributor (the inverse action on the same row / endpoint),
+asserting `200` and that the row returns to the active state. After restore,
+a second restore attempt follows the same conflict/idempotency expectations as
+step 5.
+
+### Failure paths to cover
+
+At minimum, the automated spec must prove:
+
+1. **Missing/stale CSRF token** → `403`, no state change.
+2. **Non-maintainer or out-of-scope target** → rejected with the documented
+   reason code, no state change.
+3. **Repeated ban/restore** → conflict/idempotent response, no partial state.
+
+### Running it
+
+```bash
+npx playwright test tests/e2e/maintainer-ban.spec.ts
+```
+
+Locally, export `NEXTAUTH_SECRET` for both the dev server and the test process
+(or let `tests/e2e/env.ts` supply the fixed default). In CI the secret is set
+by the workflow, so no extra setup is needed.
+
+
 ## Accessibility gate (axe-core)
 
 Issue #142. Each spec file has one test that signs in, loads its page to a
@@ -235,6 +342,7 @@ select and copy the challenge by hand, rather than failing silently.
 
 Use `data-testid`. The user-visible copy on the register page is deliberately
 under revision (`docs/READINESS_MODEL.md`), so specs that match on text are
-brittle. The readiness badge exposes `data-testid="readiness-badge"` with a
-`data-reason` attribute carrying the reason code above, and the recheck control
-exposes `data-testid="readiness-recheck"` — assert on those, not on copy.
+brittle. Prefer test ids and role-based queries. The readiness badge exposes
+`data-testid="readiness-badge"` with a `data-reason` attribute carrying the
+reason code above, and the recheck control exposes
+`data-testid="readiness-recheck"` — assert on those, not on copy.

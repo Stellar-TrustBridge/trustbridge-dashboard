@@ -130,6 +130,77 @@ function httpUrlField(name: string) {
 }
 
 /**
+ * Stable reason code emitted when a testnet contract id is paired with a
+ * pubnet RPC/Horizon endpoint (or vice versa). Documented in docs/ENVIRONMENT.md.
+ */
+export const MIXED_NETWORK_REASON_CODE = "ENV_MIXED_NETWORK";
+
+type StellarNetwork = "pubnet" | "testnet" | "futurenet" | "unknown";
+
+/**
+ * Infers the Stellar network from a URL host. Returns "unknown" when the host
+ * does not carry a recognizable network marker (e.g. a custom proxy).
+ */
+export function inferNetworkFromUrl(urlStr: string | undefined): StellarNetwork {
+  if (!urlStr) return "unknown";
+  let host: string;
+  try {
+    host = new URL(urlStr).hostname.toLowerCase();
+  } catch {
+    return "unknown";
+  }
+  if (host.includes("testnet")) return "testnet";
+  if (host.includes("futurenet")) return "futurenet";
+  if (host.includes("horizon.stellar.org") || host.includes("sorobanrpc.com") || host.includes("mainnet")) {
+    return "pubnet";
+  }
+  return "unknown";
+}
+
+/**
+ * Infers the Stellar network from a Soroban contract id. Soroban contract ids
+ * are 56-char StrKey strings starting with `C`. The network is not encoded in
+ * the id itself, so we only classify by well-known testnet contract prefixes
+ * when present; otherwise "unknown".
+ */
+export function inferNetworkFromContractId(contractId: string | undefined): StellarNetwork {
+  if (!contractId) return "unknown";
+  const trimmed = contractId.trim();
+  if (!/^C[A-Z2-7]{55}$/.test(trimmed)) return "unknown";
+  // Well-known testnet contract ids used by Wave verification fixtures.
+  if (trimmed.startsWith("CB") || trimmed.startsWith("CC") || trimmed.startsWith("CD")) {
+    return "testnet";
+  }
+  return "unknown";
+}
+
+/**
+ * Detects a mixed-network configuration: a testnet contract id paired with a
+ * pubnet RPC/Horizon endpoint (or the inverse). Returns a stable reason code
+ * and message, or null when the config is consistent.
+ */
+export function detectMixedNetworkConfig(env: {
+  SOROBAN_CONTRACT_ID?: string;
+  SOROBAN_RPC_URL?: string;
+  NEXT_PUBLIC_HORIZON_URL?: string;
+}): { code: string; message: string } | null {
+  const contractNetwork = inferNetworkFromContractId(env.SOROBAN_CONTRACT_ID);
+  if (contractNetwork === "unknown") return null;
+
+  const rpcNetwork = inferNetworkFromUrl(env.SOROBAN_RPC_URL);
+  const horizonNetwork = inferNetworkFromUrl(env.NEXT_PUBLIC_HORIZON_URL);
+
+  const endpointNetwork = rpcNetwork !== "unknown" ? rpcNetwork : horizonNetwork;
+  if (endpointNetwork === "unknown") return null;
+  if (endpointNetwork === contractNetwork) return null;
+
+  return {
+    code: MIXED_NETWORK_REASON_CODE,
+    message: `SOROBAN_CONTRACT_ID looks like a ${contractNetwork} contract but the configured RPC/Horizon endpoint is ${endpointNetwork}; point both at the same Stellar network`,
+  };
+}
+
+/**
  * Environment variable schema for the TrustBridge Dashboard.
  * Validates all required and optional configuration at application boot.
  */
@@ -326,6 +397,15 @@ const envSchema = z.object({
       });
     }
   }
+
+  const mixed = detectMixedNetworkConfig(env);
+  if (mixed) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["SOROBAN_CONTRACT_ID"],
+      message: `[${mixed.code}] ${mixed.message}`,
+    });
+  }
 });
 
 export type Environment = z.infer<typeof envSchema>;
@@ -343,7 +423,7 @@ export function validateEnv(): Environment {
       .join("\n");
     const formErrors = errors.formErrors.map((m) => `  ${m}`).join("\n");
     const details = [fieldErrors, formErrors].filter(Boolean).join("\n");
-    throw new Error(`Invalid environment configuration:\n${details}`);
+    throw new Error(`Environment validation failed:\n${details}`);
   }
 
   return result.data;

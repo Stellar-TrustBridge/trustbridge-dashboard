@@ -6,6 +6,7 @@ import { authOptions } from "@/lib/auth";
 import { assertSameOrigin } from "@/lib/csrf";
 import {
   buildNotReadyEmailBody,
+  resolveNudgeLocale,
   sendEmailNotification,
 } from "@/lib/email";
 import { prisma } from "@/lib/prisma";
@@ -104,13 +105,26 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  let requestedLocale: string | undefined;
+  try {
+    const payload = await request.json();
+    if (payload && typeof payload.locale === "string") {
+      requestedLocale = payload.locale;
+    }
+  } catch {
+    // No body or non-JSON body: fall back to the default locale.
+  }
+
+  const locale = resolveNudgeLocale(requestedLocale);
+
   const notReady = await loadNotReadyContributors();
   let sentCount = 0;
 
   for (const contributor of notReady) {
     const body = buildNotReadyEmailBody(
       contributor.githubUsername ?? "unknown",
-      contributor.reason
+      contributor.reason,
+      locale
     );
 
     const sent = await sendEmailNotification({
@@ -130,11 +144,14 @@ export async function POST(request: NextRequest) {
     metadata: {
       sentCount,
       totalNotReady: notReady.length,
+      locale,
+      requestedLocale: requestedLocale ?? null,
     },
   });
 
   return NextResponse.json({
     sentCount,
     totalNotReady: notReady.length,
+    locale,
   });
 }

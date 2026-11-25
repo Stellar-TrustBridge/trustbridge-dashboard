@@ -1,4 +1,9 @@
 import type { HorizonCheckResult } from "@/types";
+import {
+  ACTION_LOOKUP_BUDGET_MS,
+  createTimeoutBudget,
+  type TimeoutBudget,
+} from "@/lib/action-lookup";
 
 /**
  * Client-side wrapper around `POST /api/check`.
@@ -15,7 +20,7 @@ import type { HorizonCheckResult } from "@/types";
  *    change — we only need to recognize the existing convention.
  *  - Anything else non-2xx is a generic error.
  *  - The request itself can hang (Horizon retries/circuit breaker can sit
- *    for a while), so this wrapper applies its own 10 s timeout via an
+ *    for a while), so this wrapper applies its own timeout via an
  *    `AbortController` and also relays a caller-provided AbortSignal.
  *
  * This helper normalizes all of that into a single discriminated union so
@@ -25,10 +30,11 @@ import type { HorizonCheckResult } from "@/types";
  * 429/5xx responses) are retried a bounded number of times. Every attempt
  * carries the same `Idempotency-Key` for correlation, but `/api/check` is a
  * read-only Horizon check and does not dedupe requests on that header.
-
- * for a single logical check reuses the same `Idempotency-Key` header so the
- * server can dedupe side effects (e.g. recheck notifications) and a retried
- * request never double-applies them.
+ *
+ * Timeout budget: the per-attempt timeout is derived from a shared
+ * `TimeoutBudget` (see `src/lib/action-lookup.ts`) so the action lookup and
+ * the check call together cannot exceed the UX SLA. When no budget is
+ * supplied, a fresh one is created from `ACTION_LOOKUP_BUDGET_MS`.
  *
  * Circuit-breaker isolation: the dashboard talks to two independent
  * dependencies — Horizon (contributor checks, via `/api/check`) and Soroban
@@ -46,7 +52,11 @@ import type { HorizonCheckResult } from "@/types";
  * `docs/BREAKING_CHANGES.md`.
  */
 
-/** How long to wait for `/api/check` before treating the request as timed out. */
+/**
+ * Default per-attempt timeout for `/api/check` when no shared budget is
+ * supplied. Kept as a named export for backwards compatibility; the actual
+ * timeout is capped by the remaining shared budget at call time.
+ */
 export const CHECK_TIMEOUT_MS = 10_000;
 
 /** Maximum number of attempts (initial + retries) for a single check. */
@@ -87,6 +97,7 @@ export type CheckOutcome =
   | { kind: "rate_limited"; retryAfterSeconds: number | null; errors: string[] }
   | { kind: "circuit_open"; errors: string[] }
   | { kind: "timeout" }
+  | { kind: "budget_exhausted" }
   | { kind: "aborted" }
   | { kind: "network_error" }
   | {
@@ -187,6 +198,7 @@ function sleep(ms: number, signal?: AbortSignal): Promise<"slept" | "aborted"> {
 function isRetryable(outcome: CheckOutcome): boolean {
   switch (outcome.kind) {
     case "aborted":
+    case "budget_exhausted":
       return false;
     case "schema_error":
       return false;
@@ -291,18 +303,28 @@ async function readCheckPayload(
  * Perform a single attempt against `/api/check`. Never throws — all failure
  * modes are represented as outcomes. A caller abort wins over the internal
  * timeout so cancellation is never mislabelled as a slow Horizon request.
+ * The per-attempt timeout is capped by the remaining shared budget.
  */
 async function attemptCheck(
   address: string,
-  options: { assetCode?: string; assetIssuer?: string; signal?: AbortSignal },
+  options: {
+    assetCode?: string;
+    assetIssuer?: string;
+    signal?: AbortSignal;
+    budget: TimeoutBudget;
+  },
   idempotencyKey: string
 ): Promise<CheckOutcome> {
   if (options.signal?.aborted) return { kind: "aborted" };
 
+  const slice = options.budget.sliceMs();
+  if (slice === null) return { kind: "budget_exhausted" };
+  const timeoutMs = Math.min(CHECK_TIMEOUT_MS, slice);
+
   const controller = new AbortController();
   const relayAbort = () => controller.abort();
   options.signal?.addEventListener("abort", relayAbort, { once: true });
-  const timer = setTimeout(() => controller.abort(), CHECK_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const response = await fetch("/api/check", {
@@ -363,33 +385,46 @@ async function attemptCheck(
 }
 
 /**
- * Run a check against `/api/check`, retrying transient failures with bounded
- * exponential backoff. Returns a normalized `CheckOutcome`; never throws.
+ * Run a check against `/api/check`, retrying transient failures within the
+ * shared timeout budget. When no budget is supplied a fresh one is created
+ * from `ACTION_LOOKUP_BUDGET_MS`, so a standalone check still respects the
+ * same UX SLA as the combined Wave registration flow.
  */
 export async function checkAddress(
   address: string,
-  options: { assetCode?: string; assetIssuer?: string; signal?: AbortSignal } = {}
+  options: {
+    assetCode?: string;
+    assetIssuer?: string;
+    signal?: AbortSignal;
+    budget?: TimeoutBudget;
+  } = {}
 ): Promise<CheckOutcome> {
+  const budget = options.budget ?? createTimeoutBudget(ACTION_LOOKUP_BUDGET_MS);
   const idempotencyKey = createIdempotencyKey();
+
   let lastOutcome: CheckOutcome = { kind: "network_error" };
 
   for (let attempt = 0; attempt < CHECK_MAX_ATTEMPTS; attempt++) {
-    if (attempt > 0) {
-      const backoff = CHECK_RETRY_BASE_MS * 2 ** (attempt - 1);
-      const slept = await sleep(backoff, options.signal);
-      if (slept === "aborted") return { kind: "aborted" };
-    }
+    if (options.signal?.aborted) return { kind: "aborted" };
+    if (budget.isExhausted()) return { kind: "budget_exhausted" };
 
-    const outcome = await attemptCheck(address, options, idempotencyKey);
+    const outcome = await attemptCheck(
+      address,
+      { ...options, budget },
+      idempotencyKey
+    );
     lastOutcome = outcome;
 
-    if (outcome.kind === "ok" || outcome.kind === "aborted") {
-      return outcome;
-    }
+    if (outcome.kind === "ok" || outcome.kind === "aborted") return outcome;
+    if (outcome.kind === "budget_exhausted") return outcome;
+    if (!isRetryable(outcome)) return outcome;
+    if (attempt === CHECK_MAX_ATTEMPTS - 1) return outcome;
 
-    if (!isRetryable(outcome)) {
-      return outcome;
-    }
+    const backoff = CHECK_RETRY_BASE_MS * 2 ** attempt;
+    if (budget.remainingMs() <= backoff) return outcome;
+
+    const slept = await sleep(backoff, options.signal);
+    if (slept === "aborted") return { kind: "aborted" };
   }
 
   return lastOutcome;
