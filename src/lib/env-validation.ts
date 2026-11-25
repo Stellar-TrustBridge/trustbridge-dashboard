@@ -2,6 +2,25 @@ import "server-only";
 
 import { z } from "zod";
 
+import {
+  isContractBackedRegistryMode,
+  parseRegistryMode,
+  VALID_REGISTRY_MODES,
+  type RegistryMode,
+} from "@/lib/registry-mode";
+
+export const ENV_VALIDATION_REASON_CODES = {
+  INVALID_REGISTRY_MODE: "INVALID_REGISTRY_MODE",
+  OUTBOX_WORKER_URL_REQUIRED: "OUTBOX_WORKER_URL_REQUIRED",
+  CONTRACT_ID_REQUIRED: "CONTRACT_ID_REQUIRED",
+  SOROBAN_RPC_URL_REQUIRED: "SOROBAN_RPC_URL_REQUIRED",
+} as const;
+
+export type EnvValidationReasonCode =
+  (typeof ENV_VALIDATION_REASON_CODES)[keyof typeof ENV_VALIDATION_REASON_CODES];
+
+const MAX_HTTP_URL_LENGTH = 2048;
+
 /**
  * Database connection pool configuration parsed from DATABASE_URL.
  */
@@ -77,20 +96,21 @@ function isPlaceholderUrl(value: string): boolean {
   const normalized = value.trim().toLowerCase();
   return (
     !normalized ||
-    /<[^>]*>|\.\.\.|change[-_ ]?me|placeholder|replace[-_ ]?me|your[-_ ]?(url|horizon|rpc)|example\.(com|org|net)|^(todo|tbd|none|null|undefined|x+)$/.test(
+    /<[^>]*>|\.\.\.|change[-_ ]?me|placeholder|replace[-_ ]?me|your[-_ ]?(url|horizon|rpc|worker)|example\.(com|org|net)|^(todo|tbd|none|null|undefined|x+)$/.test(
       normalized
     )
   );
 }
 
 /**
- * Required-or-explicitly-optional HTTP(S) URL field. Rejects non-http schemes
- * and placeholder values that would otherwise pass Zod's generic `.url()`.
+ * Required-or-explicitly-optional HTTP(S) URL field. Rejects non-http schemes,
+ * oversized URLs, and placeholder values that would otherwise pass Zod's generic `.url()`.
  */
 function httpUrlField(name: string) {
   return z
     .string()
     .min(1, `${name} is required`)
+    .max(MAX_HTTP_URL_LENGTH, `${name} must be at most ${MAX_HTTP_URL_LENGTH} characters`)
     .url(`${name} must be a valid URL`)
     .refine(
       (value) => {
@@ -162,10 +182,29 @@ const envSchema = z.object({
     .optional()
     .default("0.5"),
 
-  // Soroban configuration. The RPC URL is optional only when there is no
-  // contract ID; the cross-field check below enforces that pairing.
+  // Soroban & registry-mode configuration.
+  // In contract-backed mode (REGISTRY_MODE=synced), SOROBAN_CONTRACT_ID,
+  // SOROBAN_RPC_URL, and SOROBAN_OUTBOX_WORKER_URL are all required at boot.
+  REGISTRY_MODE: z
+    .string()
+    .optional()
+    .transform((v) => (v === undefined ? "" : v.trim().toLowerCase()))
+    .refine(
+      (v) =>
+        v === "" ||
+        (VALID_REGISTRY_MODES as readonly string[]).includes(v),
+      `REGISTRY_MODE must be one of ${VALID_REGISTRY_MODES.join(", ")} [${ENV_VALIDATION_REASON_CODES.INVALID_REGISTRY_MODE}]`
+    )
+    .transform((v): RegistryMode => parseRegistryMode(v)),
   SOROBAN_CONTRACT_ID: z.string().optional(),
   SOROBAN_RPC_URL: httpUrlField("SOROBAN_RPC_URL").optional(),
+  SOROBAN_OUTBOX_WORKER_URL: httpUrlField("SOROBAN_OUTBOX_WORKER_URL").optional(),
+  SOROBAN_OUTBOX_INTERVAL_MS: z
+    .string()
+    .transform((v) => parseInt(v, 10))
+    .pipe(z.number().int().positive())
+    .optional()
+    .default("15000"),
 
   // Webhook secret (optional at boot, but required for org membership sync — requests are rejected if missing)
   GITHUB_WEBHOOK_SECRET: z.string().optional(),
@@ -226,12 +265,35 @@ const envSchema = z.object({
     .optional()
     .default("60000"),
 }).superRefine((env, ctx) => {
-  if (env.SOROBAN_CONTRACT_ID && !env.SOROBAN_RPC_URL) {
+  const contractBacked = isContractBackedRegistryMode(env.REGISTRY_MODE);
+
+  if (contractBacked) {
+    if (!env.SOROBAN_OUTBOX_WORKER_URL) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["SOROBAN_OUTBOX_WORKER_URL"],
+        message: `SOROBAN_OUTBOX_WORKER_URL is required when REGISTRY_MODE=synced (contract-backed registry mode); set it to your outbox worker http(s) URL or switch REGISTRY_MODE=live [${ENV_VALIDATION_REASON_CODES.OUTBOX_WORKER_URL_REQUIRED}]`,
+      });
+    }
+    if (!env.SOROBAN_CONTRACT_ID?.trim()) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["SOROBAN_CONTRACT_ID"],
+        message: `SOROBAN_CONTRACT_ID is required when REGISTRY_MODE=synced (contract-backed registry mode) [${ENV_VALIDATION_REASON_CODES.CONTRACT_ID_REQUIRED}]`,
+      });
+    }
+    if (!env.SOROBAN_RPC_URL) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["SOROBAN_RPC_URL"],
+        message: `SOROBAN_RPC_URL is required when REGISTRY_MODE=synced (contract-backed registry mode); point it at the same Stellar network as NEXT_PUBLIC_HORIZON_URL [${ENV_VALIDATION_REASON_CODES.SOROBAN_RPC_URL_REQUIRED}]`,
+      });
+    }
+  } else if (env.SOROBAN_CONTRACT_ID && !env.SOROBAN_RPC_URL) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       path: ["SOROBAN_RPC_URL"],
-      message:
-        "SOROBAN_RPC_URL is required when SOROBAN_CONTRACT_ID is set; point it at the same Stellar network as NEXT_PUBLIC_HORIZON_URL",
+      message: `SOROBAN_RPC_URL is required when SOROBAN_CONTRACT_ID is set; point it at the same Stellar network as NEXT_PUBLIC_HORIZON_URL [${ENV_VALIDATION_REASON_CODES.SOROBAN_RPC_URL_REQUIRED}]`,
     });
   }
 });

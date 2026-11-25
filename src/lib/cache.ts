@@ -10,12 +10,31 @@ interface CacheEntry<T> {
 }
 
 /**
- * Generic in-memory cache with TTL and statistics.
+ * Generic in-memory cache with TTL, statistics, and single-flight
+ * coalescing.
+ *
+ * ## Single-flight / cache-stampede prevention
+ *
+ * When multiple concurrent callers all miss the same key simultaneously
+ * (e.g. a cold cache on first request after deploy, or after a TTL expiry
+ * during a traffic spike), `getOrCompute` runs the factory exactly **once**
+ * and shares the resulting promise with every waiter.  Only the first caller
+ * through actually invokes the factory; the rest attach to the same
+ * in-flight promise and receive the same result.  On factory failure the
+ * in-flight entry is removed so the next attempt retries rather than
+ * replaying the error.
+ *
+ * This prevents the "thundering herd" problem on expensive DB aggregates
+ * such as `getDashboardStats()` where a single cold miss can fan out into
+ * hundreds of simultaneous `prisma.registration.findMany` calls during a
+ * registration open day.
  */
 export class CacheStore<T> {
   private store = new Map<string, CacheEntry<T>>();
   private readonly defaultTtlMs: number;
   private stats = { hits: 0, misses: 0, evictions: 0 };
+  /** In-flight factory promises indexed by cache key. */
+  private inflight = new Map<string, Promise<T>>();
 
   constructor(defaultTtlMs: number = 60_000) {
     this.defaultTtlMs = defaultTtlMs;
@@ -55,21 +74,55 @@ export class CacheStore<T> {
   }
 
   /**
-   * Get or compute a value with fallback.
+   * Get a cached value or compute it with single-flight coalescing.
+   *
+   * On a cache hit the stored value is returned immediately.
+   *
+   * On a cache miss the factory is called **at most once** per key,
+   * regardless of how many concurrent callers reach this method
+   * simultaneously.  Every concurrent caller attaches to the same
+   * in-flight `Promise`; they all receive the result when the factory
+   * resolves.  If the factory rejects, the in-flight entry is removed so
+   * the next invocation retries rather than replaying the rejection.
+   *
+   * This is the primary defence against cache-stampede / thundering-herd
+   * during open-registration spikes where `GET /api/stats` can receive
+   * hundreds of concurrent requests on a cold cache.
    */
   async getOrCompute(
     key: string,
     fn: () => Promise<T>,
     ttlMs?: number,
   ): Promise<T> {
+    // Fast path — cache hit.
     const cached = this.get(key);
     if (cached !== null) {
       return cached;
     }
 
-    const data = await fn();
-    this.set(key, data, ttlMs);
-    return data;
+    // Single-flight path — reuse an in-flight promise if one already exists.
+    const existing = this.inflight.get(key);
+    if (existing) {
+      return existing;
+    }
+
+    // Slow path — start the factory and register the promise so concurrent
+    // callers coalesce onto it.
+    const promise = fn().then(
+      (data) => {
+        this.inflight.delete(key);
+        this.set(key, data, ttlMs);
+        return data;
+      },
+      (err) => {
+        // On failure remove the in-flight entry so the next caller retries.
+        this.inflight.delete(key);
+        throw err;
+      },
+    );
+
+    this.inflight.set(key, promise);
+    return promise;
   }
 
   /**
@@ -95,10 +148,17 @@ export class CacheStore<T> {
   }
 
   /**
-   * Clear all cache entries.
+   * Clear all cache entries and cancel in-flight tracking.
+   *
+   * In-flight promises that have already started are not aborted (they can't
+   * be), but their results will not be stored after this call because the
+   * key's resolution callback calls `set` on a fresh store.  Tests that call
+   * `reset()` between cases must `await` any outstanding promises they want
+   * to discard before asserting on store state.
    */
   clear(): void {
     this.store.clear();
+    this.inflight.clear();
     this.stats = { hits: 0, misses: 0, evictions: 0 };
   }
 

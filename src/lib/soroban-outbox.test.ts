@@ -1,11 +1,23 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  claimNextSorobanOutboxEntries,
+  claimSorobanOutboxEntry,
   clearSorobanOutbox,
+  completeSorobanOutboxClaim,
+  drainSorobanOutboxWithLease,
   enqueueSorobanOutbox,
+  failSorobanOutboxClaim,
   getSorobanOutboxEntry,
   listSorobanOutbox,
+  MAX_OUTBOX_BATCH_SIZE,
+  MAX_OUTBOX_LEASE_MS,
+  MAX_OUTBOX_WORKER_ID_LENGTH,
+  releaseSorobanOutboxClaim,
+  resolveOutboxLeaseMs,
   setSorobanOutboxSink,
+  SOROBAN_OUTBOX_REASON_CODES,
+  SorobanOutboxError,
   type SorobanOutboxEntry,
 } from "./soroban-outbox";
 
@@ -253,5 +265,349 @@ describe("in-memory Soroban outbox", () => {
     expect(entry.id).toBe("large-payload");
     expect(duplicate).toBe(entry);
     expect(listSorobanOutbox()).toEqual([entry]);
+  });
+});
+
+describe("Soroban outbox exactly-once delivery claims under concurrency (Issue #793)", () => {
+  const originalLeaseEnv = process.env.SOROBAN_OUTBOX_LEASE_MS;
+
+  beforeEach(() => {
+    clearSorobanOutbox();
+    setSorobanOutboxSink(undefined);
+    delete process.env.SOROBAN_OUTBOX_LEASE_MS;
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+  });
+
+  afterEach(() => {
+    clearSorobanOutbox();
+    setSorobanOutboxSink(undefined);
+    if (originalLeaseEnv === undefined) {
+      delete process.env.SOROBAN_OUTBOX_LEASE_MS;
+    } else {
+      process.env.SOROBAN_OUTBOX_LEASE_MS = originalLeaseEnv;
+    }
+    vi.useRealTimers();
+  });
+
+  it("guarantees exactly-once delivery across many concurrent workers draining a shared outbox", async () => {
+    const totalEntries = 60;
+    const workerCount = 12;
+
+    for (let i = 0; i < totalEntries; i++) {
+      await enqueueSorobanOutbox(
+        { registrationId: `reg-${i}`, index: i },
+        { idempotencyKey: `entry-${i}` },
+      );
+    }
+
+    const deliveryCounts = new Map<string, number>();
+    const sink = vi.fn(async (entry: SorobanOutboxEntry) => {
+      // Yield across microtasks / event loop ticks to maximize interleaving.
+      await Promise.resolve();
+      await new Promise((resolve) => setTimeout(resolve, (entry.id.length % 3) + 1));
+      deliveryCounts.set(entry.id, (deliveryCounts.get(entry.id) ?? 0) + 1);
+    });
+
+    const results = await Promise.all(
+      Array.from({ length: workerCount }, (_, workerIndex) =>
+        drainSorobanOutboxWithLease({
+          workerId: `worker-${workerIndex}`,
+          sink,
+          batchSize: 10,
+          leaseMs: 30_000,
+        }),
+      ),
+    );
+
+    const totalClaimed = results.reduce((sum, r) => sum + r.claimedCount, 0);
+    const totalDelivered = results.reduce((sum, r) => sum + r.deliveredCount, 0);
+    const totalFailed = results.reduce((sum, r) => sum + r.failedCount, 0);
+
+    expect(totalClaimed).toBe(totalEntries);
+    expect(totalDelivered).toBe(totalEntries);
+    expect(totalFailed).toBe(0);
+    expect(sink).toHaveBeenCalledTimes(totalEntries);
+    expect(deliveryCounts.size).toBe(totalEntries);
+
+    for (let i = 0; i < totalEntries; i++) {
+      const id = `entry-${i}`;
+      expect(deliveryCounts.get(id)).toBe(1);
+      const stored = getSorobanOutboxEntry(id);
+      expect(stored?.status).toBe("COMPLETED");
+      expect(stored?.leaseOwner).toBeUndefined();
+      expect(stored?.leaseToken).toBeUndefined();
+      expect(stored?.leaseExpiresAt).toBeUndefined();
+    }
+
+    // Repeated invocations are idempotent: a follow-up drain claims nothing.
+    const followUp = await drainSorobanOutboxWithLease({
+      workerId: "worker-followup",
+      sink,
+      batchSize: 10,
+    });
+    expect(followUp).toMatchObject({
+      claimedCount: 0,
+      deliveredCount: 0,
+      failedCount: 0,
+    });
+    expect(sink).toHaveBeenCalledTimes(totalEntries);
+  });
+
+  it("allows only one concurrent worker to claim a single entry under contention", async () => {
+    await enqueueSorobanOutbox({ registrationId: "hot-1" }, { idempotencyKey: "hot-entry" });
+
+    const attempts = await Promise.all(
+      Array.from({ length: 25 }, (_, i) =>
+        Promise.resolve().then(() =>
+          claimSorobanOutboxEntry("hot-entry", {
+            workerId: `contender-${i}`,
+            leaseMs: 15_000,
+          }),
+        ),
+      ),
+    );
+
+    const winners = attempts.filter((r) => r.claimed);
+    const losers = attempts.filter((r) => !r.claimed);
+
+    expect(winners).toHaveLength(1);
+    expect(losers).toHaveLength(24);
+    for (const loser of losers) {
+      if (!loser.claimed) {
+        expect(loser.reasonCode).toBe(SOROBAN_OUTBOX_REASON_CODES.ALREADY_CLAIMED);
+      }
+    }
+  });
+
+  it("reclaims an expired lease and rejects stale fencing tokens from stalled workers", async () => {
+    await enqueueSorobanOutbox({ registrationId: "reg-lease" }, { idempotencyKey: "lease-1" });
+
+    const firstClaim = claimSorobanOutboxEntry("lease-1", {
+      workerId: "worker-stalled",
+      leaseMs: 5_000,
+    });
+    expect(firstClaim.claimed).toBe(true);
+    if (!firstClaim.claimed) throw new Error("expected initial claim to succeed");
+    expect(firstClaim.reclaimedExpiredLease).toBe(false);
+
+    // Before expiry, a second worker is rejected.
+    vi.setSystemTime(new Date("2026-01-01T00:00:04.999Z"));
+    const earlyAttempt = claimSorobanOutboxEntry("lease-1", {
+      workerId: "worker-fast",
+      leaseMs: 5_000,
+    });
+    expect(earlyAttempt).toEqual({
+      claimed: false,
+      reasonCode: SOROBAN_OUTBOX_REASON_CODES.ALREADY_CLAIMED,
+    });
+
+    // At expiry, the second worker reclaims the entry with a new fencing token.
+    vi.setSystemTime(new Date("2026-01-01T00:00:05.000Z"));
+    const reclaimed = claimSorobanOutboxEntry("lease-1", {
+      workerId: "worker-fast",
+      leaseMs: 10_000,
+    });
+    expect(reclaimed.claimed).toBe(true);
+    if (!reclaimed.claimed) throw new Error("expected reclaim to succeed");
+    expect(reclaimed.reclaimedExpiredLease).toBe(true);
+    expect(reclaimed.leaseToken).not.toBe(firstClaim.leaseToken);
+    expect(reclaimed.entry.leaseOwner).toBe("worker-fast");
+
+    // Stalled worker wakes up and attempts to complete, fail, or release using its stale token.
+    expect(completeSorobanOutboxClaim("lease-1", firstClaim.leaseToken)).toEqual({
+      ok: false,
+      reasonCode: SOROBAN_OUTBOX_REASON_CODES.STALE_LEASE_TOKEN,
+    });
+    expect(
+      failSorobanOutboxClaim("lease-1", firstClaim.leaseToken, new Error("late timeout")),
+    ).toEqual({
+      ok: false,
+      reasonCode: SOROBAN_OUTBOX_REASON_CODES.STALE_LEASE_TOKEN,
+    });
+    expect(releaseSorobanOutboxClaim("lease-1", firstClaim.leaseToken)).toEqual({
+      ok: false,
+      reasonCode: SOROBAN_OUTBOX_REASON_CODES.STALE_LEASE_TOKEN,
+    });
+
+    // Active owner completes cleanly and prevents any further claims.
+    const completed = completeSorobanOutboxClaim("lease-1", reclaimed.leaseToken);
+    expect(completed.ok).toBe(true);
+    expect(getSorobanOutboxEntry("lease-1")?.status).toBe("COMPLETED");
+    expect(
+      claimSorobanOutboxEntry("lease-1", { workerId: "worker-late" }),
+    ).toEqual({
+      claimed: false,
+      reasonCode: SOROBAN_OUTBOX_REASON_CODES.ALREADY_COMPLETED,
+    });
+  });
+
+  it("requeues transient failures with actionable errors and stops claiming after maxAttempts", async () => {
+    await enqueueSorobanOutbox({ registrationId: "reg-flaky" }, { idempotencyKey: "flaky-1" });
+
+    const failResult = await drainSorobanOutboxWithLease({
+      workerId: "worker-1",
+      maxAttempts: 2,
+      sink: async () => {
+        throw new Error("Soroban RPC 503 unavailable");
+      },
+    });
+    expect(failResult).toMatchObject({
+      claimedCount: 1,
+      deliveredCount: 0,
+      failedCount: 1,
+    });
+
+    const afterFirstFail = getSorobanOutboxEntry("flaky-1");
+    expect(afterFirstFail).toMatchObject({
+      status: "PENDING",
+      attempts: 1,
+      lastError: "Soroban RPC 503 unavailable",
+    });
+    expect(afterFirstFail?.leaseToken).toBeUndefined();
+
+    // Exhausting maxAttempts transitions the entry to terminal FAILED.
+    const terminalFail = await drainSorobanOutboxWithLease({
+      workerId: "worker-2",
+      maxAttempts: 2,
+      sink: async () => {
+        throw new Error("Soroban RPC timeout");
+      },
+    });
+    expect(terminalFail).toMatchObject({
+      claimedCount: 1,
+      deliveredCount: 0,
+      failedCount: 1,
+    });
+    expect(getSorobanOutboxEntry("flaky-1")).toMatchObject({
+      status: "FAILED",
+      attempts: 2,
+      lastError: "Soroban RPC timeout",
+    });
+    expect(
+      claimSorobanOutboxEntry("flaky-1", { workerId: "worker-3" }),
+    ).toEqual({
+      claimed: false,
+      reasonCode: SOROBAN_OUTBOX_REASON_CODES.NOT_CLAIMABLE,
+    });
+  });
+
+  it("releases leases cleanly on mid-flight cancel/pause without leaving partial PROCESSING state", async () => {
+    await enqueueSorobanOutbox({ registrationId: "reg-a" }, { idempotencyKey: "cancel-a" });
+    await enqueueSorobanOutbox({ registrationId: "reg-b" }, { idempotencyKey: "cancel-b" });
+
+    const controller = new AbortController();
+    const delivered: string[] = [];
+
+    const firstDrain = await drainSorobanOutboxWithLease({
+      workerId: "worker-pausing",
+      batchSize: 2,
+      signal: controller.signal,
+      sink: async (entry) => {
+        delivered.push(entry.id);
+        // Pause/freeze mid-flight after delivering the first entry.
+        controller.abort();
+      },
+    });
+
+    expect(firstDrain).toMatchObject({
+      claimedCount: 2,
+      deliveredCount: 1,
+      releasedCount: 1,
+      failedCount: 0,
+    });
+    expect(getSorobanOutboxEntry("cancel-a")?.status).toBe("COMPLETED");
+    expect(getSorobanOutboxEntry("cancel-b")).toMatchObject({
+      status: "PENDING",
+      attempts: 0,
+    });
+    expect(getSorobanOutboxEntry("cancel-b")?.leaseOwner).toBeUndefined();
+    expect(getSorobanOutboxEntry("cancel-b")?.leaseToken).toBeUndefined();
+
+    // A resumed worker picks up only the released entry and delivers it exactly once.
+    const resumedDrain = await drainSorobanOutboxWithLease({
+      workerId: "worker-resumed",
+      batchSize: 2,
+      sink: async (entry) => {
+        delivered.push(entry.id);
+      },
+    });
+    expect(resumedDrain).toMatchObject({
+      claimedCount: 1,
+      deliveredCount: 1,
+    });
+    expect(delivered).toEqual(["cancel-a", "cancel-b"]);
+  });
+
+  it("rejects empty, oversized, or malformed claim inputs with stable documented reason codes", () => {
+    expect(() =>
+      claimSorobanOutboxEntry("any", { workerId: "   " }),
+    ).toThrow(SorobanOutboxError);
+    try {
+      claimSorobanOutboxEntry("any", { workerId: "" });
+    } catch (err) {
+      expect(err).toBeInstanceOf(SorobanOutboxError);
+      expect((err as SorobanOutboxError).code).toBe(
+        SOROBAN_OUTBOX_REASON_CODES.INVALID_WORKER_ID,
+      );
+    }
+
+    try {
+      claimSorobanOutboxEntry("any", {
+        workerId: "w".repeat(MAX_OUTBOX_WORKER_ID_LENGTH + 1),
+      });
+    } catch (err) {
+      expect((err as SorobanOutboxError).code).toBe(
+        SOROBAN_OUTBOX_REASON_CODES.INVALID_WORKER_ID,
+      );
+    }
+
+    for (const badLease of [0, -50, Number.NaN, Number.POSITIVE_INFINITY, MAX_OUTBOX_LEASE_MS + 1]) {
+      try {
+        resolveOutboxLeaseMs(badLease);
+        expect.unreachable("expected resolveOutboxLeaseMs to throw");
+      } catch (err) {
+        expect(err).toBeInstanceOf(SorobanOutboxError);
+        expect((err as SorobanOutboxError).code).toBe(
+          SOROBAN_OUTBOX_REASON_CODES.INVALID_LEASE_MS,
+        );
+      }
+    }
+
+    process.env.SOROBAN_OUTBOX_LEASE_MS = "not-a-number";
+    try {
+      resolveOutboxLeaseMs();
+      expect.unreachable("expected invalid env var to throw");
+    } catch (err) {
+      expect((err as SorobanOutboxError).code).toBe(
+        SOROBAN_OUTBOX_REASON_CODES.INVALID_LEASE_MS,
+      );
+    }
+    delete process.env.SOROBAN_OUTBOX_LEASE_MS;
+
+    try {
+      completeSorobanOutboxClaim("any", "   ");
+      expect.unreachable("expected invalid leaseToken to throw");
+    } catch (err) {
+      expect((err as SorobanOutboxError).code).toBe(
+        SOROBAN_OUTBOX_REASON_CODES.INVALID_LEASE_TOKEN,
+      );
+    }
+
+    for (const badBatch of [0, -1, 1.5, MAX_OUTBOX_BATCH_SIZE + 1]) {
+      try {
+        claimNextSorobanOutboxEntries({ workerId: "w1", batchSize: badBatch });
+        expect.unreachable("expected invalid batchSize to throw");
+      } catch (err) {
+        expect((err as SorobanOutboxError).code).toBe(
+          SOROBAN_OUTBOX_REASON_CODES.INVALID_BATCH_SIZE,
+        );
+      }
+    }
+
+    expect(claimSorobanOutboxEntry("does-not-exist", { workerId: "w1" })).toEqual({
+      claimed: false,
+      reasonCode: SOROBAN_OUTBOX_REASON_CODES.ENTRY_NOT_FOUND,
+    });
   });
 });
