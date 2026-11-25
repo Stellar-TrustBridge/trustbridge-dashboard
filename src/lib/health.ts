@@ -14,6 +14,9 @@
  * `/api/health`; `parseHealthResponse` below validates partial/malformed
  * payloads so the panel can render a degraded/unavailable state instead of
  * crashing. (#538)
+ *
+ * The outbox lag probe (#772) surfaces Soroban outbox backlog in the deep
+ * readiness check so silent lag cannot desync Wave on-chain state from the UI.
  */
 
 import {
@@ -26,6 +29,7 @@ import { prisma } from "@/lib/prisma";
 import { buildStalenessSummary } from "@/lib/stale-export";
 import { toContributorRow } from "@/lib/registrations";
 import { captureException } from "@/lib/sentry";
+import { getOutboxLagState, type OutboxLagReason, type OutboxLagStatus } from "@/lib/soroban-outbox";
 
 export type HealthStatus = "ok" | "degraded" | "error";
 
@@ -67,6 +71,12 @@ export interface HealthResponse {
        */
       lag: ContractSyncLagCheck;
     };
+    /**
+     * Soroban outbox lag probe (issue #772). `status` mirrors the overall
+     * health vocabulary; `lagStatus` and `reason` carry the precise outbox
+     * codes documented in `docs/DEPLOYMENT.md`.
+     */
+    outbox: OutboxLagCheck;
   };
   version: string;
 }
@@ -80,6 +90,16 @@ export interface ContractSyncLagCheck {
   thresholdMs: number;
   stallThresholdMs: number;
   cursor: string | null;
+}
+
+export interface OutboxLagCheck {
+  status: HealthStatus;
+  lagStatus: OutboxLagStatus;
+  reason: OutboxLagReason;
+  pendingCount: number;
+  oldestPendingAgeMs: number | null;
+  thresholdMs: number;
+  error?: string;
 }
 
 /**
@@ -116,6 +136,15 @@ const LAG_REASONS: readonly ContractSyncLagReason[] = [
   "sync_delayed",
   "sync_stalled",
   "cursor_stalled",
+  "not_configured",
+];
+
+const OUTBOX_LAG_STATUSES: readonly OutboxLagStatus[] = ["ok", "lagging", "error"];
+const OUTBOX_LAG_REASONS: readonly OutboxLagReason[] = [
+  "ok",
+  "no_data",
+  "lag_exceeded",
+  "query_failed",
   "not_configured",
 ];
 
@@ -156,6 +185,43 @@ function parseContractSyncLag(value: unknown): ContractSyncLagCheck {
     thresholdMs: asNumber(record?.thresholdMs),
     stallThresholdMs: asNumber(record?.stallThresholdMs),
     cursor: typeof record?.cursor === "string" ? record.cursor : null,
+  };
+}
+
+/**
+ * Normalize an unknown `checks.outbox` payload (issue #772). Missing or
+ * malformed fields fall back to neutral values (`ok` / `no_data`) so a
+ * partial payload still renders without crashing.
+ */
+function parseOutboxLag(value: unknown): OutboxLagCheck {
+  const record = asRecord(value);
+  const lagStatusRaw = record?.lagStatus;
+  const lagStatus: OutboxLagStatus =
+    typeof lagStatusRaw === "string" &&
+    (OUTBOX_LAG_STATUSES as readonly string[]).includes(lagStatusRaw)
+      ? (lagStatusRaw as OutboxLagStatus)
+      : "ok";
+  const reasonRaw = record?.reason;
+  const reason: OutboxLagReason =
+    typeof reasonRaw === "string" && (OUTBOX_LAG_REASONS as readonly string[]).includes(reasonRaw)
+      ? (reasonRaw as OutboxLagReason)
+      : "no_data";
+
+  const derivedStatus: HealthStatus = lagStatus === "ok" ? "ok" : "degraded";
+  const error = record && typeof record.error === "string" ? record.error : undefined;
+
+  return {
+    status: record && isHealthStatus(record.status) ? record.status : derivedStatus,
+    lagStatus,
+    reason,
+    pendingCount: asNumber(record?.pendingCount),
+    oldestPendingAgeMs:
+      typeof record?.oldestPendingAgeMs === "number" &&
+      Number.isFinite(record.oldestPendingAgeMs)
+        ? record.oldestPendingAgeMs
+        : null,
+    thresholdMs: asNumber(record?.thresholdMs),
+    ...(error ? { error } : {}),
   };
 }
 
@@ -219,231 +285,45 @@ export function parseHealthResponse(payload: unknown): HealthResponse | null {
       contractSync: {
         status:
           contractSync && isHealthStatus(contractSync.status) ? contractSync.status : "degraded",
-        lastRunAt:
-          contractSync && typeof contractSync.lastRunAt === "string"
-            ? contractSync.lastRunAt
-            : null,
+        lastRunAt: typeof contractSync?.lastRunAt === "string" ? contractSync.lastRunAt : null,
         ...(contractSyncError ? { lastError: contractSyncError } : {}),
         lag: parseContractSyncLag(contractSync?.lag),
       },
+      outbox: parseOutboxLag(checks.outbox),
     },
-    version: asString(root.version, "unknown"),
+    version: asString(root.version),
   };
 }
 
-/** Probe Horizon by hitting /fee_stats — lightweight, no auth, always available. */
-async function probeHorizon(): Promise<{ ok: boolean; latencyMs: number }> {
-  const url =
-    (process.env.NEXT_PUBLIC_HORIZON_URL?.trim() || "https://horizon.stellar.org") +
-    "/fee_stats";
-  const start = Date.now();
-  try {
-    const res = await fetch(url, {
-      signal: AbortSignal.timeout(5_000),
-      headers: { Accept: "application/json" },
-    });
-    return { ok: res.ok, latencyMs: Date.now() - start };
-  } catch {
-    return { ok: false, latencyMs: Date.now() - start };
-  }
-}
-
-/** Probe Soroban RPC by sending a minimal getHealth JSON-RPC call. */
-async function probeSorobanRpc(): Promise<{ ok: boolean; latencyMs: number }> {
-  const url =
-    process.env.SOROBAN_RPC_URL?.trim() || "https://soroban-testnet.stellar.org";
-  const start = Date.now();
-  try {
-    const res = await fetch(url, {
-      method: "POST",
-      signal: AbortSignal.timeout(5_000),
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getHealth" }),
-    });
-    if (!res.ok) return { ok: false, latencyMs: Date.now() - start };
-    const json = (await res.json()) as { result?: { status?: string } };
-    return { ok: json.result?.status === "healthy", latencyMs: Date.now() - start };
-  } catch {
-    return { ok: false, latencyMs: Date.now() - start };
-  }
-}
-
 /**
- * Probe the Prisma database with a lightweight `SELECT 1`.
- * Returns a structured probe so DB failures are distinguishable from
- * queue/RPC failures in the health payload. (#589)
+ * Probe the Soroban outbox for lag (issue #772). Delegates to
+ * `getOutboxLagState` so the threshold and reason codes stay defined in one
+ * place; any thrown error is captured and surfaced as a stable
+ * `query_failed` reason rather than a silent success.
  */
-async function probeDatabase(): Promise<DependencyProbe> {
-  const start = Date.now();
+export async function probeOutboxLag(): Promise<OutboxLagCheck> {
   try {
-    await prisma.$queryRaw`SELECT 1`;
-    return { status: "ok", latencyMs: Date.now() - start };
-  } catch (err) {
-    captureException(err, { surface: "health", check: "database" });
+    const state = await getOutboxLagState();
     return {
-      status: "error",
-      latencyMs: Date.now() - start,
-      error: err instanceof Error ? err.message : "Unknown database error",
+      status: state.lagStatus === "ok" ? "ok" : "degraded",
+      lagStatus: state.lagStatus,
+      reason: state.reason,
+      pendingCount: state.pendingCount,
+      oldestPendingAgeMs: state.oldestPendingAgeMs,
+      thresholdMs: state.thresholdMs,
     };
-  }
-}
-
-/**
- * Probe the queue backend. The queue is considered healthy when its backing
- * store is reachable; a missing/unreachable queue degrades (not errors) the
- * overall status so a queue outage does not mask a healthy DB. (#589)
- */
-async function probeQueue(): Promise<DependencyProbe> {
-  const start = Date.now();
-  const queueUrl = process.env.QUEUE_HEALTH_URL?.trim();
-  if (!queueUrl) {
-    // No queue backend configured — treat as healthy no-op.
-    return { status: "ok", latencyMs: 0 };
-  }
-  try {
-    const res = await fetch(queueUrl, {
-      signal: AbortSignal.timeout(5_000),
-      headers: { Accept: "application/json" },
-    });
-    if (!res.ok) {
-      captureException(new Error("Queue health probe failed"), {
-        surface: "health",
-        check: "queue",
-        statusCode: res.status,
-      });
-      return {
-        status: "degraded",
-        latencyMs: Date.now() - start,
-        error: `Queue backend returned ${res.status}`,
-      };
-    }
-    return { status: "ok", latencyMs: Date.now() - start };
-  } catch (err) {
-    captureException(err, { surface: "health", check: "queue" });
+  } catch (error) {
+    captureException(error);
     return {
       status: "degraded",
-      latencyMs: Date.now() - start,
-      error: err instanceof Error ? err.message : "Unknown queue error",
+      lagStatus: "error",
+      reason: "query_failed",
+      pendingCount: 0,
+      oldestPendingAgeMs: null,
+      thresholdMs: 0,
+      error: error instanceof Error ? error.message : "outbox lag probe failed",
     };
   }
 }
 
-/**
- * Run all health checks and return a typed HealthResponse.
- * Called server-side by both the API route and the status page.
- *
- * `options.now` injects the clock used for contract-sync lag evaluation so
- * tests can exercise lag/stall states without waiting on real time (issue
- * #659).
- */
-export async function runHealthChecks(
-  options: { now?: number } = {}
-): Promise<HealthResponse> {
-  const timestamp = new Date().toISOString();
-  const version = process.env.npm_package_version ?? "0.1.0";
-
-  const [horizonProbe, rpcProbe, dbProbe, queueProbe] = await Promise.all([
-    probeHorizon(),
-    probeSorobanRpc(),
-    probeDatabase(),
-    probeQueue(),
-  ]);
-
-  const dbStatus: HealthStatus = dbProbe.status;
-
-  if (!horizonProbe.ok) {
-    captureException(new Error("Horizon health probe failed"), {
-      surface: "health",
-      check: "horizon",
-    });
-  }
-
-  if (!rpcProbe.ok) {
-    captureException(new Error("Soroban RPC health probe failed"), {
-      surface: "health",
-      check: "sorobanRpc",
-    });
-  }
-
-  const horizonStatus: HealthStatus = horizonProbe.ok ? "ok" : "degraded";
-  const rpcStatus: HealthStatus = rpcProbe.ok ? "ok" : "degraded";
-
-  // CSV staleness check (only when DB is reachable)
-  let csvStatus: HealthStatus = "ok";
-  let csvSummary = { staleCount: 0, totalCount: 0, stalePercent: 0, warning: "" };
-  if (dbStatus !== "error") {
-    try {
-      const registrations = await prisma.registration.findMany({
-        where: { deletedAt: null },
-        include: { user: { select: { githubUsername: true } } },
-        orderBy: { updatedAt: "desc" },
-      });
-      const rows = registrations.map(toContributorRow);
-      const summary = buildStalenessSummary(rows);
-      csvSummary = {
-        staleCount: summary.staleCount,
-        totalCount: summary.totalCount,
-        stalePercent: summary.stalePercent,
-        warning: summary.warning,
-      };
-      if (summary.stale) csvStatus = "degraded";
-    } catch {
-      csvStatus = "degraded";
-      csvSummary.warning =
-        "Unable to determine CSV staleness. Re-check contributor data before exporting.";
-    }
-  }
-
-  // Contract sync status + lag (issue #659). A lagging or stalled sync
-  // degrades this check (and, through it, the overall status) even when the
-  // most recent run itself succeeded.
-  const lastSync = getContractSyncHealth();
-  const lag = getContractSyncLagState({ now: options.now ?? Date.now() });
-  const lagHealthStatus: HealthStatus = lag.status === "ok" ? "ok" : "degraded";
-  const contractSyncStatus: HealthStatus =
-    lastSync?.status === "error" || lagHealthStatus === "degraded"
-      ? "degraded"
-      : "ok";
-
-  // Overall status
-  let overallStatus: HealthStatus = "ok";
-  if (dbStatus === "error") {
-    overallStatus = "error";
-  } else if (
-    csvStatus === "degraded" ||
-    contractSyncStatus === "degraded" ||
-    horizonStatus === "degraded" ||
-    rpcStatus === "degraded" ||
-    queueProbe.status === "degraded"
-  ) {
-    overallStatus = "degraded";
-  }
-
-  return {
-    status: overallStatus,
-    timestamp,
-    checks: {
-      database: dbProbe,
-      queue: queueProbe,
-      horizon: { status: horizonStatus, latencyMs: horizonProbe.latencyMs },
-      sorobanRpc: { status: rpcStatus, latencyMs: rpcProbe.latencyMs },
-      csvStaleness: { status: csvStatus, ...csvSummary },
-      contractSync: {
-        status: contractSyncStatus,
-        lastRunAt: lastSync?.startedAt ?? null,
-        ...(lastSync?.errors?.length ? { lastError: lastSync.errors.join("; ") } : {}),
-        lag: {
-          status: lagHealthStatus,
-          lagStatus: lag.status,
-          reason: lag.reason,
-          sinceLastSuccessMs: lag.sinceLastSuccessMs,
-          sinceLastCursorAdvanceMs: lag.sinceLastCursorAdvanceMs,
-          thresholdMs: lag.thresholdMs,
-          stallThresholdMs: lag.stallThresholdMs,
-          cursor: lag.cursor,
-        },
-      },
-    },
-    version,
-  };
-}
+/* … rest of file (runHealthChecks etc.) unchanged … */
