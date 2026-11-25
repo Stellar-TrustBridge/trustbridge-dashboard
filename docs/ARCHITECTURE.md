@@ -663,14 +663,20 @@ tests/api/
 | Variable | Purpose |
 |----------|---------|
 | `GITHUB_WEBHOOK_SECRET` | HMAC secret shared with GitHub; required for all `github-org-membership` webhooks |
-### Unified Transactional Outbox for Soroban write-through (#199, #488)
+### Unified Transactional Outbox for Soroban write-through (#199, #488, #793)
 
 To ensure reliable write-through to Soroban without losing registrations during chain or RPC outages, while supporting fast, hermetic unit tests:
 
-1. **Unified Outbox Abstraction (`src/lib/soroban-outbox.ts`):** Unifies production transactional writes with an in-memory adapter sink (`setSorobanOutboxSink`) for unit tests. In production runtime, `enqueueSorobanOutbox()` creates persistent `SorobanOutbox` rows in PostgreSQL (scoped by `maintainerOrgId`). In tests, the registered sink handles delivery directly in memory without database dependencies.
+1. **Unified Outbox Abstraction (`src/lib/soroban-outbox.ts`):** Unifies production transactional writes with an in-memory adapter sink (`setSorobanOutboxSink`) for unit tests. In production runtime, `enqueueSorobanOutbox()` creates persistent `SorobanOutbox` rows in PostgreSQL (scoped by `maintainerOrgId`, with optional `idempotencyKey`). In tests, the registered sink handles delivery directly in memory without database dependencies.
 2. **Transactional Enqueue:** During registration write paths, `enqueueSorobanOutbox()` stages the mirror payload with `status: PENDING`. Duplicate exports have been consolidated under `src/lib/soroban-outbox.ts`.
-3. **Outbox Worker (`processSorobanOutbox()`):** Background workers (`scripts/worker.mjs` / `src/lib/soroban-outbox-worker.ts`) periodically fetch pending outbox rows and invoke `mirrorRegistrationToSoroban()`.
-4. **At-Least-Once Delivery & Audit Trail:** On success, outbox records transition to `COMPLETED`. On failures, records retry with exponential backoff up to `maxAttempts` (default 5). If `maxAttempts` is exhausted, status transitions to `FAILED` and an audit event (`soroban_outbox_exhausted`) is logged.
+3. **Outbox Worker (`processSorobanOutbox()`):** Background workers (`scripts/worker.mjs` / `src/lib/soroban-outbox-worker.ts`) periodically fetch due `PENDING` rows and expired-lease `PROCESSING` rows, claiming each atomically via `updateMany` compare-and-swap before invoking `mirrorRegistrationToSoroban()`.
+4. **Lease-Guarded Delivery Claims & Concurrency Assumptions (#793):**
+   - **Atomic lease acquisition:** Each claim sets `status: PROCESSING` and advances `nextAttemptAt` (or `leaseExpiresAt` in memory) to `now + leaseMs` (default `30_000` ms, configurable via `SOROBAN_OUTBOX_LEASE_MS` within `1..600_000` ms). Under concurrent workers, only one worker's compare-and-swap succeeds (`count === 1`).
+   - **Fencing & lease expiry reclamation:** In-memory claims (`claimSorobanOutboxEntry`, `claimNextSorobanOutboxEntries`, `drainSorobanOutboxWithLease`) issue a unique `leaseToken` fencing token verified by `completeSorobanOutboxClaim`, `failSorobanOutboxClaim`, and `releaseSorobanOutboxClaim`. If a worker stalls past `leaseExpiresAt`, another worker may reclaim the entry and the stalled worker's late mutation is rejected with `STALE_LEASE_TOKEN`. In `processSorobanOutbox()`, a worker whose lease expires mid-delivery logs `soroban_outbox_lease_expired` and skips finalizing so it cannot clobber a new lease owner.
+   - **Mid-flight cancel/pause safety:** Passing an `AbortSignal` to `drainSorobanOutboxWithLease()` or `processSorobanOutbox()` cleanly releases newly claimed entries back to `PENDING` without incrementing `attempts` or leaving stuck `PROCESSING` rows.
+   - **Stable reason codes (`SOROBAN_OUTBOX_REASON_CODES`):** `INVALID_PAYLOAD`, `INVALID_WORKER_ID`, `INVALID_LEASE_MS`, `INVALID_LEASE_TOKEN`, `INVALID_BATCH_SIZE`, `ENTRY_NOT_FOUND`, `ALREADY_CLAIMED`, `ALREADY_COMPLETED`, `NOT_CLAIMABLE`, `STALE_LEASE_TOKEN`.
+   - **Assumptions for Wave operators:** Exactly-once delivery claims hold within a lease window assuming bounded clock skew across worker hosts (clock skew must be significantly smaller than `SOROBAN_OUTBOX_LEASE_MS`) and idempotent downstream Soroban/off-chain consumers if a worker crashes *after* submitting on-chain but *before* committing `COMPLETED`.
+5. **Retry Backoff & Audit Trail:** On success, outbox records transition to `COMPLETED`. On failures, records retry with exponential backoff up to `maxAttempts` (default 5). If `maxAttempts` is exhausted, status transitions to `FAILED` and an audit event (`soroban_outbox_exhausted`) is logged.
 
 ---
 
