@@ -72,6 +72,8 @@ export interface SorobanOutboxEntry {
   leaseExpiresAt?: string;
   createdAt: string;
   updatedAt: string;
+  /** Delivery budget; defaults to OUTBOX_DEFAULT_MAX_ATTEMPTS when unset. */
+  maxAttempts?: number;
 }
 
 export interface ClaimSorobanOutboxOptions {
@@ -705,4 +707,66 @@ export function getSorobanOutboxLag(
   }
 
   return { pending, failed, oldestPendingAgeMs };
+}
+
+/** Default max delivery attempts (alias used by retry-budget callers). */
+export const OUTBOX_DEFAULT_MAX_ATTEMPTS = 5;
+
+/**
+ * Returns `true` when an entry has been parked as a poison message: it is in
+ * the `FAILED` state **and** has exhausted its delivery budget
+ * (`attempts >= maxAttempts`). The entry will not be retried by
+ * `enqueueSorobanOutbox` until an operator resets it.
+ */
+export function isEntryParked(entry: SorobanOutboxEntry): boolean {
+  const budget = entry.maxAttempts ?? OUTBOX_DEFAULT_MAX_ATTEMPTS;
+  return entry.status === "FAILED" && entry.attempts >= budget;
+}
+
+/**
+ * Enumerate all entries that are currently parked as poison messages.
+ * These are `FAILED` entries whose delivery budget has been exhausted.
+ * Surfaced so an operator dashboard or monitoring cron can page on them.
+ */
+export function listPoisonedEntries(): SorobanOutboxEntry[] {
+  return listSorobanOutbox().filter(isEntryParked);
+}
+
+/**
+ * In-memory DLQ metrics: counts by status across all entries in the
+ * process-local store. The production Prisma path exposes equivalent counts
+ * via `getSorobanOutboxMetrics` in `soroban-outbox-worker.ts`.
+ */
+export interface InMemoryOutboxMetrics {
+  total: number;
+  pending: number;
+  completed: number;
+  failed: number;
+  /** Entries that have exhausted their retry budget (poison messages). */
+  parked: number;
+}
+
+export function getInMemoryOutboxMetrics(): InMemoryOutboxMetrics {
+  let pending = 0;
+  let completed = 0;
+  let failed = 0;
+  let parked = 0;
+
+  for (const entry of listSorobanOutbox()) {
+    switch (entry.status) {
+      case "PENDING":
+      case "PROCESSING":
+        pending++;
+        break;
+      case "COMPLETED":
+        completed++;
+        break;
+      case "FAILED":
+        failed++;
+        if (isEntryParked(entry)) parked++;
+        break;
+    }
+  }
+
+  return { total: listSorobanOutbox().length, pending, completed, failed, parked };
 }

@@ -4,6 +4,7 @@ import {
   createTimeoutBudget,
   type TimeoutBudget,
 } from "@/lib/action-lookup";
+import { computeJitteredDelay } from "@/lib/retry";
 
 /**
  * Client-side wrapper around `POST /api/check`.
@@ -61,6 +62,8 @@ export const CHECK_TIMEOUT_MS = 10_000;
 
 /** Maximum number of attempts (initial + retries) for a single check. */
 export const CHECK_MAX_ATTEMPTS = 3;
+
+export const CHECK_MAX_DELAY_MS = CHECK_TIMEOUT_MS;
 
 /** Base backoff between retries, in milliseconds (exponential). */
 export const CHECK_RETRY_BASE_MS = 250;
@@ -420,7 +423,17 @@ export async function checkAddress(
     if (!isRetryable(outcome)) return outcome;
     if (attempt === CHECK_MAX_ATTEMPTS - 1) return outcome;
 
-    const backoff = CHECK_RETRY_BASE_MS * 2 ** attempt;
+    const jitteredBackoff = computeJitteredDelay(attempt + 1, {
+      delayMs: CHECK_RETRY_BASE_MS,
+      backoffFactor: 2,
+      maxDelayMs: CHECK_MAX_DELAY_MS,
+      jitter: true,
+    });
+    const retryAfterMs =
+      outcome.kind === "rate_limited" && outcome.retryAfterSeconds !== null
+        ? Math.min(outcome.retryAfterSeconds * 1000, CHECK_MAX_DELAY_MS)
+        : 0;
+    const backoff = Math.max(jitteredBackoff, retryAfterMs);
     if (budget.remainingMs() <= backoff) return outcome;
 
     const slept = await sleep(backoff, options.signal);
@@ -428,4 +441,42 @@ export async function checkAddress(
   }
 
   return lastOutcome;
+}
+
+/**
+ * Human-readable, actionable message for a `CheckOutcome`. UI code should
+ * render this instead of re-deriving copy per outcome kind, so degraded
+ * states (circuit open, timeout, network failure) stay consistent.
+ *
+ * Copy rules:
+ * - `rate_limited`: surface the server-provided wait when present, so the
+ *   operator knows exactly how long to pause. Otherwise encourage a brief
+ *   retry.
+ * - `circuit_open`: use "Stellar services" (not "Horizon") so the message is
+ *   still accurate when the breaker protects a different upstream in future.
+ * - `network_error`: ask the contributor to check their connection first;
+ *   avoids blaming server-side when the client is offline.
+ */
+export function describeCheckOutcome(outcome: CheckOutcome): string {
+  switch (outcome.kind) {
+    case "ok":
+      return "Check completed.";
+    case "rate_limited":
+      if (outcome.retryAfterSeconds !== null) {
+        return `Too many requests. Please retry in ${outcome.retryAfterSeconds}s.`;
+      }
+      return "Too many requests. Please try again shortly.";
+    case "circuit_open":
+      return "Stellar services are temporarily unavailable. Please try again in a moment.";
+    case "timeout":
+      return "The check timed out. Please try again.";
+    case "aborted":
+      return "Check cancelled.";
+    case "network_error":
+      return "Network error while checking the address. Please check your connection and retry.";
+    case "error":
+      return outcome.errors[0] ?? "Failed to check address.";
+    default:
+      return "Failed to check address.";
+  }
 }

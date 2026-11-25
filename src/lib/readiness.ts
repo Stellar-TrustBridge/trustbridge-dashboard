@@ -22,7 +22,93 @@ export interface ReadinessDisplayConfig {
   reasonCodes: WizardAction[];
 }
 
-/** Pure helpers — safe for client and server; no stellar-sdk. */
+/**
+ * Canonical parity mapping between `ReadinessStatus` values, the `WizardAction`
+ * reason codes that produce them, and the minimum `HorizonCheckResult` shape
+ * needed to reach each status.
+ *
+ * This table is the **single source of truth** for readiness→reason-code
+ * correspondence. It is imported by `readiness-copy.test.ts` and by
+ * `check-api.ts` integration tests to verify that the full pipeline
+ * (`HorizonCheckResult` → `computeReadiness` → `getReadinessConfig` →
+ * `computeNextAction`) stays consistent when either side changes.
+ *
+ * Columns:
+ * - `readiness` — the `ReadinessStatus` the account ends up in.
+ * - `action`    — the `WizardAction` reason code the wizard returns for that account.
+ * - `fields`    — minimal Horizon field values that produce this combination.
+ *
+ * Rules enforced by tests:
+ * 1. Every `ReadinessStatus` appears exactly once.
+ * 2. Every `WizardAction` appears exactly once.
+ * 3. `computeNextAction(fields)` returns `action` for every row.
+ * 4. `getReadinessConfig(readiness).reasonCodes` contains `action` for every row.
+ * 5. `computeReadiness` with `fields` returns `readiness` for every row.
+ */
+export const READINESS_ACTION_PARITY_TABLE = [
+  {
+    readiness: "not_ready" as const,
+    action: "fund_account" as const,
+    description: "unfunded account",
+    fields: {
+      funded: false,
+      trustline: false,
+      trustline_authorized: false,
+      xlm_balance: "0",
+      spendable_xlm_balance: "0",
+    },
+  },
+  {
+    readiness: "not_ready" as const,
+    action: "add_trustline" as const,
+    description: "funded, no trustline",
+    fields: {
+      funded: true,
+      trustline: false,
+      trustline_authorized: false,
+      xlm_balance: "2",
+      spendable_xlm_balance: "1",
+    },
+  },
+  {
+    readiness: "not_ready" as const,
+    action: "await_trustline_authorization" as const,
+    description: "funded + trustline present but unauthorized",
+    fields: {
+      funded: true,
+      trustline: true,
+      trustline_authorized: false,
+      xlm_balance: "2",
+      spendable_xlm_balance: "1",
+    },
+  },
+  {
+    readiness: "low_reserve" as const,
+    action: "increase_reserve" as const,
+    description: "funded + authorized trustline, spendable XLM below floor",
+    fields: {
+      funded: true,
+      trustline: true,
+      trustline_authorized: true,
+      xlm_balance: "2",
+      spendable_xlm_balance: "0.1",
+    },
+  },
+  {
+    readiness: "ready" as const,
+    action: "none" as const,
+    description: "fully ready account",
+    fields: {
+      funded: true,
+      trustline: true,
+      trustline_authorized: true,
+      xlm_balance: "10",
+      spendable_xlm_balance: "5",
+    },
+  },
+] as const;
+
+
 
 export function parseXlmBalance(xlmBalance: string): number {
   const parsed = Number.parseFloat(xlmBalance ?? "0");
