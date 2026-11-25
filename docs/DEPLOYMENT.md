@@ -18,6 +18,111 @@ Deploy TrustBridge Dashboard to Vercel with PostgreSQL.
 
 ---
 
+## Worker process topology
+
+The dashboard is **not** a single process. Production needs three distinct
+process roles running side by side. Missing any one of them fails silently —
+the web app keeps serving, but Wave sync and scheduled exports quietly stop.
+
+| Process | What it runs | Responsibility | Required in prod |
+|---------|--------------|----------------|------------------|
+| **web** | `next start` (Vercel or Node) | Serves UI + API routes, enqueues outbox rows, exposes health/metrics | Yes |
+| **outbox worker** | `src/lib/soroban-outbox-worker.ts` | Drains the Soroban outbox: polls pending rows, submits to Soroban RPC, advances the cursor | Yes |
+| **cron / export scheduler** | Platform cron (Vercel Cron, systemd timer, k8s CronJob) | Triggers scheduled Wave exports and periodic maintenance; takes the export lock | Yes (if scheduled exports are enabled) |
+
+```
+            ┌──────────────┐   enqueue    ┌──────────────┐
+  users ───▶│  web (Next)  │─────────────▶│  PostgreSQL  │
+            └──────┬───────┘              │  outbox rows │
+                   │ health/metrics       └──────┬───────┘
+                   ▼                             │ poll
+            ┌──────────────┐                     ▼
+            │  Prometheus  │◀── metrics ──┌──────────────┐
+            └──────────────┘              │ outbox worker│
+                                          └──────────────┘
+            ┌──────────────┐   export lock
+            │ cron/export  │─────────────▶ PostgreSQL
+            └──────────────┘
+```
+
+The web process **enqueues** outbox work; it never drains it. The outbox worker
+is the only process that submits Soroban transactions. The cron scheduler is the
+only process that fires scheduled exports. Do not fold these into the web
+process — serverless request lifetimes are too short to drain a backlog.
+
+---
+
+## Health probes per process
+
+Each process needs its own liveness and readiness probe. A failing probe means
+that specific role is down — not that the whole deployment is broken.
+
+| Process | Liveness | Readiness | Interval | Failing probe means |
+|---------|----------|-----------|----------|---------------------|
+| **web** | `GET /api/health` → `200` | `GET /api/health` → `200` and DB reachable | 30s | Web is down or DB unreachable; users see errors |
+| **outbox worker** | Process alive (supervisor heartbeat) | Last successful poll within `OUTBOX_POLL_INTERVAL_MS × 3` | 30s | Outbox backlog grows; Wave sync stalls |
+| **cron / export** | Timer registered (systemd/`vercel cron`) | Last run completed within 2× schedule interval | per schedule | Scheduled exports missed; export lock may be stale |
+
+For the outbox worker, readiness is derived from cursor lag: if the newest
+pending outbox row is older than three poll intervals, the worker is not
+keeping up and should be restarted or scaled.
+
+---
+
+## Environment variables per process
+
+All processes share `DATABASE_URL`. The table below lists what each role
+additionally needs. Names match [ENVIRONMENT.md](./ENVIRONMENT.md) and
+`.env.example`.
+
+| Variable | web | outbox worker | cron/export | Notes |
+|----------|-----|---------------|-------------|-------|
+| `DATABASE_URL` | ✓ | ✓ | ✓ | Required by all |
+| `SOROBAN_RPC_URL` | ✓ | ✓ | — | Worker submits here |
+| `SOROBAN_NETWORK_PASSPHRASE` | ✓ | ✓ | — | Must match RPC network |
+| `SOROBAN_CONTRACT_ID` | ✓ | ✓ | — | Outbox target contract |
+| `OUTBOX_POLL_INTERVAL_MS` | — | ✓ | — | Optional; default poll cadence |
+| `OUTBOX_BATCH_SIZE` | — | ✓ | — | Optional; rows drained per poll |
+| `CRON_EXPORT_LOCK_TTL_MS` | — | — | ✓ | Optional; export lock staleness window |
+| `METRICS_SCRAPE_TOKEN` | ✓ | — | — | Required in prod for `/api/metrics/prometheus` |
+
+Optional variables fall back to documented defaults; set them explicitly when
+you need to tune cadence or lock behaviour.
+
+---
+
+## Failure modes when a worker is missing
+
+These failures are **silent** — the web app stays healthy while work piles up.
+Watch for each signal:
+
+| Missing process | Symptom | How to detect |
+|-----------------|---------|---------------|
+| **outbox worker** | Outbox backlog grows unbounded; Wave sync stalls | Pending outbox row count rising; cursor lag > 3× poll interval |
+| **cron / export** | Scheduled Wave exports never fire | No export run within 2× schedule interval; export lock older than `CRON_EXPORT_LOCK_TTL_MS` |
+| **web** | Enqueue stops; API 5xx | `/api/health` non-200; error-rate alert |
+
+Detection queries (run against production `DATABASE_URL`):
+
+```sql
+-- Outbox backlog and cursor lag
+SELECT count(*) AS pending,
+       now() - min(created_at) AS oldest_pending_age
+FROM soroban_outbox
+WHERE status = 'pending';
+
+-- Stale export lock
+SELECT * FROM export_lock
+WHERE acquired_at < now() - interval '1 hour';
+```
+
+If `oldest_pending_age` exceeds three poll intervals, the outbox worker is down
+or wedged. If the export lock is older than its TTL, the cron scheduler is not
+running or crashed mid-run. Restart the affected process; the outbox worker is
+idempotent and will resume from the cursor without duplicating submissions.
+
+---
+
 ## Pre-deployment checklist
 
 - [ ] GitHub repo pushed to GitHub
@@ -25,6 +130,8 @@ Deploy TrustBridge Dashboard to Vercel with PostgreSQL.
 - [ ] GitHub OAuth App created for production domain
 - [ ] All env vars documented in [ENVIRONMENT.md](./ENVIRONMENT.md)
 - [ ] Durable worker process host/supervisor provisioned (PM2, systemd, Docker, or PaaS worker)
+- [ ] Outbox worker process running with liveness + readiness probes
+- [ ] Cron/export scheduler registered with its own probe
 - [ ] `METRICS_SCRAPE_TOKEN` set for production (see [Prometheus metrics](#prometheus-metrics-scrape-auth))
 
 ---
@@ -239,7 +346,9 @@ DATABASE_URL="postgresql://trustbridge:trustbridge-dev-password@localhost:5432/t
 
 ## Monitoring & limits
 
-- **Grafana Dashboards & Metrics** — import ready-made dashboards in [docs/grafana/](./grafana/README.md) ([Overview JSON](./grafana/trustbridge-overview.json) / [JSON API JSON](./grafana/trustbridge-json-api.json)) for live payout readiness and health monitoring.
+- **Grafana Dashboards & Metrics** — import ready-made dashboards in [docs/grafana/](./grafana/README.md) ([Overview JSON](./grafana/trustbridge-overview.json) / [JSON API JSON](./grafana/trustbridge-json-api.json)) for live payout readiness, outbox backlog, and worker health panels.
+- **Outbox worker** — alert when pending outbox rows exceed your backlog threshold or cursor lag exceeds three poll intervals (see [Failure modes](#failure-modes-when-a-worker-is-missing)).
+- **Cron/export** — alert when no export run completes within 2× the schedule interval, or when the export lock is older than `CRON_EXPORT_LOCK_TTL_MS`.
 - **Prometheus scrape auth** — `/api/metrics/prometheus` requires `METRICS_SCRAPE_TOKEN`; see [Prometheus metrics scrape auth](#prometheus-metrics-scrape-auth).
 - **Horizon rate limits** — batch re-check queries one account per registration; large Waves may need throttling (future enhancement)
 - **Vercel serverless timeout** — default 10s on Hobby; batch re-check may need pagination for 100+ contributors
@@ -638,5 +747,4 @@ WHERE status = 'failed'
 ORDER BY "completedAt" DESC
 LIMIT 10;
 ```
-
 

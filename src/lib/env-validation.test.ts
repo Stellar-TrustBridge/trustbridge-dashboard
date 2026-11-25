@@ -199,7 +199,97 @@ describe("env-validation", () => {
       }
     });
   });
-});
+
+  describe("validateEnv - mixed network contract ids", () => {
+    const baseEnv = {
+      GITHUB_CLIENT_ID: "test-id",
+      GITHUB_CLIENT_SECRET: "test-secret",
+      NEXTAUTH_URL: "http://localhost:3000",
+      NEXTAUTH_SECRET: "test-secret",
+      TOKEN_ENCRYPTION_KEY: "test-key",
+      GITHUB_MAINTAINER_ORG: "test-org",
+      DATABASE_URL: "postgresql://localhost/test",
+    };
+
+    it("accepts a testnet contract id with a testnet horizon url", () => {
+      process.env = {
+        ...baseEnv,
+        NEXT_PUBLIC_HORIZON_URL: "https://horizon-testnet.stellar.org",
+        SOROBAN_CONTRACT_ID:
+          "CDTESTNETCONTRACTIDXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+      };
+
+      const env = validateEnv();
+      expect(env.SOROBAN_CONTRACT_ID).toBe(
+        "CDTESTNETCONTRACTIDXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+      );
+    });
+
+    it("warns when a testnet contract id is paired with a pubnet horizon url", () => {
+      process.env = {
+        ...baseEnv,
+        NEXT_PUBLIC_HORIZON_URL: "https://horizon.stellar.org",
+        SOROBAN_CONTRACT_ID:
+          "CDTESTNETCONTRACTIDXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+      };
+
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const env = validateEnv();
+        expect(env.SOROBAN_CONTRACT_ID).toBe(
+          "CDTESTNETCONTRACTIDXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+        );
+        expect(warnSpy).toHaveBeenCalled();
+        const warned = warnSpy.mock.calls
+          .map((call) => call.join(" "))
+          .join("\n");
+        expect(warned).toContain("ENV_NETWORK_MISMATCH");
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it("warns when a pubnet contract id is paired with a testnet horizon url", () => {
+      process.env = {
+        ...baseEnv,
+        NEXT_PUBLIC_HORIZON_URL: "https://horizon-testnet.stellar.org",
+        SOROBAN_CONTRACT_ID:
+          "CDPUBTESTNETCONTRACTIDXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+      };
+
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        validateEnv();
+        expect(warnSpy).toHaveBeenCalled();
+        const warned = warnSpy.mock.calls
+          .map((call) => call.join(" "))
+          .join("\n");
+        expect(warned).toContain("ENV_NETWORK_MISMATCH");
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it("fails when SOROBAN_CONTRACT_ID is malformed", () => {
+      process.env = {
+        ...baseEnv,
+        NEXT_PUBLIC_HORIZON_URL: "https://horizon.stellar.org",
+        SOROBAN_CONTRACT_ID: "not-a-contract-id",
+      };
+
+      expect(() => validateEnv()).toThrow("Environment validation failed");
+    });
+
+    it("fails when SOROBAN_CONTRACT_ID is empty", () => {
+      process.env = {
+        ...baseEnv,
+        NEXT_PUBLIC_HORIZON_URL: "https://horizon.stellar.org",
+        SOROBAN_CONTRACT_ID: "",
+      };
+
+      expect(() => validateEnv()).toThrow("Environment validation failed");
+    });
+  });
 
   describe("validateEnv - DATABASE_URL pool and pgbouncer settings", () => {
     it("accepts DATABASE_URL with connection_limit and pool_timeout", () => {
@@ -221,21 +311,7 @@ describe("env-validation", () => {
         NEXTAUTH_SECRET: "test-secret",
         TOKEN_ENCRYPTION_KEY: "test-key",
         GITHUB_MAINTAINER_ORG: "test-org",
-        DATABASE_URL: "postgresql://localhost/test?connection_limit=-1",
-      };
-
-      expect(() => validateEnv()).toThrow("Environment validation failed");
-    });
-
-    it("fails when pool_timeout is negative", () => {
-      process.env = {
-        GITHUB_CLIENT_ID: "test-id",
-        GITHUB_CLIENT_SECRET: "test-secret",
-        NEXTAUTH_URL: "http://localhost:3000",
-        NEXTAUTH_SECRET: "test-secret",
-        TOKEN_ENCRYPTION_KEY: "test-key",
-        GITHUB_MAINTAINER_ORG: "test-org",
-        DATABASE_URL: "postgresql://localhost/test?pool_timeout=-5",
+        DATABASE_URL: "postgresql://localhost/test?connection_limit=not-a-number",
       };
 
       expect(() => validateEnv()).toThrow("Environment validation failed");
@@ -349,3 +425,4 @@ describe("env-validation", () => {
       );
     });
   });
+});

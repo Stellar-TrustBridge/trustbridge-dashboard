@@ -10,6 +10,12 @@ export interface FreezeWindowStatus {
 }
 
 /**
+ * Stable reason code returned when FREEZE_WINDOW_START/END are inverted
+ * (end <= start). Surfaced by the freeze-status API as HTTP 422.
+ */
+export const FREEZE_WINDOW_INVERTED_RANGE = "FREEZE_WINDOW_INVERTED_RANGE";
+
+/**
  * Environment variables consumed by the freeze-window guard. Documented in
  * `docs/ENVIRONMENT.md` and referenced from `docs/FEATURE_FLAGS.md`.
  *
@@ -22,7 +28,7 @@ export interface FreezeWindowStatus {
  *   use UTC instants; this only affects human-facing rendering.
  *
  * The window is active when now is within [start, end] inclusive. Missing,
- * unparseable, or inverted (start > end) values fail closed to inactive.
+ * unparseable, or inverted (start >= end) values fail closed to inactive.
  * The `freeze_window` feature flag must also be enabled for the guard to
  * block requests (see `enforceFreezeWindowGuard`).
  */
@@ -46,7 +52,7 @@ export function isFreezeWindowActive(now = new Date()): FreezeWindowStatus {
   if (
     isNaN(start.getTime()) ||
     isNaN(end.getTime()) ||
-    start.getTime() > end.getTime()
+    start.getTime() >= end.getTime()
   ) {
     return { active: false };
   }
@@ -63,6 +69,49 @@ export function isFreezeWindowActive(now = new Date()): FreezeWindowStatus {
   }
 
   return { active: false, start, end };
+}
+
+/**
+ * Validates the configured freeze window range. Returns a stable error object
+ * when the range is inverted (end <= start) so the API can respond with a
+ * clear 422 instead of silently treating the window as inactive.
+ *
+ * Returns null when the range is valid, disabled, or unconfigured.
+ */
+export function validateFreezeWindowRange(): {
+  code: string;
+  message: string;
+  start: string;
+  end: string;
+} | null {
+  const enabledStr = process.env.FREEZE_WINDOW_ENABLED?.trim().toLowerCase();
+  if (enabledStr === "false") {
+    return null;
+  }
+
+  const startStr = process.env.FREEZE_WINDOW_START?.trim();
+  const endStr = process.env.FREEZE_WINDOW_END?.trim();
+  if (!startStr || !endStr) {
+    return null;
+  }
+
+  const start = new Date(startStr);
+  const end = new Date(endStr);
+  if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+    return null;
+  }
+
+  if (end.getTime() <= start.getTime()) {
+    return {
+      code: FREEZE_WINDOW_INVERTED_RANGE,
+      message:
+        "FREEZE_WINDOW_END must be strictly after FREEZE_WINDOW_START; the configured freeze window range is inverted.",
+      start: start.toISOString(),
+      end: end.toISOString(),
+    };
+  }
+
+  return null;
 }
 
 /**
