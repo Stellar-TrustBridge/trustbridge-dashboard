@@ -746,10 +746,6 @@ export interface InMemoryOutboxMetrics {
   parked: number;
 }
 
-/** Entries that have exhausted their retry budget (poison messages). */
-  parked: number;
-}
-
 export function getInMemoryOutboxMetrics(): InMemoryOutboxMetrics {
   let pending = 0;
   let completed = 0;
