@@ -234,6 +234,54 @@ cron exports against the updated application.
 
 ---
 
+## Streaming mode (large contributor exports)
+
+For large Wave orgs, buffered CSV generation can exhaust memory. The
+contributor export route (`GET /api/contributors/export/csv`) and the nightly
+cron export use `src/lib/csv-export.ts` in **streaming mode** when the dataset
+is large, emitting rows incrementally instead of buffering the whole file.
+
+### How it works
+
+- `createCsvStream()` in `src/lib/csv-export.ts` returns a `ReadableStream`
+  that writes the header first, then one row per contributor as the source
+  iterator yields them. The buffered `buildCsv()` API is preserved for small
+  exports and existing callers.
+- The route pipes the stream directly to the HTTP response, so memory stays
+  bounded regardless of contributor count.
+- Backpressure is honored: the stream awaits the consumer's `pull` before
+  reading the next row, so a slow client cannot force unbounded buffering.
+- Client cancellation (`AbortSignal` / request abort) stops the source
+  iterator and releases the export lock; no partial privileged state is left
+  behind and no further rows are read.
+
+### Threshold
+
+Streaming mode is selected automatically when the contributor count exceeds
+`CSV_EXPORT_STREAM_THRESHOLD` (default `1000`). Set it to `0` to always stream
+or a very large value to always buffer.
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `CSV_EXPORT_STREAM_THRESHOLD` | No | `1000` | Row count above which exports stream instead of buffering |
+
+### Reason codes
+
+Streaming exports fail with stable reason codes surfaced in the JSON error
+body (never silent success):
+
+| Code | Meaning |
+|---|---|
+| `csv_export_empty` | No contributors matched the org scope |
+| `csv_export_oversized` | Row count exceeds the configured hard cap |
+| `csv_export_malformed` | A contributor row failed validation/serialization |
+| `csv_export_cancelled` | Client aborted mid-stream |
+
+Redaction policy is unchanged: Stellar addresses and secrets are masked per
+the existing redaction rules before any row is written.
+
+---
+
 ## CSV columns
 
 | Column | Description |
@@ -255,38 +303,4 @@ cron exports against the updated application.
 
 ## Stale data detection
 
-If any contributor's `lastCheckedAt` is older than the configured threshold
-(`STALE_EXPORT_THRESHOLD_MS`, default 24 hours), the export result includes:
-
-```json
-{ "isStale": true, "staleCount": 3 }
-```
-
-The CSV is still generated and emailed — operators receive the data with the
-stale flag visible in the audit log.
-
----
-
-## Relationship to other cron features
-
-| Feature | Route | Trigger | Recipient | Content |
-|---|---|---|---|---|
-| **Treasury export** | `POST /api/cron/export` | Scheduler / manual | `TREASURY_EXPORT_EMAIL` | Full CSV attachment |
-| Digest | `POST /api/cron/digest` | Scheduler / manual | `DIGEST_EMAIL` | Aggregate counts + link |
-| Email nudge | `POST /api/notifications/email-nudge` | Manual (session) | Maintainer's email | Per-contributor nudge |
-
-The treasury export and digest share the `CRON_SECRET` bearer token and the
-`TREASURY_EXPORT_EMAIL` fallback, but run independently and produce different
-email bodies.
-
----
-
-## Implementation files
-
-| File | Purpose |
-|---|---|
-| `src/lib/cron-export.ts` | Core logic: rate gate, DB query, readiness tally, email dispatch, audit |
-| `src/lib/cron-export-alert.ts` | Failure alert dispatcher (webhook + ping) |
-| `src/app/api/cron/export/route.ts` | HTTP handler: dual-auth (session or `CRON_SECRET`), CSRF, POST/GET |
-| `src/lib/cron-export.test.ts` | Unit tests for export logic, rate limiting, email, audit |
-| `src/lib/cron-export-alert.test.ts` | Unit tests for alert dispatch (happy path, failure, env not set) |
+If any contributor's `lastCheckedAt` is older than 
