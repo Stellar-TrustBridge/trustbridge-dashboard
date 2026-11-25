@@ -100,6 +100,104 @@ export function requireMaintainer(
 }
 
 /**
+ * Session fixation hardening.
+ *
+ * The dashboard trusts the upstream auth proxy for identity, but the session
+ * identifier itself must be rotated whenever privilege context changes
+ * (login, org-switch). A pre-set/fixated identifier must never survive a
+ * privilege transition, otherwise an attacker who planted a session id could
+ * ride the victim's authenticated session.
+ *
+ * These helpers are pure so they can be unit-tested without a live proxy and
+ * reused by `src/lib/api-auth.ts` route handlers.
+ */
+export type SessionRotationReason = "login" | "org-switch";
+
+export interface SessionRotationResult {
+  ok: boolean;
+  /** Newly minted session identifier; only present on success. */
+  sessionId?: string;
+  /** Stable reason code for failures so callers can surface actionable errors. */
+  error?: "missing-session" | "invalid-session" | "rotation-failed" | "forbidden";
+  status?: number;
+}
+
+const SESSION_ID_HEADER = "x-session-id";
+const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
+
+/**
+ * Read and validate the current session identifier from the request.
+ * Returns `null` when the header is absent or malformed so callers can fail
+ * closed with a stable reason code.
+ */
+export function getSessionId(req: NextRequest): string | null {
+  const raw = req.headers.get(SESSION_ID_HEADER);
+  if (!raw) return null;
+  if (!SESSION_ID_PATTERN.test(raw)) return null;
+  return raw;
+}
+
+/**
+ * Mint a fresh session identifier. Uses the platform CSPRNG; never derived
+ * from the previous identifier so a fixated value cannot be predicted.
+ */
+export function mintSessionId(): string {
+  const bytes = new Uint8Array(32);
+  globalThis.crypto.getRandomValues(bytes);
+  let out = "";
+  for (const b of bytes) out += b.toString(16).padStart(2, "0");
+  return out;
+}
+
+/**
+ * Rotate the session identifier for a privilege transition.
+ *
+ * - `login`: requires a valid pre-auth session id; the old id is invalidated
+ *   by the caller persisting the new id and rejecting the old one.
+ * - `org-switch`: additionally requires the user to be a member of the target
+ *   org (admins are global), otherwise returns `forbidden`.
+ *
+ * Returns stable reason codes (`missing-session`, `invalid-session`,
+ * `rotation-failed`, `forbidden`) so route handlers can respond consistently.
+ */
+export function rotateSession(
+  req: NextRequest,
+  reason: SessionRotationReason,
+  targetOrg?: string | null,
+): SessionRotationResult {
+  const current = getSessionId(req);
+  if (!current) {
+    const raw = req.headers.get(SESSION_ID_HEADER);
+    return {
+      ok: false,
+      error: raw ? "invalid-session" : "missing-session",
+      status: 401,
+    };
+  }
+
+  if (reason === "org-switch") {
+    const user = getSessionUser(req);
+    if (!user) {
+      return { ok: false, error: "invalid-session", status: 401 };
+    }
+    if (!isMaintainerForOrg(user, targetOrg) && !user.orgs.includes(targetOrg ?? "")) {
+      return { ok: false, error: "forbidden", status: 403 };
+    }
+  }
+
+  let next: string;
+  try {
+    next = mintSessionId();
+  } catch {
+    return { ok: false, error: "rotation-failed", status: 500 };
+  }
+  if (!next || next === current) {
+    return { ok: false, error: "rotation-failed", status: 500 };
+  }
+  return { ok: true, sessionId: next };
+}
+
+/**
  * Redaction mode for address-history exports.
  *
  * - `self`: the caller may only see their own addresses; other parties are
@@ -136,3 +234,4 @@ export function requireAllowlistMaintainer(
 ): AuthResult {
   return requireMaintainer(req, org);
 }
+

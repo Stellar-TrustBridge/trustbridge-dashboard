@@ -116,6 +116,133 @@ export async function refreshMaintainerSession(): Promise<Session | null> {
 }
 
 /**
+ * Stable reason codes emitted by {@link rotateSession} so callers can map
+ * failures to consistent HTTP responses and audit metadata.
+ */
+export type SessionRotationReasonCode =
+  | "rotated"
+  | "missing_pre_auth_session"
+  | "invalid_pre_auth_session"
+  | "org_switch_denied"
+  | "rotation_persist_failed";
+
+export interface SessionRotationResult {
+  ok: boolean;
+  /** Stable reason code describing the outcome. */
+  reason: SessionRotationReasonCode;
+  /** The freshly rotated session when `ok` is true. */
+  session: Session | null;
+  /** The identifier of the pre-rotation session, when one was present. */
+  previousSessionId: string | null;
+  /** The identifier of the post-rotation session, when rotation succeeded. */
+  sessionId: string | null;
+}
+
+/**
+ * Persist a rotated session identifier. Supplied by the caller (typically the
+ * auth route handler) so this module stays free of a circular dependency on
+ * `src/lib/auth.ts` while keeping rotation semantics in one place.
+ *
+ * Implementations MUST invalidate the previous identifier before returning so
+ * a fixated identifier can never be replayed. Returning `false` signals a
+ * persistence failure and the caller must treat the login as failed.
+ */
+export type SessionRotationPersister = (params: {
+  previousSessionId: string | null;
+  session: Session;
+  reason: "login" | "org-switch";
+}) => Promise<boolean>;
+
+/**
+ * Rotate the session identifier on login and org-switch to defeat session
+ * fixation. A pre-set/fixated identifier is invalidated before the new one is
+ * issued, so it can never be reused after a successful rotation.
+ *
+ * Failure paths (all return `ok: false` with a stable reason code and never
+ * leave partial privileged state):
+ * - `missing_pre_auth_session`: no session was presented to rotate.
+ * - `invalid_pre_auth_session`: the presented session is not a maintainer.
+ * - `org_switch_denied`: org-switch requested without valid membership.
+ * - `rotation_persist_failed`: the persister failed to invalidate/issue.
+ */
+export async function rotateSession(
+  persist: SessionRotationPersister,
+  options: { reason: "login" | "org-switch"; orgId?: string | null } = { reason: "login" }
+): Promise<SessionRotationResult> {
+  const session = await getServerSession(authOptions);
+  const previousSessionId = session?.user?.id ?? null;
+
+  if (!session) {
+    return {
+      ok: false,
+      reason: "missing_pre_auth_session",
+      session: null,
+      previousSessionId: null,
+      sessionId: null,
+    };
+  }
+
+  if (!session.user?.isMaintainer) {
+    return {
+      ok: false,
+      reason: "invalid_pre_auth_session",
+      session: null,
+      previousSessionId,
+      sessionId: null,
+    };
+  }
+
+  if (options.reason === "org-switch") {
+    const memberships = (session.user as { orgIds?: string[] }).orgIds ?? [];
+    if (!options.orgId || !memberships.includes(options.orgId)) {
+      await recordAuditLog({
+        action: "session_rotation_denied",
+        actorId: session.user.id,
+        actorLogin: session.user.githubUsername ?? null,
+        metadata: { reason: "org_switch_denied", orgId: options.orgId ?? null },
+      });
+      return {
+        ok: false,
+        reason: "org_switch_denied",
+        session: null,
+        previousSessionId,
+        sessionId: null,
+      };
+    }
+  }
+
+  const persisted = await persist({
+    previousSessionId,
+    session,
+    reason: options.reason,
+  });
+
+  if (!persisted) {
+    await recordAuditLog({
+      action: "session_rotation_failed",
+      actorId: session.user.id,
+      actorLogin: session.user.githubUsername ?? null,
+      metadata: { reason: "rotation_persist_failed", rotationReason: options.reason },
+    });
+    return {
+      ok: false,
+      reason: "rotation_persist_failed",
+      session: null,
+      previousSessionId,
+      sessionId: null,
+    };
+  }
+
+  return {
+    ok: true,
+    reason: "rotated",
+    session,
+    previousSessionId,
+    sessionId: session.user.id,
+  };
+}
+
+/**
  * Credential kinds a request may present to a dual-auth route.
  */
 export type ApiCredentialKind = "session" | "api-key" | "none";

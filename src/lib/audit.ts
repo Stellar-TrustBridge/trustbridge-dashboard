@@ -198,6 +198,39 @@ export async function recordDlqReplayAudit(input: {
 }
 
 /**
+ * Record a manual circuit-breaker force-open (or its clear/expiry).
+ *
+ * Wraps {@link recordAuditLogStrict} with the canonical action name and a
+ * stable metadata shape so the kill-switch trail captures who forced a Wave
+ * dependency open, why, and when it auto-expires. Strict: a privileged
+ * force-open must not succeed without an audit record. Metadata never
+ * contains secrets or unmasked addresses — only the breaker name, reason,
+ * and expiry window.
+ */
+export async function recordCircuitBreakerForceOpenAudit(input: {
+  actorId?: string | null;
+  actorLogin?: string | null;
+  breaker: string;
+  reason: string;
+  expiresAt: string;
+  outcome: "force_open" | "clear" | "expire";
+}): Promise<void> {
+  await recordAuditLogStrict({
+    action: "circuit_breaker.force_open",
+    actorId: input.actorId ?? null,
+    actorLogin: input.actorLogin ?? null,
+    targetId: input.breaker,
+    targetLabel: input.breaker,
+    metadata: {
+      breaker: input.breaker,
+      reason: input.reason,
+      expiresAt: input.expiresAt,
+      outcome: input.outcome,
+    },
+  });
+}
+
+/**
  * Persist a maintainer action to the audit log, surfacing failures.
  *
  * Unlike {@link recordAuditLog}, this variant rejects when the audit write

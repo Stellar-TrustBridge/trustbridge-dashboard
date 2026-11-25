@@ -49,6 +49,68 @@ and restore with test users (including CSRF and auth setup) lives in
 Keep that outline in sync with the ban route reason codes and inputs whenever the
 ban route changes.
 
+## 2a. Maintenance Banners (Planned Downtime Windows)
+
+Maintainers can schedule dashboard maintenance banners so wave contributors get
+notice before a freeze or deploy. Windows are stored and served by
+`src/lib/maintenance.ts` and exposed through `/api/maintenance`.
+
+### Public read
+
+`GET /api/maintenance` requires **no authentication** and returns the windows
+that are currently active or upcoming (past windows are omitted):
+
+```json
+{
+  "windows": [
+    {
+      "id": "mw-1",
+      "message": "Dashboard read-only during wave payout",
+      "startsAt": "2026-10-01T00:00:00.000Z",
+      "endsAt": "2026-10-01T02:00:00.000Z",
+      "severity": "warning",
+      "status": "active"
+    }
+  ]
+}
+```
+
+`status` is one of `upcoming`, `active`, or `ended` (ended windows are filtered
+out of the public response). `severity` is `info`, `warning`, or `critical`.
+
+### Maintainer write
+
+`POST /api/maintenance` (create), `PATCH /api/maintenance` (update), and
+`DELETE /api/maintenance?id=<id>` (cancel) require a maintainer session and the
+same-origin CSRF check used by other mutating routes. Unauthorized callers get
+HTTP `401`/`403` with an actionable `error`/`code` body — never a silent
+success.
+
+```bash
+curl -X POST https://dashboard.trustbridge.org/api/maintenance \
+  -H 'content-type: application/json' \
+  -H 'x-csrf-token: <token>' \
+  --data '{"message":"Read-only during payout","startsAt":"2026-10-01T00:00:00Z","endsAt":"2026-10-01T02:00:00Z","severity":"warning"}'
+```
+
+### Validation & reason codes
+
+Malformed or oversized input fails with a stable `code`:
+
+| Outcome | HTTP | `code` |
+|---|---|---|
+| Missing/empty message | 400 | `MAINTENANCE_MESSAGE_REQUIRED` |
+| Message over 280 chars | 400 | `MAINTENANCE_MESSAGE_TOO_LONG` |
+| Non-ISO-8601 timestamp | 400 | `MAINTENANCE_INVALID_TIMESTAMP` |
+| `endsAt` not after `startsAt` | 400 | `MAINTENANCE_INVALID_WINDOW` |
+| Unknown severity | 400 | `MAINTENANCE_INVALID_SEVERITY` |
+| Unknown window id | 404 | `MAINTENANCE_NOT_FOUND` |
+| Non-maintainer write | 403 | `MAINTENANCE_FORBIDDEN` |
+
+Writes are idempotent per window id: re-submitting the same payload for an
+existing id is a no-op update, and cancelling an already-cancelled window
+returns success without partial state.
+
 ### Bulk ban dry-run report (issue #780)
 
 Bulk bans support a **dry-run** mode that reports what *would* happen without
