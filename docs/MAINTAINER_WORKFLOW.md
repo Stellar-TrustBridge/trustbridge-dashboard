@@ -41,6 +41,14 @@ npm run typecheck
 
 Include the commands run and a short risk note for Wave operators in the PR description.
 
+## Ban → conflict → restore smoke path
+
+The end-to-end smoke outline for exercising ban, the duplicate-wallet conflict,
+and restore with test users (including CSRF and auth setup) lives in
+[`docs/E2E_TESTING.md`](./E2E_TESTING.md#maintainer-ban--conflict--restore-smoke-path).
+Keep that outline in sync with the ban route reason codes and inputs whenever the
+ban route changes.
+
 ## 2a. Maintenance Banners (Planned Downtime Windows)
 
 Maintainers can schedule dashboard maintenance banners so wave contributors get

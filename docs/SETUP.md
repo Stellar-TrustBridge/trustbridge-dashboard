@@ -196,6 +196,25 @@ See [CHECKLIST_IDEMPOTENCY.md](./CHECKLIST_IDEMPOTENCY.md).
 
 ---
 
+## Appendix: Running the outbox worker and cron locally (#779)
+
+`npm run dev` only starts the **web** process. Wave sync and scheduled exports
+run in separate processes that you must start yourself, or they will silently
+stall. See [DEPLOYMENT.md — Worker process topology](./DEPLOYMENT.md#worker-process-topology-779)
+for the full production topology, health probes, and failure modes.
+
+| Process | Local command | Responsibility |
+|---------|---------------|----------------|
+| Web | `npm run dev` | Next.js UI + API routes |
+| Outbox worker | `npm run worker:outbox` | Drains `soroban-outbox-worker.ts` queue (Wave sync) |
+| Cron / export scheduler | `npm run cron:exports` | Runs scheduled CSV exports |
+
+All three share `DATABASE_URL`. The worker and cron also read the outbox
+polling and export-lock settings documented in
+[ENVIRONMENT.md](./ENVIRONMENT.md). If you skip the worker, the outbox backlog
+grows and Wave sync appears frozen; if you skip cron, scheduled exports never
+fire. Both are detectable via the health probes in DEPLOYMENT.md.
+
 ## Registry mode (`REGISTRY_MODE`)
 
 `REGISTRY_MODE` controls how the maintainer dashboard describes the freshness of
@@ -249,3 +268,4 @@ Expected output: `"synced"` (or `"live"` after reverting).
 
 An unrecognized `REGISTRY_MODE` value (including typos) falls back to `"live"`
 without error.  Read endpoints are never broken by a bad env var.
+

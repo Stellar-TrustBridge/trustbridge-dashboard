@@ -34,6 +34,15 @@ export const dynamic = "force-dynamic";
  *   that zone, DST-aware).  When no timezone is configured these fields are
  *   `null` and consumers fall back to UTC — preserving prior behavior.
  *
+ * Inverted-range validation (issue #776):
+ *   A freeze window whose `end` is not strictly after its `start` is invalid
+ *   and would confuse Wave open/closed state.  When the configured window is
+ *   inverted (or otherwise malformed) the route responds 422 with a stable
+ *   `code` (`FREEZE_WINDOW_INVALID_RANGE`) and a clear `error` message instead
+ *   of emitting a misleading `active` flag.  Auth/CSRF/org-scope and
+ *   pause/freeze/dry-run semantics are unchanged — this endpoint is public and
+ *   read-only.
+ *
  * Shape (200):
  * ```json
  * {
@@ -43,6 +52,14 @@ export const dynamic = "force-dynamic";
  *   "end":    "2026-09-25T06:00:00.000Z",
  *   "timezone": "America/New_York",
  *   "display": "Sep 24, 2026, 2:00 PM – Sep 25, 2026, 2:00 AM EDT"
+ * }
+ * ```
+ *
+ * Shape (422):
+ * ```json
+ * {
+ *   "error": "Freeze window end must be after start",
+ *   "code": "FREEZE_WINDOW_INVALID_RANGE"
  * }
  * ```
  *
@@ -56,6 +73,41 @@ export const dynamic = "force-dynamic";
 const FREEZE_STATUS_MAX_REQUESTS = 60;
 /** Window length in milliseconds (1 minute). */
 const FREEZE_STATUS_WINDOW_MS = 60_000;
+
+/** Stable reason code emitted when the configured freeze window is inverted. */
+const FREEZE_WINDOW_INVALID_RANGE = "FREEZE_WINDOW_INVALID_RANGE";
+
+/**
+ * Detect an inverted or malformed freeze window.  Returns a 422 payload when
+ * `end` is not strictly after `start`, or when either bound is an invalid
+ * date.  Returns `null` when the window is valid (or absent).
+ */
+function validateFreezeWindow(status: {
+  start?: Date | null;
+  end?: Date | null;
+}): { error: string; code: string } | null {
+  const { start, end } = status;
+  if (!start || !end) return null;
+
+  const startMs = start.getTime();
+  const endMs = end.getTime();
+
+  if (Number.isNaN(startMs) || Number.isNaN(endMs)) {
+    return {
+      error: "Freeze window start and end must be valid timestamps",
+      code: FREEZE_WINDOW_INVALID_RANGE,
+    };
+  }
+
+  if (endMs <= startMs) {
+    return {
+      error: "Freeze window end must be after start",
+      code: FREEZE_WINDOW_INVALID_RANGE,
+    };
+  }
+
+  return null;
+}
 
 export async function GET(request: NextRequest) {
   // ── Rate limiting ──────────────────────────────────────────────────────────
@@ -87,6 +139,20 @@ export async function GET(request: NextRequest) {
 
   // ── Freeze status ─────────────────────────────────────────────────────────
   const status = isFreezeWindowActive();
+
+  // ── Inverted-range validation (issue #776) ────────────────────────────────
+  const validationError = validateFreezeWindow(status);
+  if (validationError) {
+    return NextResponse.json(validationError, {
+      status: 422,
+      headers: {
+        // Never cache an invalid-configuration response — operators must see
+        // the failure immediately after fixing the window.
+        "Cache-Control": "no-store",
+        ...rateLimitHeaders,
+      },
+    });
+  }
 
   return NextResponse.json(
     {
