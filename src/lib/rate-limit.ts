@@ -23,8 +23,123 @@
  *   - Edge / CDN rate limiting (Vercel WAF, Cloudflare, AWS WAF) — recommended
  *   - Sticky sessions (IP affinity at the load balancer)
  *   - Redis-backed store (e.g. `@upstash/ratelimit`) for exact cluster-wide counts
+ *
+ * ## Per-route budgets
+ *
+ * Different endpoints have different traffic profiles and risk surfaces:
+ *
+ * | Route | Budget | Rationale |
+ * |---|---|---|
+ * | `POST /api/register` | 10 req/min | Writes to DB + Horizon; prevent address-scanning abuse |
+ * | `GET /api/contributors/export/csv` | 20 req/min | Expensive full-table read; API-key rate limit from api-key-auth also applies |
+ * | `GET /api/contributors/export/json` | 20 req/min | Same as CSV export |
+ * | `GET /api/stats` | 120 req/min | Public read; in-process cache absorbs DB load |
+ * | `POST /api/check` | 10 req/min (global default) | Horizon call per request |
+ *
+ * Routes pass one of the exported `ROUTE_BUDGETS.*` constants to `checkRateLimit`
+ * as the `options` argument.  The process-wide env-var defaults (`RATE_LIMIT_WINDOW_MS`
+ * / `RATE_LIMIT_MAX_REQUESTS`) continue to serve as the fallback for routes that
+ * do not specify an explicit budget.
  */
 import { NextRequest } from "next/server";
+
+// ---------------------------------------------------------------------------
+// Per-route budget constants
+// ---------------------------------------------------------------------------
+
+/**
+ * Documented per-route rate-limit budgets.
+ *
+ * Import the relevant constant in each route handler instead of hard-coding
+ * numbers.  This keeps the budget table in the module-level JSDoc and in
+ * `docs/DEPLOYMENT.md` consistent with what the code actually enforces.
+ *
+ * All windows are 60 seconds (sliding).  Multi-instance caveat applies —
+ * see module JSDoc.
+ */
+export const ROUTE_BUDGETS = {
+  /**
+   * `POST /api/register` — 10 req/min.
+   *
+   * Registration triggers a Horizon `loadAccount` call and a Postgres upsert;
+   * address-scanning or automated bulk registration would put heavy load on
+   * both.  10 is generous for a human user submitting forms but tight enough
+   * to absorb a scripted burst.
+   *
+   * Override at deploy time via `REGISTER_RATE_LIMIT_MAX_REQUESTS` and
+   * `REGISTER_RATE_LIMIT_WINDOW_MS` env vars.
+   */
+  register: parseRouteBudget(
+    "REGISTER_RATE_LIMIT_WINDOW_MS",
+    "REGISTER_RATE_LIMIT_MAX_REQUESTS",
+    { windowMs: 60_000, maxRequests: 10 },
+  ),
+
+  /**
+   * `GET /api/contributors/export/csv` — 20 req/min.
+   *
+   * Full-table read from Postgres; each call loads all contributor rows.
+   * 20/min is enough for automated tooling running on a schedule while still
+   * guarding against an accidentally looping script.
+   *
+   * Override via `EXPORT_RATE_LIMIT_MAX_REQUESTS` and
+   * `EXPORT_RATE_LIMIT_WINDOW_MS`.
+   */
+  export: parseRouteBudget(
+    "EXPORT_RATE_LIMIT_WINDOW_MS",
+    "EXPORT_RATE_LIMIT_MAX_REQUESTS",
+    { windowMs: 60_000, maxRequests: 20 },
+  ),
+
+  /**
+   * `GET /api/stats` — 120 req/min.
+   *
+   * Public, aggregate-only endpoint.  The in-process `statsCache` absorbs
+   * most DB load, so the per-IP limit mainly prevents a single IP from
+   * flushing the CDN edge cache.
+   *
+   * Override via `STATS_RATE_LIMIT_MAX_REQUESTS` and
+   * `STATS_RATE_LIMIT_WINDOW_MS`.
+   */
+  stats: parseRouteBudget(
+    "STATS_RATE_LIMIT_WINDOW_MS",
+    "STATS_RATE_LIMIT_MAX_REQUESTS",
+    { windowMs: 60_000, maxRequests: 120 },
+  ),
+} satisfies Record<string, RateLimitOptions>;
+
+/**
+ * Parse a per-route budget from two env vars, falling back to the provided
+ * defaults when either var is absent or invalid.
+ *
+ * Intentionally not exported as a named function — only `ROUTE_BUDGETS` is
+ * the public surface.  The name is used in JSDoc references above so the
+ * pattern is easy to follow when adding new routes.
+ */
+function parseRouteBudget(
+  windowVar: string,
+  maxVar: string,
+  defaults: RateLimitOptions,
+): RateLimitOptions {
+  const rawWindow = process.env[windowVar];
+  const rawMax = process.env[maxVar];
+
+  const windowMs =
+    rawWindow &&
+    Number.isFinite(Number.parseInt(rawWindow, 10)) &&
+    Number.parseInt(rawWindow, 10) > 0
+      ? Number.parseInt(rawWindow, 10)
+      : defaults.windowMs;
+
+  const maxRequests =
+    rawMax &&
+    Number.isFinite(Number.parseInt(rawMax, 10)) &&
+    Number.parseInt(rawMax, 10) > 0
+      ? Number.parseInt(rawMax, 10)
+      : defaults.maxRequests;
+
+  return { windowMs, maxRequests };
+}
 
 interface RateLimitEntry {
   timestamps: number[];

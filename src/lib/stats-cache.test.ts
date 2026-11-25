@@ -362,3 +362,206 @@ describe("cache header roundtrip (integration)", () => {
     expect(pub).toContain("public");
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cache stampede / single-flight coalescing — the core of this issue
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("cache stampede prevention (single-flight coalescing)", () => {
+  let cache: CacheStore<{ total: number }>;
+
+  beforeEach(() => {
+    cache = new CacheStore<{ total: number }>(60_000);
+  });
+
+  it("concurrent cold misses call the factory exactly once (happy path)", async () => {
+    // Simulate an expensive DB aggregate that takes some time to resolve.
+    let callCount = 0;
+    const factory = vi.fn().mockImplementation(
+      () =>
+        new Promise<{ total: number }>((resolve) => {
+          callCount++;
+          // Resolve asynchronously so all 10 concurrent callers land on a
+          // cold cache before the first one finishes.
+          setTimeout(() => resolve({ total: 42 }), 10);
+        })
+    );
+
+    // Fan out 10 concurrent callers — mirrors a registration-open-day spike
+    // where GET /api/stats receives many requests on a cold cache.
+    const results = await Promise.all(
+      Array.from({ length: 10 }, () => cache.getOrCompute("stats:dashboard", factory))
+    );
+
+    // Every caller should get the same result.
+    for (const result of results) {
+      expect(result).toEqual({ total: 42 });
+    }
+    // The DB was only hit once despite 10 concurrent misses.
+    expect(callCount).toBe(1);
+    expect(factory).toHaveBeenCalledTimes(1);
+  });
+
+  it("a second wave after the first completes does not call the factory again (cached hit)", async () => {
+    const factory = vi.fn().mockResolvedValue({ total: 99 });
+
+    // First wave — populates the cache.
+    await Promise.all([
+      cache.getOrCompute("stats:k", factory),
+      cache.getOrCompute("stats:k", factory),
+    ]);
+
+    // Second wave — cache is warm, factory must not be called again.
+    await Promise.all([
+      cache.getOrCompute("stats:k", factory),
+      cache.getOrCompute("stats:k", factory),
+    ]);
+
+    expect(factory).toHaveBeenCalledTimes(1);
+  });
+
+  it("a factory error is not coalesced — subsequent callers retry (failure path)", async () => {
+    let attempt = 0;
+    const factory = vi.fn().mockImplementation(
+      () =>
+        new Promise<{ total: number }>((_, reject) => {
+          attempt++;
+          if (attempt === 1) {
+            // First call fails — simulates a transient DB outage.
+            setTimeout(() => reject(new Error("DB connection lost")), 5);
+          } else {
+            setTimeout(() => ({ total: 1 }), 5);
+          }
+        })
+    );
+
+    // All concurrent callers on the first attempt should reject.
+    const firstWave = await Promise.allSettled([
+      cache.getOrCompute("stats:k", factory),
+      cache.getOrCompute("stats:k", factory),
+    ]);
+    expect(firstWave.every((r) => r.status === "rejected")).toBe(true);
+
+    // Nothing should be cached after a failure.
+    expect(cache.get("stats:k")).toBeNull();
+
+    // A subsequent caller should be able to retry (new factory invocation).
+    factory.mockResolvedValue({ total: 7 });
+    const retry = await cache.getOrCompute("stats:k", factory);
+    expect(retry).toEqual({ total: 7 });
+  });
+
+  it("independent keys do not share in-flight state", async () => {
+    let aCount = 0;
+    let bCount = 0;
+    const factoryA = vi.fn().mockImplementation(
+      () =>
+        new Promise<{ total: number }>((resolve) => {
+          aCount++;
+          setTimeout(() => resolve({ total: 1 }), 10);
+        })
+    );
+    const factoryB = vi.fn().mockImplementation(
+      () =>
+        new Promise<{ total: number }>((resolve) => {
+          bCount++;
+          setTimeout(() => resolve({ total: 2 }), 10);
+        })
+    );
+
+    const [a1, a2, b1, b2] = await Promise.all([
+      cache.getOrCompute("stats:a", factoryA),
+      cache.getOrCompute("stats:a", factoryA),
+      cache.getOrCompute("stats:b", factoryB),
+      cache.getOrCompute("stats:b", factoryB),
+    ]);
+
+    expect(a1).toEqual({ total: 1 });
+    expect(a2).toEqual({ total: 1 });
+    expect(b1).toEqual({ total: 2 });
+    expect(b2).toEqual({ total: 2 });
+    expect(aCount).toBe(1);
+    expect(bCount).toBe(1);
+  });
+
+  it("after invalidation concurrent callers re-coalesce onto a single new factory call", async () => {
+    const factory = vi
+      .fn()
+      .mockResolvedValueOnce({ total: 10 })
+      .mockResolvedValueOnce({ total: 20 });
+
+    // Populate the cache.
+    await cache.getOrCompute("stats:k", factory);
+
+    // Invalidate so the next wave hits a cold cache.
+    cache.invalidate("stats:k");
+
+    // New concurrent wave — should coalesce to one call producing { total: 20 }.
+    const results = await Promise.all([
+      cache.getOrCompute("stats:k", factory),
+      cache.getOrCompute("stats:k", factory),
+      cache.getOrCompute("stats:k", factory),
+    ]);
+
+    for (const r of results) {
+      expect(r).toEqual({ total: 20 });
+    }
+    // First call + one coalesced second call = 2 total factory invocations.
+    expect(factory).toHaveBeenCalledTimes(2);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// statsCache singleton — stampede guard at 100+ contributor scale
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("statsCache singleton — single-flight stampede guard", () => {
+  beforeEach(() => {
+    statsCache.reset();
+  });
+
+  it("100 concurrent cold misses call the DB factory exactly once", async () => {
+    const expensiveDbQuery = vi.fn().mockImplementation(
+      () =>
+        new Promise<unknown>((resolve) =>
+          setTimeout(
+            () => resolve({ totalContributors: 500, readyCount: 430, readyPercent: 86 }),
+            10
+          )
+        )
+    );
+
+    const key = 'stats:"dashboard"';
+    const callers = Array.from({ length: 100 }, () =>
+      statsCache.getOrCompute(key, expensiveDbQuery)
+    );
+    const results = await Promise.all(callers);
+
+    expect(expensiveDbQuery).toHaveBeenCalledTimes(1);
+    for (const r of results) {
+      expect((r as { totalContributors: number }).totalContributors).toBe(500);
+    }
+  });
+
+  it("DB outage during cold miss leaves no partial state; next call retries", async () => {
+    const key = 'stats:"dashboard"';
+    const failingQuery = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("connection refused"))
+      .mockResolvedValueOnce({ totalContributors: 1, readyCount: 0, readyPercent: 0 });
+
+    // All concurrent callers on the failing attempt should reject.
+    const firstWave = await Promise.allSettled([
+      statsCache.getOrCompute(key, failingQuery),
+      statsCache.getOrCompute(key, failingQuery),
+    ]);
+    expect(firstWave.every((r) => r.status === "rejected")).toBe(true);
+    // Nothing cached.
+    expect(statsCache.get(key)).toBeNull();
+
+    // The next call should succeed.
+    const result = await statsCache.getOrCompute(key, failingQuery);
+    expect((result as { totalContributors: number }).totalContributors).toBe(1);
+    expect(failingQuery).toHaveBeenCalledTimes(2);
+  });
+});

@@ -120,3 +120,19 @@ export type RedactionMode = "self" | "admin";
 export function getRedactionMode(user: SessionUser | null | undefined): RedactionMode {
   return isMaintainer(user) ? "admin" : "self";
 }
+
+/**
+ * Require maintainer privileges for mutating the address-anomaly allowlist.
+ *
+ * The allowlist is maintainer-only. Admins are global maintainers; a
+ * maintainer must be scoped to the given org (the allowlist's owning org).
+ * Reuses the same org-scope rules as `requireMaintainer` so the allowlist
+ * does not introduce a parallel auth subsystem. Returns stable reason codes
+ * (`unauthenticated`, `forbidden`) for actionable errors.
+ */
+export function requireAllowlistMaintainer(
+  req: NextRequest,
+  org: string | null | undefined,
+): AuthResult {
+  return requireMaintainer(req, org);
+}
