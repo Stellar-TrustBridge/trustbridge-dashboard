@@ -327,16 +327,49 @@ A revocation is always written to `AuditLog` with `action: "api_key.revoked"`.
 
 ## Audit log entries
 
-All key lifecycle events appear in `/api/audit` (visible in the **Recent activity** section of `/dashboard/settings`):
+All key lifecycle and usage events appear in `/api/audit` (visible in the **Recent activity** section of `/dashboard/settings`):
 
-| `action` | When |
-|---|---|
-| `api_key.created` | Key was successfully created. `metadata` includes `scopes` and `expiresAt`. |
-| `api_key.revoked` | Key was revoked by its owner. `targetLabel` is the key name. |
-| `api_key.revoke_denied` | A maintainer attempted to revoke a key owned by another user. |
-| `api_key.use_rejected` | An incoming request was rejected. `metadata.reason` is one of `revoked`, `expired`, or `insufficient_scope`. |
+| `action` | When | Key metadata fields |
+|---|---|---|
+| `api_key.created` | Key was successfully created. | `metadata.scopes`, `metadata.expiresAt` |
+| `api_key.revoked` | Key was revoked by its owner. `targetLabel` is the key name. | — |
+| `api_key.revoke_denied` | A maintainer attempted to revoke a key owned by another user. | — |
+| `api_key.used` | An incoming request was **successfully** authenticated. Written on every allowed authentication so maintainers can track key usage by route and time. | `metadata.route`, `metadata.keyId`, `metadata.outcome` = `"allowed"` |
+| `api_key.use_rejected` | An incoming request was rejected. | `metadata.reason` = `revoked` \| `expired` \| `insufficient_scope` |
+
+### Access log redaction policy
+
+`api_key.used` entries never contain:
+- The raw key token (`tb_…`) or its SHA-256 hash.
+- Any wallet address, GitHub access token, or other credential.
+- Any user-supplied input beyond the route path.
 
 `actorLogin` for authenticated export requests is `api-key:<key-name>`, making automated exports easy to identify and filter in the audit log.
+
+### Querying usage by key name (maintainer SQL)
+
+```sql
+-- All routes hit by a specific key in the last 30 days
+SELECT
+  created_at,
+  metadata->>'route'  AS route,
+  metadata->>'outcome' AS outcome
+FROM "AuditLog"
+WHERE action = 'api_key.used'
+  AND actor_login = 'api-key:nightly-export-cron'
+  AND created_at > now() - interval '30 days'
+ORDER BY created_at DESC;
+
+-- Keys that were rejected (revoked or expired) in the last 7 days
+SELECT
+  created_at,
+  target_label AS key_name,
+  metadata->>'reason' AS reason
+FROM "AuditLog"
+WHERE action = 'api_key.use_rejected'
+  AND created_at > now() - interval '7 days'
+ORDER BY created_at DESC;
+```
 
 ---
 

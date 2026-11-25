@@ -175,3 +175,59 @@ by org and user; the first successful response is replayed for **5 minutes**
 (default; override with `CHECKLIST_IDEMPOTENCY_TTL_MS` in milliseconds) with
 `X-Idempotent-Replay: true`. Requests without the header behave as before.
 See [CHECKLIST_IDEMPOTENCY.md](./CHECKLIST_IDEMPOTENCY.md).
+
+---
+
+## Registry mode (`REGISTRY_MODE`)
+
+`REGISTRY_MODE` controls how the maintainer dashboard describes the freshness of
+contributor data.  It is **optional** and defaults to `"live"`.
+
+| Value | When to use |
+|---|---|
+| `"live"` *(default)* | You trigger `POST /api/contributors` manually to refresh Horizon data. |
+| `"synced"` | A scheduled `syncContractToPostgres()` cron job keeps Postgres in sync automatically. |
+
+Both modes serve reads from Postgres — the mode only changes the
+`registryMode` field in `GET /api/contributors` responses.
+
+### Local setup
+
+No configuration needed for local development.  The default `"live"` mode
+works without any background jobs.
+
+```bash
+# .env.local — only needed if you are testing the synced mode locally
+REGISTRY_MODE=synced
+```
+
+### Switching modes in production
+
+See the full migration guide in
+[ARCHITECTURE.md — Registry mode](./ARCHITECTURE.md#registry-mode-registry_mode).
+
+Short version:
+
+```bash
+# Enable synced mode (after verifying contract-sync is healthy)
+vercel env add REGISTRY_MODE production   # value: synced
+
+# Revert to live
+vercel env rm REGISTRY_MODE production
+```
+
+After changing the env var, **redeploy** so all serverless instances pick up
+the new value.  Validate with:
+
+```bash
+curl -s https://your-deployment.vercel.app/api/contributors \
+  -H "Cookie: next-auth.session-token=<maintainer-token>" \
+  | jq .registryMode
+```
+
+Expected output: `"synced"` (or `"live"` after reverting).
+
+### Failure-open guarantee
+
+An unrecognized `REGISTRY_MODE` value (including typos) falls back to `"live"`
+without error.  Read endpoints are never broken by a bad env var.

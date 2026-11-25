@@ -7,13 +7,11 @@ import {
   checkRateLimit,
   extractClientIp,
   buildRateLimitHeaders,
+  ROUTE_BUDGETS,
 } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
-/** Generous limit for the public stats endpoint (120 req/min default). */
-const STATS_MAX_REQUESTS = 120;
 
 /**
  * GET /api/stats
@@ -52,10 +50,8 @@ const STATS_MAX_REQUESTS = 120;
 export async function GET(request: NextRequest) {
   // ── Rate limit ─────────────────────────────────────────────────────────────
   const clientIp = extractClientIp(request);
-  const rateLimit = checkRateLimit(clientIp, {
-    maxRequests: STATS_MAX_REQUESTS,
-  });
-  const rateLimitHeaders = buildRateLimitHeaders(rateLimit, STATS_MAX_REQUESTS);
+  const rateLimit = checkRateLimit(clientIp, ROUTE_BUDGETS.stats);
+  const rateLimitHeaders = buildRateLimitHeaders(rateLimit, ROUTE_BUDGETS.stats.maxRequests);
 
   if (!rateLimit.allowed) {
     return NextResponse.json(

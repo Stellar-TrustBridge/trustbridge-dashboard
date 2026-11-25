@@ -15,11 +15,29 @@ import {
 } from "@/lib/registration-insights";
 import { getContributors } from "@/lib/registrations";
 import { buildJson, buildJsonFilename } from "@/lib/csv";
+import {
+  checkRateLimit,
+  extractClientIp,
+  ROUTE_BUDGETS,
+} from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(request: NextRequest) {
+  // ── Per-IP rate limit for session-auth path ───────────────────────────
+  const clientIp = extractClientIp(request);
+  const ipRateLimit = checkRateLimit(`export:${clientIp}`, ROUTE_BUDGETS.export);
+  if (!ipRateLimit.allowed) {
+    return NextResponse.json(
+      { error: "Too many export requests. Please wait before retrying." },
+      {
+        status: 429,
+        headers: buildRateLimitHeaders(ipRateLimit, ROUTE_BUDGETS.export.maxRequests),
+      }
+    );
+  }
+
   // ── Auth: session (browser) OR API key (cron/automation) ──────────────
   let actorId: string | null = null;
   let actorLogin: string | null = null;

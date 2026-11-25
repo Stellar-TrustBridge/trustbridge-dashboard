@@ -356,6 +356,86 @@ test.describe("Maintainer dashboard — contributor table", () => {
     await expect(page.getByText("@bob")).not.toBeVisible();
     await expect(page.getByText("@charlie")).not.toBeVisible();
   });
+});
+
+// ── DLQ / queue retry journey (issue: E2E coverage for DLQ page) ──────────
+
+const dlqQueueFixture = {
+  items: [
+    {
+      id: "dlq-1",
+      jobType: "payout",
+      status: "failed",
+      attempts: 3,
+      lastError: "tx_bad_seq",
+      createdAt: new Date().toISOString(),
+      retryable: true,
+    },
+  ],
+  total: 1,
+};
+
+const dlqEmptyFixture = { items: [], total: 0 };
+
+test.describe("Maintainer queue / DLQ journey", () => {
+  test("maintainer can load /dashboard/queue and see failed jobs", async ({
+    page,
+  }) => {
+    await mockMaintainerSession(page);
+    await interceptApi(page, "**/api/contributors/queue/dlq**", dlqQueueFixture);
+    await page.goto("/dashboard/queue");
+    await expect(page.getByText("tx_bad_seq")).toBeVisible();
+    await expect(page.getByRole("button", { name: /retry/i }).first()).toBeEnabled();
+  });
+
+  test("empty DLQ renders an empty state without retry actions", async ({
+    page,
+  }) => {
+    await mockMaintainerSession(page);
+    await interceptApi(page, "**/api/contributors/queue/dlq**", dlqEmptyFixture);
+    await page.goto("/dashboard/queue");
+    await expect(page.getByText(/no (failed|dead|queued)/i).first()).toBeVisible();
+    await expect(page.getByRole("button", { name: /retry/i })).toHaveCount(0);
+  });
+
+  test("retry action succeeds on the happy path", async ({ page }) => {
+    await mockMaintainerSession(page);
+    await interceptApi(page, "**/api/contributors/queue/dlq**", dlqQueueFixture);
+    let retried = false;
+    await page.route("**/api/contributors/queue/dlq/**", async (route) => {
+      if (route.request().method() === "POST") {
+        retried = true;
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ ok: true }),
+        });
+        return;
+      }
+      await route.fallback();
+    });
+    await page.goto("/dashboard/queue");
+    await page.getByRole("button", { name: /retry/i }).first().click();
+    await expect.poll(() => retried).toBe(true);
+  });
+});
+
+// ── Contributor table (filters) ───────────────────────────────────────────
+
+test.describe("Maintainer dashboard — contributor filters", () => {
+  test.beforeEach(async ({ page }) => {
+    await setupDashboard(page);
+    await page.goto("/dashboard");
+    await expect(page.getByText("@alice")).toBeVisible();
+  });
+
+  test("'Ready' filter shows only ready contributors", async ({ page }) => {
+    await page.getByRole("button", { name: /✅ Ready/i }).click();
+
+    await expect(page.getByText("@alice")).toBeVisible();
+    await expect(page.getByText("@bob")).not.toBeVisible();
+    await expect(page.getByText("@charlie")).not.toBeVisible();
+  });
 
   test("'Needs attention' filter hides ready contributors", async ({ page }) => {
     await page.getByRole("button", { name: /❌ Needs attention/i }).click();

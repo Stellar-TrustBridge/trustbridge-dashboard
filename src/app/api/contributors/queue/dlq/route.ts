@@ -33,10 +33,13 @@ export async function GET(request: Request) {
       type: job.type,
       status: job.status,
       error: job.error ?? null,
-      attempts:
-        typeof (job.data as Record<string, unknown>)?.__retries === "number"
-          ? ((job.data as Record<string, unknown>).__retries as number)
-          : 0,
+       attempts:
+ typeof (job.data as Record<string, unknown>)?.__retries === "number"
+ ? ((job.data as Record<string, unknown>).__retries as number)
+ : 0,
+ retryable: job.status === "failed",
+ retryDisabledReason:
+ job.status === "failed" ? null : "Only failed jobs can be retried",
       createdAt: job.createdAt,
       startedAt: job.startedAt ?? null,
       completedAt: job.completedAt ?? null,
