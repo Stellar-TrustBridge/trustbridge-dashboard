@@ -8,6 +8,13 @@ import { getRateLimitMetrics } from "@/lib/rate-limit";
 import { getContributors } from "@/lib/registrations";
 import { buildStalenessSummary } from "@/lib/stale-export";
 import { summarizeContributors } from "@/lib/stats";
+import {
+  validateMetricName,
+  validateLabelName,
+  validateLabelValue,
+  enforceLabelCardinality,
+  type MetricValidationReasonCode,
+} from "@/lib/stats-validation";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -24,6 +31,33 @@ interface PrometheusMetric {
 
 function sanitizeLabel(value: string): string {
   return value.replace(/[^a-zA-Z0-9_:.-]/g, "_");
+}
+
+/**
+ * Validate a metric name, label names, and label values before export.
+ * Returns a stable reason code on the first violation, or null when valid.
+ * Guards against cardinality bombs and malformed Prometheus exposition.
+ */
+function validateMetric(metric: PrometheusMetric): MetricValidationReasonCode | null {
+  const nameCheck = validateMetricName(metric.name);
+  if (!nameCheck.ok) return nameCheck.reason;
+
+  for (const sample of metric.samples) {
+    if (!sample.labels) continue;
+    const labelNames = Object.keys(sample.labels);
+    for (const labelName of labelNames) {
+      const nameResult = validateLabelName(labelName);
+      if (!nameResult.ok) return nameResult.reason;
+    }
+    const cardinality = enforceLabelCardinality(labelNames);
+    if (!cardinality.ok) return cardinality.reason;
+    for (const labelValue of Object.values(sample.labels)) {
+      const valueResult = validateLabelValue(labelValue);
+      if (!valueResult.ok) return valueResult.reason;
+    }
+  }
+
+  return null;
 }
 
 function formatPrometheus(metrics: PrometheusMetric[]): string {
@@ -220,90 +254,6 @@ export async function GET(request: NextRequest) {
       samples: [{ value: staleness.stale ? 1 : 0 }],
     },
     {
-      name: "trustbridge_process_local_info",
-      help: "Constant 1 gauge — indicates these metrics are process-local and NOT sharded/aggregated until Redis is deployed",
-      type: "gauge",
-      samples: [{ labels: { scope: "process" }, value: 1 }],
-    },
-  ];
+      name: "trus
 
-  // Contract sync lag (issue #659). -1 seconds means "no observation yet".
-  const lagStatusValue =
-    contractLag.status === "ok" ? 0 : contractLag.status === "lagging" ? 1 : 2;
-  const lagMetrics: PrometheusMetric[] = [
-    {
-      name: "trustbridge_contract_sync_lag_status",
-      help: "Contract sync lag status: 0=ok 1=lagging 2=stalled (see reason label semantics in docs/ARCHITECTURE.md)",
-      type: "gauge",
-      samples: [
-        { labels: { reason: contractLag.reason }, value: lagStatusValue },
-      ],
-    },
-    {
-      name: "trustbridge_contract_sync_since_last_success_seconds",
-      help: "Seconds since the last fully successful contract sync, or -1 if none in this process",
-      type: "gauge",
-      samples: [
-        {
-          value:
-            contractLag.sinceLastSuccessMs === null
-              ? -1
-              : Math.round(contractLag.sinceLastSuccessMs / 1000),
-        },
-      ],
-    },
-    {
-      name: "trustbridge_contract_sync_since_last_cursor_advance_seconds",
-      help: "Seconds since the observed Soroban RPC cursor last advanced, or -1 if none observed",
-      type: "gauge",
-      samples: [
-        {
-          value:
-            contractLag.sinceLastCursorAdvanceMs === null
-              ? -1
-              : Math.round(contractLag.sinceLastCursorAdvanceMs / 1000),
-        },
-      ],
-    },
-    {
-      name: "trustbridge_contract_sync_lag_threshold_seconds",
-      help: "Configured contract sync lag threshold in seconds (CONTRACT_SYNC_LAG_THRESHOLD_MS)",
-      type: "gauge",
-      samples: [{ value: Math.round(contractLag.thresholdMs / 1000) }],
-    },
-    {
-      name: "trustbridge_contract_sync_stall_threshold_seconds",
-      help: "Configured contract sync stall threshold in seconds (CONTRACT_SYNC_STALL_THRESHOLD_MS)",
-      type: "gauge",
-      samples: [{ value: Math.round(contractLag.stallThresholdMs / 1000) }],
-    },
-    {
-      name: "trustbridge_contract_sync_last_success_timestamp_seconds",
-      help: "Unix timestamp of the last fully successful contract sync, or 0 if none in this process",
-      type: "gauge",
-      samples: [
-        {
-          value: contractLag.lastSuccessAt
-            ? Math.floor(Date.parse(contractLag.lastSuccessAt) / 1000)
-            : 0,
-        },
-      ],
-    },
-    {
-      name: "trustbridge_contract_sync_lag_alerts_total",
-      help: "Contract sync lag alerts successfully delivered since process start (process-local)",
-      type: "counter",
-      samples: [{ value: contractAlerts.sentCount }],
-    },
-  ];
-
-  const body = formatPrometheus([...metrics, ...lagMetrics]);
-
-  return new NextResponse(body, {
-    status: 200,
-    headers: {
-      "Content-Type": "text/plain; version=0.0.4; charset=utf-8",
-      "Cache-Control": "no-store, max-age=0",
-    },
-  });
-}
+/* … truncated 3048 chars — edit only what you need near the top … */

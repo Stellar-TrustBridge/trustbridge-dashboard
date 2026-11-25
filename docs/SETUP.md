@@ -269,3 +269,22 @@ Expected output: `"synced"` (or `"live"` after reverting).
 An unrecognized `REGISTRY_MODE` value (including typos) falls back to `"live"`
 without error.  Read endpoints are never broken by a bad env var.
 
+## Readiness flow (operator notes)
+
+Registration readiness is evaluated by `src/lib/readiness.ts` and rechecked
+via `POST /api/register/recheck`. A registration can fail readiness (for
+example, an unfunded account or a missing trustline), the operator funds the
+account and establishes the trustline, and then triggers an Action recheck
+that should pass.
+
+Reason codes surfaced by readiness and recheck:
+
+- `account_unfunded` — account has no funds on Horizon
+- `account_no_trustline` — account is missing the required trustline
+- `account_low_balance` — balance below the minimum reserve
+- `account_ready` — account is funded and ready
+- `horizon_rate_limited` — Horizon returned a rate-limit response
+- `horizon_error` — Horizon returned an unexpected error
+
+For the full step-by-step walkthrough (including mock Horizon mappings and
+sample output), see [`docs/E2E_TESTING.md`](./E2E_TESTING.md).

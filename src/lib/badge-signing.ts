@@ -4,8 +4,37 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 
 import { canonicalizeGithubUsername } from "@/lib/github-username";
 
+/**
+ * HTTP header that carries the key id used to sign a badge.
+ *
+ * Consumers (and the badge API route) read this header to learn which
+ * signing key produced a given signature so they can verify against the
+ * correct key during rotation. See `docs/ARCHITECTURE.md` for the full
+ * rotation runbook and a reproducible verification sample.
+ */
+export const BADGE_KEY_ID_HEADER = "x-badge-key-id";
+
+/**
+ * Default key id used when no explicit `BADGE_SIGNING_KEY_ID` is configured.
+ * Rotating keys means bumping this id (or the env var) so old signatures
+ * remain attributable to the key that produced them.
+ */
+export const DEFAULT_BADGE_KEY_ID = "v1";
+
 function signingUsername(username: string): string {
   return canonicalizeGithubUsername(username) ?? username;
+}
+
+/**
+ * Resolves the active badge signing key id.
+ *
+ * The key id is emitted in the `x-badge-key-id` response header so verifiers
+ * can select the matching key during rotation. Prefers BADGE_SIGNING_KEY_ID,
+ * falling back to DEFAULT_BADGE_KEY_ID.
+ */
+export function getBadgeSigningKeyId(): string {
+  const keyId = process.env.BADGE_SIGNING_KEY_ID?.trim();
+  return keyId || DEFAULT_BADGE_KEY_ID;
 }
 
 /**

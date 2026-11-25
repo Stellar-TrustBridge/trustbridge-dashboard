@@ -369,6 +369,113 @@ export async function resolveDualAuth(
 }
 
 /**
- * GraphQL abuse-protection limits. These bound the cost 
+ * GraphQL abuse-protection limits. These bound the cost of a single GraphQL
+ * request so a caller cannot exhaust the server with an oversized or deeply
+ * nested document. They are enforced by `src/app/api/graphql/route.ts`.
+ */
+export const GRAPHQL_MAX_QUERY_BYTES = 16 * 1024;
+export const GRAPHQL_MAX_DEPTH = 12;
 
-/* … truncated 2008 chars — edit only what you need near the top … */
+/**
+ * Persisted-query allowlist mode for the GraphQL endpoint.
+ *
+ * When `GRAPHQL_PERSISTED_QUERIES_ONLY` is set to a truthy value (`1`, `true`,
+ * `yes`, `on`), the endpoint only accepts queries identified by a persisted
+ * query hash that appears in the allowlist. Arbitrary inline queries are
+ * rejected. When the env var is unset or falsy, behavior is unchanged and
+ * inline queries are accepted (subject to the existing abuse limits).
+ *
+ * The allowlist is supplied via `GRAPHQL_PERSISTED_QUERY_ALLOWLIST` as a
+ * comma-separated list of lowercase hex SHA-256 hashes. Hashes are normalized
+ * to lowercase and trimmed; empty entries are ignored.
+ */
+export type PersistedQueryErrorCode =
+  | "persisted_queries_disabled"
+  | "missing_query"
+  | "invalid_persisted_query_id"
+  | "query_too_large"
+  | "unknown_persisted_query";
+
+export interface PersistedQueryResult {
+  ok: boolean;
+  /** Stable error code when `ok` is false. */
+  error?: PersistedQueryErrorCode;
+  /** The normalized persisted-query hash when one was accepted. */
+  hash?: string;
+}
+
+const PERSISTED_QUERY_HASH_RE = /^[a-f0-9]{64}$/;
+
+function isTruthyEnv(value: string | undefined): boolean {
+  if (!value) return false;
+  const normalized = value.trim().toLowerCase();
+  return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
+}
+
+/**
+ * Whether persisted-query allowlist mode is enabled for this process.
+ */
+export function isPersistedQueryModeEnabled(): boolean {
+  return isTruthyEnv(process.env.GRAPHQL_PERSISTED_QUERIES_ONLY);
+}
+
+/**
+ * Parse the configured persisted-query allowlist into a normalized set of
+ * lowercase SHA-256 hashes. Malformed entries are dropped so a typo cannot
+ * silently widen the allowlist.
+ */
+export function getPersistedQueryAllowlist(): Set<string> {
+  const raw = process.env.GRAPHQL_PERSISTED_QUERY_ALLOWLIST ?? "";
+  const hashes = new Set<string>();
+  for (const entry of raw.split(",")) {
+    const normalized = entry.trim().toLowerCase();
+    if (PERSISTED_QUERY_HASH_RE.test(normalized)) {
+      hashes.add(normalized);
+    }
+  }
+  return hashes;
+}
+
+/**
+ * Enforce persisted-query allowlist mode for a GraphQL request body.
+ *
+ * Returns `{ ok: true }` when the mode is disabled (default behavior is
+ * unchanged) or when the supplied persisted-query hash is present in the
+ * allowlist. Returns a stable error code otherwise. This check is purely
+ * additive: callers must still run auth, CSRF, org-scope, pause/freeze, and
+ * dry-run checks before executing the query.
+ */
+export function enforcePersistedQueryAllowlist(input: {
+  query?: unknown;
+  persistedQueryId?: unknown;
+}): PersistedQueryResult {
+  if (!isPersistedQueryModeEnabled()) {
+    return { ok: true };
+  }
+
+  const rawId = input.persistedQueryId;
+  const hasId = typeof rawId === "string" && rawId.trim().length > 0;
+
+  if (!hasId) {
+    // No persisted-query id: inline queries are not allowed in this mode.
+    if (typeof input.query === "string" && input.query.length > GRAPHQL_MAX_QUERY_BYTES) {
+      return { ok: false, error: "query_too_large" };
+    }
+    if (typeof input.query === "string" && input.query.trim().length > 0) {
+      return { ok: false, error: "unknown_persisted_query" };
+    }
+    return { ok: false, error: "missing_query" };
+  }
+
+  const normalized = (rawId as string).trim().toLowerCase();
+  if (!PERSISTED_QUERY_HASH_RE.test(normalized)) {
+    return { ok: false, error: "invalid_persisted_query_id" };
+  }
+
+  const allowlist = getPersistedQueryAllowlist();
+  if (!allowlist.has(normalized)) {
+    return { ok: false, error: "unknown_persisted_query" };
+  }
+
+  return { ok: true, hash: normalized };
+}

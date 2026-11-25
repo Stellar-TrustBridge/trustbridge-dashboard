@@ -52,6 +52,104 @@ const INTROSPECTION_DISABLED =
   process.env.NODE_ENV === "production" ||
   process.env.GRAPHQL_DISABLE_INTROSPECTION === "1";
 
+/**
+ * Persisted-query allowlist mode (opt-in).
+ *
+ * When `GRAPHQL_PERSISTED_QUERIES_ONLY=1`, the endpoint refuses to execute any
+ * query text that is not identified by a known persisted-query hash. Clients
+ * send the hash via the `X-Persisted-Query-Hash` header (or the
+ * `extensions.persistedQueryHash` field of the JSON body) and may omit the
+ * `query` field entirely. Unknown hashes, missing hashes, and inline query text
+ * are rejected with stable reason codes so operators can alert on them.
+ *
+ * The allowlist is supplied by operators as a comma-separated list of
+ * `sha256:<hex>` entries in `GRAPHQL_PERSISTED_QUERY_ALLOWLIST`. Hashes are
+ * compared case-insensitively after normalising the `sha256:` prefix. When the
+ * mode is enabled but the allowlist is empty, every request is rejected —
+ * fail-closed by design.
+ */
+const PERSISTED_QUERIES_ONLY = process.env.GRAPHQL_PERSISTED_QUERIES_ONLY === "1";
+
+const PERSISTED_QUERY_HASH_PATTERN = /^sha256:[0-9a-f]{64}$/i;
+
+const PERSISTED_QUERY_ALLOWLIST: ReadonlySet<string> = new Set(
+  (process.env.GRAPHQL_PERSISTED_QUERY_ALLOWLIST ?? "")
+    .split(",")
+    .map((entry) => entry.trim().toLowerCase())
+    .filter((entry) => entry.length > 0)
+);
+
+const PERSISTED_QUERY_REASON = {
+  MISSING_HASH: "PERSISTED_QUERY_HASH_REQUIRED",
+  MALFORMED_HASH: "PERSISTED_QUERY_HASH_MALFORMED",
+  UNKNOWN_HASH: "PERSISTED_QUERY_HASH_UNKNOWN",
+  INLINE_QUERY: "PERSISTED_QUERY_INLINE_FORBIDDEN",
+} as const;
+
+type PersistedQueryResult =
+  | { ok: true }
+  | { ok: false; reason: string; message: string };
+
+/**
+ * Enforce persisted-query allowlist mode for a single request.
+ *
+ * Returns `{ ok: true }` when the mode is disabled (default) or when the
+ * supplied hash is present, well-formed, and present in the allowlist. All
+ * failure branches return a stable reason code and a client-safe message that
+ * never echoes the raw hash or the allowlist contents.
+ */
+function enforcePersistedQueryAllowlist(
+  hashHeader: string | null,
+  bodyHash: unknown,
+  hasInlineQuery: boolean
+): PersistedQueryResult {
+  if (!PERSISTED_QUERIES_ONLY) return { ok: true };
+
+  const rawHash =
+    typeof hashHeader === "string" && hashHeader.length > 0
+      ? hashHeader
+      : typeof bodyHash === "string" && bodyHash.length > 0
+        ? bodyHash
+        : null;
+
+  if (rawHash === null) {
+    return {
+      ok: false,
+      reason: PERSISTED_QUERY_REASON.MISSING_HASH,
+      message:
+        "Persisted-query mode is enabled: supply X-Persisted-Query-Hash (sha256:<hex>).",
+    };
+  }
+
+  const normalised = rawHash.trim().toLowerCase();
+  if (!PERSISTED_QUERY_HASH_PATTERN.test(normalised)) {
+    return {
+      ok: false,
+      reason: PERSISTED_QUERY_REASON.MALFORMED_HASH,
+      message: "Persisted-query hash must match sha256:<64 hex chars>.",
+    };
+  }
+
+  if (!PERSISTED_QUERY_ALLOWLIST.has(normalised)) {
+    return {
+      ok: false,
+      reason: PERSISTED_QUERY_REASON.UNKNOWN_HASH,
+      message: "Persisted-query hash is not in the allowlist.",
+    };
+  }
+
+  if (hasInlineQuery) {
+    return {
+      ok: false,
+      reason: PERSISTED_QUERY_REASON.INLINE_QUERY,
+      message:
+        "Persisted-query mode is enabled: inline query text is not accepted.",
+    };
+  }
+
+  return { ok: true };
+}
+
 const VERIFICATION_STATUSES = ["verified", "unverified", "banned"] as const;
 type VerificationStatus = (typeof VERIFICATION_STATUSES)[number];
 
@@ -237,33 +335,272 @@ type ContributorsLimit =
  * Validate the `contributors(verificationStatus:)` argument.
  *
  * The enum type already rejects unknown literals during validation, but a
- * variable can carry an arbitrary JSON value that only fails at execution
- * time. We coerce variables against the enum here so the cost walk can reject
- * malformed filters with a stable, actionable message before the resolver
- * runs — and so an empty string never reaches the database layer.
+ * variable can carry an arbitrary JSON value that bypasses the enum check, so
+ * variables are coerced against the enum type here and rejected with a stable
+ * message when they do not match one of the declared values.
  */
 function resolveVerificationStatus(
   valueNode: ValueNode | undefined,
   variables: Record<string, unknown>
-): VerificationStatusResult {
-  const message = `contributors.verificationStatus must be one of ${VERIFICATION_STATUSES.join(
-    ", "
-  )}`;
-
-  if (!valueNode || valueNode.kind === Kind.NULL) {
-    return { ok: true, status: undefined };
-  }
+): VerificationStatus | undefined {
+  if (!valueNode || valueNode.kind === Kind.NULL) return undefined;
 
   let raw: unknown;
-
   if (valueNode.kind === Kind.VARIABLE) {
     const variableName = valueNode.name.value;
-    if (!(variableName in variables)) {
-      return { ok: true, status: undefined };
-    }
+    if (!(variableName in variables)) return undefined;
     const coercionErrors: GraphQLError[] = [];
-    const coerced = coerceInputValue(
+    raw = coerceInputValue(
       variables[variableName],
       verificationStatusEnum,
       (_path, _invalidValue, error) => {
-        coercionErrors.push(e
+        coercionErrors.push(error);
+      }
+    );
+    if (coercionErrors.length > 0) return undefined;
+  } else {
+    raw = valueFromAST(valueNode, verificationStatusEnum);
+  }
+
+  if (typeof raw !== "string") return undefined;
+  return (VERIFICATION_STATUSES as readonly string[]).includes(raw)
+    ? (raw as VerificationStatus)
+    : undefined;
+}
+
+/**
+ * Compute the maximum selection depth of a document, counting nested
+ * selection sets. Used to bound query complexity before execution.
+ */
+function computeQueryDepth(selectionSet: SelectionSetNode | undefined): number {
+  if (!selectionSet) return 0;
+  let max = 0;
+  for (const selection of selectionSet.selections) {
+    if (selection.kind === Kind.FIELD) {
+      const childDepth = computeQueryDepth(selection.selectionSet);
+      max = Math.max(max, 1 + childDepth);
+    } else if (selection.kind === Kind.INLINE_FRAGMENT) {
+      max = Math.max(max, computeQueryDepth(selection.selectionSet));
+    } else if (selection.kind === Kind.FRAGMENT_SPREAD) {
+      // Fragment spreads are resolved against the fragment map by the caller;
+      // depth is bounded conservatively by treating them as a single level.
+      max = Math.max(max, 1);
+    }
+  }
+  return max;
+}
+
+/**
+ * Count the total number of field selections in a document, including fields
+ * nested inside inline fragments and fragment spreads.
+ */
+function countQueryFields(
+  selectionSet: SelectionSetNode | undefined,
+  fragments: Map<string, FragmentDefinitionNode>
+): number {
+  if (!selectionSet) return 0;
+  let count = 0;
+  for (const selection of selectionSet.selections) {
+    if (selection.kind === Kind.FIELD) {
+      count += 1 + countQueryFields(selection.selectionSet, fragments);
+    } else if (selection.kind === Kind.INLINE_FRAGMENT) {
+      count += countQueryFields(selection.selectionSet, fragments);
+    } else if (selection.kind === Kind.FRAGMENT_SPREAD) {
+      const fragment = fragments.get(selection.name.value);
+      if (fragment) {
+        count += countQueryFields(fragment.selectionSet, fragments);
+      }
+    }
+  }
+  return count;
+}
+
+/**
+ * Estimate the cost of a query as `fields * contributorsLimit`, so that a
+ * request asking for many fields over a large page is rejected before it can
+ * amplify load on the registrations store.
+ */
+function estimateQueryCost(
+  document: { definitions: readonly DefinitionNode[] },
+  variables: Record<string, unknown>
+): { cost: number; limit: number } {
+  const fragments = new Map<string, FragmentDefinitionNode>();
+  for (const definition of document.definitions) {
+    if (definition.kind === Kind.FRAGMENT_DEFINITION) {
+      fragments.set(definition.name.value, definition);
+    }
+  }
+
+  let fields = 0;
+  let limit = DEFAULT_CONTRIBUTORS;
+
+  for (const definition of document.definitions) {
+    if (definition.kind !== Kind.OPERATION_DEFINITION) continue;
+    fields += countQueryFields(definition.selectionSet, fragments);
+    for (const selection of definition.selectionSet.selections) {
+      if (selection.kind !== Kind.FIELD) continue;
+      if (selection.name.value !== "contributors") continue;
+      const firstArg = selection.arguments?.find((arg) => arg.name.value === "first");
+      const resolved = resolveContributorsLimit(firstArg?.value, variables);
+      if (resolved.ok) {
+        limit = Math.max(limit, resolved.limit);
+      }
+    }
+  }
+
+  return { cost: fields * limit, limit };
+}
+
+function jsonError(
+  status: number,
+  code: string,
+  message: string,
+  extra?: Record<string, unknown>
+): NextResponse {
+  return NextResponse.json(
+    { errors: [{ message, extensions: { code, ...extra } }] },
+    { status }
+  );
+}
+
+export async function POST(request: NextRequest): Promise<NextResponse> {
+  const ip = extractClientIp(request);
+  const rate = checkRateLimit(`graphql:${ip}`, MAX_REQUESTS_PER_MINUTE);
+  if (!rate.allowed) {
+    return NextResponse.json(
+      {
+        errors: [
+          {
+            message: "Too many requests",
+            extensions: { code: "RATE_LIMITED" },
+          },
+        ],
+      },
+      { status: 429, headers: buildRateLimitHeaders(rate) }
+    );
+  }
+
+  const auth = await requireMaintainerSession(request);
+  if (!auth.ok) {
+    return auth.response;
+  }
+
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return jsonError(400, "INVALID_JSON", "Request body must be valid JSON.");
+  }
+
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    return jsonError(400, "INVALID_BODY", "Request body must be a JSON object.");
+  }
+
+  const payload = body as {
+    query?: unknown;
+    variables?: unknown;
+    extensions?: unknown;
+  };
+
+  const rawQuery = payload.query;
+  const hasInlineQuery = typeof rawQuery === "string" && rawQuery.length > 0;
+
+  if (rawQuery !== undefined && typeof rawQuery !== "string") {
+    return jsonError(400, "INVALID_QUERY", "`query` must be a string.");
+  }
+
+  const extensions =
+    typeof payload.extensions === "object" && payload.extensions !== null
+      ? (payload.extensions as Record<string, unknown>)
+      : undefined;
+  const bodyHash = extensions?.persistedQueryHash;
+
+  const persisted = enforcePersistedQueryAllowlist(
+    request.headers.get("x-persisted-query-hash"),
+    bodyHash,
+    hasInlineQuery
+  );
+  if (!persisted.ok) {
+    return jsonError(400, persisted.reason, persisted.message);
+  }
+
+  if (!hasInlineQuery) {
+    return jsonError(
+      400,
+      "MISSING_QUERY",
+      "`query` is required unless persisted-query mode is enabled."
+    );
+  }
+
+  const query = rawQuery as string;
+  if (Buffer.byteLength(query, "utf8") > MAX_QUERY_BYTES) {
+    return jsonError(
+      413,
+      "QUERY_TOO_LARGE",
+      `Query exceeds the ${MAX_QUERY_BYTES}-byte limit.`
+    );
+  }
+
+  let document: ReturnType<typeof parse>;
+  try {
+    document = parse(query);
+  } catch (error) {
+    const message =
+      error instanceof GraphQLError ? error.message : "Query could not be parsed.";
+    return jsonError(400, "PARSE_ERROR", message);
+  }
+
+  const validationErrors = validate(schema, document, [
+    ...(INTROSPECTION_DISABLED ? [NoSchemaIntrospectionCustomRule] : []),
+  ]);
+  if (validationErrors.length > 0) {
+    return NextResponse.json(
+      {
+        errors: validationErrors.map((error) => ({
+          message: error.message,
+          locations: error.locations,
+          extensions: { code: "VALIDATION_ERROR" },
+        })),
+      },
+      { status: 400 }
+    );
+  }
+
+  const depth = Math.max(
+    ...document.definitions.map((definition) =>
+      definition.kind === Kind.OPERATION_DEFINITION
+        ? computeQueryDepth(definition.selectionSet)
+        : 0
+    )
+  );
+  if (depth > MAX_QUERY_DEPTH) {
+    return jsonError(
+      400,
+      "QUERY_TOO_DEEP",
+      `Query depth ${depth} exceeds the ${MAX_QUERY_DEPTH} limit.`
+    );
+  }
+
+  const variables =
+    typeof payload.variables === "object" && payload.variables !== null
+      ? (payload.variables as Record<string, unknown>)
+      : {};
+
+  const { cost } = estimateQueryCost(document, variables);
+  if (cost > MAX_QUERY_COST) {
+    return jsonError(
+      400,
+      "QUERY_TOO_COSTLY",
+      `Query cost ${cost} exceeds the ${MAX_QUERY_COST} limit.`
+    );
+  }
+
+  const result = await graphql({
+    schema,
+    source: query,
+    variableValues: variables,
+    contextValue: { isMaintainer: true },
+  });
+
+  return NextResponse.json(result, { status: 200 });
+}

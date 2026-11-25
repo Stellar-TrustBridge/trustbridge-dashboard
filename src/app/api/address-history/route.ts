@@ -5,6 +5,7 @@ import { authOptions } from "@/lib/auth";
 import {
   getAddressHistoryPage,
   projectAddressHistoryEntry,
+  resolveAddressHistoryRedactionMode,
 } from "@/lib/address-history";
 import { recordAuditLog } from "@/lib/audit";
 import { validateCsrfToken } from "@/lib/csrf";
@@ -25,6 +26,11 @@ export const dynamic = "force-dynamic";
  * maintainer looking at another user never receives raw addresses. The
  * response is never cached, and maintainer lookups are audited without
  * recording any address values.
+ *
+ * Redaction mode is derived from the authenticated role: `self` for a
+ * contributor viewing their own history, `admin` for a maintainer viewing
+ * another user's history. The mode is echoed in the response so clients and
+ * tests can assert the applied policy.
  */
 export async function GET(request: NextRequest) {
   const session = await getServerSession(authOptions);
@@ -46,6 +52,11 @@ export async function GET(request: NextRequest) {
       : session.user.id;
   const isMaintainerLookup = targetUserId !== session.user.id;
 
+  const redactionMode = resolveAddressHistoryRedactionMode({
+    isSelf: targetUserId === session.user.id,
+    isMaintainer: Boolean(session.user.isMaintainer),
+  });
+
   const cursor = request.nextUrl.searchParams.get("cursor") ?? undefined;
   const rawLimit = request.nextUrl.searchParams.get("limit");
   const parsedLimit = rawLimit === null ? NaN : Number(rawLimit);
@@ -57,6 +68,7 @@ export async function GET(request: NextRequest) {
     projectAddressHistoryEntry(record, {
       isSelf: targetUserId === session.user.id,
       isMaintainer: Boolean(session.user.isMaintainer),
+      mode: redactionMode,
     })
   );
 
@@ -71,6 +83,7 @@ export async function GET(request: NextRequest) {
         resultCount: history.length,
         hasMore: page.hasMore,
         cursorProvided: Boolean(cursor),
+        redactionMode,
       },
     });
   }
@@ -80,6 +93,7 @@ export async function GET(request: NextRequest) {
       history,
       nextCursor: page.nextCursor,
       hasMore: page.hasMore,
+      redactionMode,
     },
     { headers: { "Cache-Control": "no-store" } }
   );

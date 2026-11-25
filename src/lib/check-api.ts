@@ -12,6 +12,32 @@ export const HORIZON_BREAKER_NAME = "horizon";
 export const SOROBAN_BREAKER_NAME = "soroban";
 
 /**
+ * Response schema version negotiation shared by the check API server and the
+ * check-api client. The server stamps every check payload with
+ * {@link CHECK_SCHEMA_VERSION}; the client accepts any payload whose major
+ * matches {@link SUPPORTED_CHECK_SCHEMA_MAJOR} and fails closed otherwise.
+ *
+ * Bump the major only for breaking payload changes; bump the minor for
+ * additive, backward-compatible fields.
+ */
+export const CHECK_SCHEMA_VERSION = "1.0";
+export const SUPPORTED_CHECK_SCHEMA_MAJOR = 1;
+
+/** Stable reason codes surfaced when schema negotiation fails. */
+export const CHECK_SCHEMA_REASON_CODES = {
+  missing: "check_schema_missing",
+  malformed: "check_schema_malformed",
+  unsupported: "check_schema_unsupported",
+  oversized: "check_schema_oversized",
+} as const;
+
+export type CheckSchemaReasonCode =
+  (typeof CHECK_SCHEMA_REASON_CODES)[keyof typeof CHECK_SCHEMA_REASON_CODES];
+
+/** Upper bound on a check payload before it is rejected as oversized. */
+export const MAX_CHECK_PAYLOAD_BYTES = 64 * 1024;
+
+/**
  * Shared circuit breakers guarding outbound Stellar calls. A single breaker
  * per upstream keeps state consistent across requests so a Horizon or Soroban
  * outage trips once and short-circuits subsequent calls instead of cascading.
@@ -109,8 +135,11 @@ export function jsonCheckResult(
   status = 200,
   headers?: HeadersInit
 ) {
-  return NextResponse.json(result, {
-    status,
-    ...(headers ? { headers } : {}),
-  });
+  return NextResponse.json(
+    { ...result, schema_version: CHECK_SCHEMA_VERSION },
+    {
+      status,
+      ...(headers ? { headers } : {}),
+    }
+  );
 }

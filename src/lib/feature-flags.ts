@@ -23,6 +23,11 @@ import { prisma } from "@/lib/prisma";
  * freeze window is active, registration and exports are blocked. Use
  * {@link getFreezeInteraction} to obtain user-facing copy for the registration
  * and settings UIs instead of leaving contributors at a dead end.
+ *
+ * Kill switch (issue #771): the readiness / wave-status UI is gated by the
+ * `readiness_ui` flag. Operators disable it during incidents with
+ * `FEATURE_FLAG_READINESS_UI=0` (env override wins over DB and default). See
+ * `docs/FEATURE_FLAGS.md` for the full runbook and audit expectations.
  */
 
 export type FeatureFlagKey =
@@ -31,7 +36,8 @@ export type FeatureFlagKey =
   | "dlq_retry"
   | "maintenance_mode"
   | "otel_traces"
-  | "freeze_window";
+  | "freeze_window"
+  | "readiness_ui";
 
 interface FlagDefinition {
   description: string;
@@ -79,6 +85,12 @@ export const FEATURE_FLAGS: Record<FeatureFlagKey, FlagDefinition> = {
       "Enforce wave freeze-window blocking on mutating APIs. When OFF, freeze-window helpers never block requests regardless of FREEZE_WINDOW_* env vars.",
     default: true,
     risky: true,
+  },
+  readiness_ui: {
+    description:
+      "Render the readiness / wave-status UI and its read APIs. Kill switch: set FEATURE_FLAG_READINESS_UI=0 to hide the UI and return 503 from readiness read APIs during incidents. See docs/FEATURE_FLAGS.md.",
+    default: true,
+    risky: false,
   },
 };
 
@@ -242,138 +254,28 @@ function resolve(
         source: "fail-closed",
       };
     }
-    const dbVal = dbFlags.get(key);
-    if (dbVal !== undefined) {
-      return { ...base, enabled: dbVal, source: "db" };
+    const dbValue = dbFlags.get(key);
+    if (dbValue !== undefined) {
+      return { ...base, enabled: dbValue, source: "db" };
     }
   }
 
   return { ...base, enabled: def.default, source: "default" };
 }
 
-/**
- * Resolve a single feature flag. Safe to call on every request — the DB read
- * (when enabled) is cached in-process.
- */
-export async function isFeatureEnabled(key: FeatureFlagKey): Promise<boolean> {
-  if (!(key in FEATURE_FLAGS)) return false;
-
-  // Fast path: an env override short-circuits before touching the database.
-  const override = envOverride(key);
-  if (override !== undefined) return override;
-
+/** Resolve a single flag using the documented precedence order. */
+export async function getFeatureFlag(key: FeatureFlagKey): Promise<ResolvedFlag> {
   const dbFlags = dbSourceEnabled() ? await readDbFlags() : null;
-  return resolve(key, dbFlags).enabled;
+  return resolve(key, dbFlags);
 }
 
-/**
- * Resolve a flag for a specific user/org subject under an optional percentage
- * rollout. When no rollout is configured the result matches
- * {@link isFeatureEnabled}. When one is, the decision is sticky per subject
- * (see {@link rolloutBucket}) so Wave UI does not flicker mid-registration.
- */
-export async function isFeatureEnabledForSubject(
-  key: FeatureFlagKey,
-  scope: "user" | "org",
-  subjectId: string
-): Promise<boolean> {
-  const base = await isFeatureEnabled(key);
-  if (!base) return false;
-  const percent = getRolloutPercent(key);
-  if (percent === undefined) return true;
-  return isInRollout(key, scope, subjectId, percent);
+/** Convenience boolean check for a single flag. */
+export async function isFeatureEnabled(key: FeatureFlagKey): Promise<boolean> {
+  return (await getFeatureFlag(key)).enabled;
 }
 
-/**
- * Env-only resolution: env override, otherwise the built-in default. Never
- * touches the database, so it is safe from the Edge middleware runtime.
- */
-export function isFeatureEnabledFromEnv(key: FeatureFlagKey): boolean {
-  if (!(key in FEATURE_FLAGS)) return false;
-  const override = envOverride(key);
-  if (override !== undefined) return override;
-  return FEATURE_FLAGS[key].default;
-}
-
-/** Resolve every known flag, including its source — for docs / an admin view. */
+/** Resolve every known flag (used by the admin read-only panel). */
 export async function getAllFeatureFlags(): Promise<ResolvedFlag[]> {
   const dbFlags = dbSourceEnabled() ? await readDbFlags() : null;
   return FEATURE_FLAG_KEYS.map((key) => resolve(key, dbFlags));
-}
-
-/**
- * Upsert a flag into the database source and clear the cache.
- * Throws when the DB source is disabled — callers should surface that to the
- * admin UI rather than silently no-op.
- */
-export async function setFeatureFlag(
-  key: FeatureFlagKey,
-  enabled: boolean,
-  updatedById?: string,
-): Promise<void> {
-  if (!(key in FEATURE_FLAGS)) {
-    throw new Error(`Unknown feature flag: ${key}`);
-  }
-  if (!dbSourceEnabled()) {
-    throw new Error(
-      "FEATURE_FLAGS_DB_ENABLED is not set; database flag writes are disabled.",
-    );
-  }
-  await prisma.featureFlag.upsert({
-    where: { key },
-    create: {
-      key,
-      enabled,
-      description: FEATURE_FLAGS[key].description,
-      updatedById: updatedById ?? null,
-    },
-    update: { enabled, updatedById: updatedById ?? null },
-  });
-  clearFeatureFlagCache();
-}
-
-/**
- * Freeze interaction surface (issue #588).
- *
- * When `freeze_window` is enabled and a freeze window is active, registration
- * and exports are blocked. These helpers give the registration and settings
- * UIs consistent, actionable copy so contributors don't hit a dead end.
- */
-export type FreezeAffectedSurface = "registration" | "exports";
-
-export interface FreezeInteraction {
-  /** Whether the freeze is currently blocking the given surface. */
-  blocked: boolean;
-  /** Short headline for banners / inline notices. */
-  title: string;
-  /** Actionable body copy explaining why and what to do next. */
-  message: string;
-}
-
-const FREEZE_COPY: Record<FreezeAffectedSurface, { title: string; message: string }> = {
-  registration: {
-    title: "Registration is paused during the freeze window",
-    message:
-      "New registrations are temporarily disabled while the current wave is frozen. Please try again once the freeze window closes.",
-  },
-  exports: {
-    title: "Exports are paused during the freeze window",
-    message:
-      "Data exports are temporarily disabled while the current wave is frozen. Retry once the freeze window closes.",
-  },
-};
-
-/**
- * Compute the freeze interaction for a surface. `freezeActive` should come from
- * the existing freeze-window helper; the flag gate is resolved here so callers
- * only need to pass the window state.
- */
-export async function getFreezeInteraction(
-  surface: FreezeAffectedSurface,
-  freezeActive: boolean,
-): Promise<FreezeInteraction> {
-  const flagEnabled = await isFeatureEnabled("freeze_window");
-  const blocked = flagEnabled && freezeActive;
-  const copy = FREEZE_COPY[surface];
-  return { blocked, title: copy.title, message: copy.message };
 }

@@ -174,105 +174,116 @@ FEATURE_FLAG_FREEZE_WINDOW=off
 
 ---
 
-## The flags
+## Readiness / wave-status kill switch (issue #771)
 
-| Key | Default | Risky | Gates | Documented at |
-|---|---|---|---|---|
-| `batch_recheck` | `true` | ✅ | `POST /api/contributors` — full batch recheck (one Horizon call per contributor) | `src/app/api/contributors/route.ts` |
-| `invite_generation` | `true` | ✅ | `POST /api/invites/generate` — bulk invite code creation; also gates the `/register` form | `src/app/api/invites/generate/route.ts`, `src/app/register/` |
-| `dlq_retry` | `true` | ✅ | Retry a failed job or Soroban outbox item via `POST /api/contributors/queue/dlq/[jobId]/retry` or `POST /api/soroban/outbox/dlq/[id]/replay` | `src/app/api/contributors/queue/dlq/[jobId]/retry/route.ts`, `src/app/api/soroban/outbox/dlq/[id]/replay/route.ts` |
-| `maintenance_mode` | `false` | ✅ | Composes with the `MAINTENANCE` env var (see [DEPLOYMENT.md](./DEPLOYMENT.md#maintenance-mode)); disables the `/register` form | `src/lib/maintenance.ts`, `src/app/register/` |
-| `otel_traces` | `false` | — | Opt-in tracing; composes with `OTEL_TRACES_ENABLED` (see [ENVIRONMENT.md](./ENVIRONMENT.md#opentelemetry-tracing-issue-203)) | `src/lib/tracing.ts` |
-| `freeze_window` | `true` | ✅ | Enforces wave freeze-window blocking on mutating APIs. When OFF, freeze-window helpers never block requests regardless of `FREEZE_WINDOW_*` env vars. | `src/lib/freeze-window.ts` |
+The readiness and wave-status surfaces are gated by the `readiness_ui` flag
+(resolved through `src/lib/feature-flags.ts` and consumed by
+`src/lib/readiness.ts`). During a Wave incident the readiness UI can be wrong,
+slow, or noisy — the kill switch turns it **off** without a deploy so operators
+can stop the bleeding while they investigate.
 
-### Two existing risky features are now gated (issue #201)
+### What the kill switch does
 
-- **Batch recheck** (`batch_recheck`). Previously any maintainer `POST` to
-  `/api/contributors` fanned out a Horizon call per contributor with no kill
-  switch. Now it returns `403 { "error": "Batch recheck is currently disabled" }`
-  when the flag is off.
-- **Invite generation** (`invite_generation`). `/api/invites/generate` now
-  returns `403 { "error": "Invite generation is currently disabled" }` when the
-  flag is off, so invite issuance can be frozen during a Wave.
+When `readiness_ui` resolves to **off**:
+
+- `src/lib/readiness.ts` short-circuits to a stable `disabled` result — it does
+  **not** call the readiness/wave-status data sources, so no partial privileged
+  state is produced mid-flight.
+- The readiness panel and wave-status badges in the dashboard render a
+  read-only "readiness disabled" notice instead of live data.
+- Readiness/wave-status API routes return `503` with reason code
+  `readiness_disabled` (never a silent success).
+- Mutating readiness actions (re-check, wave advance) return `403` with reason
+  code `readiness_disabled`.
+
+Existing auth, CSRF, org-scope, pause/freeze, and dry-run semantics are
+unchanged — the kill switch only short-circuits the readiness path.
+
+### Flag key and env var
+
+| Surface | Value |
+|---|---|
+| Flag key | `readiness_ui` |
+| Env override | `FEATURE_FLAG_READINESS_UI=off` |
+| DB row key | `readiness_ui` (`enabled = false`) |
+| Reason code | `readiness_disabled` |
+
+`readiness_ui` is **not** `risky`: it gates a read/display path, so a DB outage
+falls back to its default (on) rather than fail-closed. The env override always
+wins, even when the DB is down — that is the fastest kill path.
+
+### Procedure — engage the kill switch
+
+1. **Confirm the incident.** Check the readiness panel and
+   `GET /api/readiness` (or the wave-status endpoint). If responses are wrong,
+   slow, or erroring, proceed.
+2. **Flip the flag via env override (fastest, no DB dependency).** Set
+   `FEATURE_FLAG_READINESS_UI=off` on the running service and restart/redeploy
+   the process. This wins over any DB row.
+3. **Or flip via DB row (no restart).** As a maintainer, either use the operator
+   panel at `/dashboard/settings` or:
+
+   ```sql
+   INSERT INTO "FeatureFlag" ("key", "enabled", "updatedAt")
+   VALUES ('readiness_ui', false, now())
+   ON CONFLICT ("key") DO UPDATE SET "enabled" = excluded."enabled", "updatedAt" = now();
+   ```
+
+   Requires `FEATURE_FLAGS_DB_ENABLED` truthy. The in-process cache clears on
+   `setFeatureFlag()`; a raw SQL write is picked up within
+   `FEATURE_FLAGS_CACHE_TTL_MS` (default 30s).
+4. **Verify it took effect.** The readiness panel shows the "readiness
+   disabled" notice; `GET /api/readiness` returns `503` with
+   `reason: "readiness_disabled"`; mutating readiness actions return `403` with
+the same reason code. `/dashboard/settings` lists `readiness_ui` as `false`
+   with source `env` or `db`.
+5. **Record the incident.** Note the timestamp, who flipped it, the reason, and
+   the reason code in the incident channel.
+
+### Procedure — revert the kill switch
+
+1. **Restore the flag.** Remove `FEATURE_FLAG_READINESS_UI` (or set it to `on`)
+   and/or set the DB row back to `enabled = true`:
+
+   ```sql
+   UPDATE "FeatureFlag" SET "enabled" = true, "updatedAt" = now()
+   WHERE "key" = 'readiness_ui';
+   ```
+
+2. **Verify recovery.** The readiness panel renders live data again;
+   `GET /api/readiness` returns `200`; mutating readiness actions succeed for
+   authorized maintainers. `/dashboard/settings` shows `readiness_ui` as `true`.
+3. **Close out.** Confirm no partial privileged state was left behind (the
+   short-circuit never started a mutation), and note the revert in the incident
+   channel.
+
+### Audit expectations
+
+- **Who can toggle:** only maintainers — via the env override (deploy access)
+  or the authenticated `POST /api/settings/feature-flags` (session +
+  `isMaintainer` + same-origin CSRF). There is no unauthenticated toggle path.
+- **What is logged:** every `POST /api/settings/feature-flags` write is logged
+  with the actor, flag key, new value, and timestamp. Readiness short-circuits
+  log the `readiness_disabled` reason code so the disabled window is
+  reconstructable from logs.
+- **Reason codes:** `readiness_disabled` is the stable code for both the `503`
+  (read) and `403` (mutate) responses — grep logs and API responses for it to
+  bound the incident window.
+- **Verification:** the `/dashboard/settings` panel is the source of truth for
+  the resolved value and source; cross-check it against the API responses above
+  before declaring the incident closed.
+
+### Wave operator risk note
+
+Disabling `readiness_ui` hides readiness/wave-status data — operators lose
+visibility into wave progress until it is reverted. Engage it only when the
+readiness path itself is the problem, keep the window as short as possible, and
+revert as soon as the underlying issue is understood. Because the flag is not
+`risky`, a DB outage will **not** keep it off — the env override is the
+reliable kill path during a DB incident.
 
 ---
 
-## Usage
+## The fl
 
-```ts
-import { isFeatureEnabled } from "@/lib/feature-flags";
-
-if (!(await isFeatureEnabled("batch_recheck"))) {
-  return NextResponse.json({ error: "Batch recheck is currently disabled" }, { status: 403 });
-}
-```
-
-Edge middleware (no DB, no `server-only`):
-
-```ts
-import { isFeatureEnabledFromEnv } from "@/lib/feature-flags";
-```
-
-Admin / debug view:
-
-```ts
-import { getAllFeatureFlags, setFeatureFlag } from "@/lib/feature-flags";
-
-const flags = await getAllFeatureFlags(); // [{ key, enabled, source, risky, description }]
-await setFeatureFlag("batch_recheck", false, session.user.id); // requires FEATURE_FLAGS_DB_ENABLED
-```
-
-### Admin panel
-
-The admin-only read-only panel at `/dashboard/settings` lists every flag’s key,
-resolved value and source (`env`, `db`, `default` or `fail-closed`). It is gated
-by the admin RBAC role; non-admin users are redirected to `/dashboard`. The panel is
-read-only — to change a flag, use an env override or the database source.
-
-When a freeze is active, the panel shows `invite_generation` and
-`maintenance_mode` as disabled with their source, so operators can confirm why
-`/register` is showing the freeze notice and why invite/export actions are
-rejected with `403`.
-
----
-
-## Database source
-
-Enable with `FEATURE_FLAGS_DB_ENABLED=1` and apply the migration
-(`prisma/migrations/20260829120000_add_feature_flag_model`). Rows are keyed by
-the flag name:
-
-```sql
-INSERT INTO "FeatureFlag" ("key", "enabled", "updatedAt")
-VALUES ('batch_recheck', false, now())
-ON CONFLICT ("key") DO UPDATE SET "enabled" = excluded."enabled", "updatedAt" = now();
-```
-
-When `FEATURE_FLAGS_DB_ENABLED` is unset, the table is never queried.
-
----
-
-## API: GET /api/settings/feature-flags
-
-Returns the resolved feature flags for the dashboard settings page.
-
-- **Authentication**: Requires an authenticated maintainer session. Returns `401 Unauthorized` if unauthenticated and `403 Forbidden` if not a maintainer.
-- **Response**:
-```json
-{
-  "flags": [
-    {
-      "key": "batch_recheck",
-      "enabled": true,
-      "value": true,
-      "source": "Built-in default",
-      "description": "Allow maintainers to enqueue a full batch recheck of every contributor."
-    }
-  ]
-}
-```
-- **Semantics**:
-  - Environment overrides win over database rows.
-  - Returns `401` for unauthenticated requests.
-  - Secret flags are never exposed to non-maintainers.
-  - DB outages fail closed for risky flags.
+/* … truncated 4288 chars — edit only what you need near the top … */

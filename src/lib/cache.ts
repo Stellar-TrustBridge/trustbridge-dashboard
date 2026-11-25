@@ -242,6 +242,28 @@ export function parseStatsCacheTtl(): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 60_000;
 }
 
+/**
+ * Parse the ACTION_LOOKUP_NEGATIVE_TTL_MS environment variable.
+ *
+ * Controls how long a 404 (missing Action repo/ref) lookup result is
+ * negatively cached by `src/lib/action-lookup.ts`.  Negative entries are
+ * stored in a dedicated `CacheStore` instance so they never collide with
+ * positive lookups and can be invalidated independently.
+ *
+ * Falls back to 30 seconds when unset or invalid.  30 s is deliberately
+ * short — long enough to absorb repeated 404s during a single Wave
+ * registration page render, short enough that a newly created Action repo
+ * becomes visible quickly.
+ *
+ * Exposed so tests can verify the default without importing process.env directly.
+ */
+export function parseActionLookupNegativeTtl(): number {
+  const raw = process.env.ACTION_LOOKUP_NEGATIVE_TTL_MS;
+  if (!raw) return 30_000; // 30 seconds
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 30_000;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // HTTP Cache-Control header builders
 // ─────────────────────────────────────────────────────────────────────────────
@@ -334,91 +356,6 @@ export function buildStatsCacheHeaders(
  * publicly cached. A short TTL keeps validation fresh during the registration
  * wizard flow.
  *
- * @param ttlMs   Cache lifetime in milliseconds.
- */
-export function buildLookupCacheHeaders(ttlMs: number): Record<string, string> {
-  return {
-    "Cache-Control": buildPublicCacheControl(ttlMs, ttlMs),
-    "Vary": "Accept-Encoding",
-  };
-}
+ * @p
 
-/**
- * Dedicated KV cache for /api/check responses.
- *
- * Keyed by `check:<address>:<assetCode>:<assetIssuer>` so the same address
- * checked against different assets never collides.  TTL is controlled by the
- * CHECK_CACHE_TTL_MS environment variable (default 2 minutes).
- *
- * Kept separate from verificationCache (used internally by horizon.ts) so the
- * two layers can have independent TTLs and can be invalidated independently in
- * tests and production flows.
- */
-export const checkCache = new CacheStore<unknown>(parseCheckCacheTtl());
-
-/**
- * Build cache key from function arguments.
- */
-export function buildCacheKey(prefix: string, ...args: unknown[]): string {
-  return `${prefix}:${args.map((a) => JSON.stringify(a)).join(':')}`;
-}
-
-/**
- * Invalidate contributor-related caches.
- */
-export function invalidateContributorCaches(): void {
-  contributorCache.invalidatePattern(/^contributor:/);
-  verificationCache.invalidatePattern(/^verification:/);
-  statsCache.invalidatePattern(/^stats:/);
-}
-
-/**
- * Parse the RECHECK_IDEMPOTENCY_TTL_MS environment variable.
- * Controls the idempotency window for batch and contributor rechecks (default 15 seconds).
- */
-export function parseRecheckIdempotencyTtl(): number {
-  const raw = process.env.RECHECK_IDEMPOTENCY_TTL_MS;
-  if (!raw) return 15_000; // 15 seconds
-  const parsed = Number.parseInt(raw, 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 15_000;
-}
-
-export interface RecheckLockEntry {
-  jobId: string;
-  createdAt: number;
-}
-
-/**
- * Dedicated cache for recheck idempotency locks to prevent double-click Horizon stampedes.
- */
-export const recheckLockCache = new CacheStore<RecheckLockEntry>(parseRecheckIdempotencyTtl());
-
-export function buildRecheckLockKey(scope: "batch" | "single", id: string = "all"): string {
-  return `recheck:lock:${scope}:${id}`;
-}
-
-/**
- * Parse the CHECKLIST_IDEMPOTENCY_TTL_MS environment variable.
- * Controls how long a keyed `PATCH /api/register/checklist` response is
- * replayed to duplicate submits (default 5 minutes).
- */
-export function parseChecklistIdempotencyTtl(): number {
-  const raw = process.env.CHECKLIST_IDEMPOTENCY_TTL_MS;
-  if (!raw) return 5 * 60_000;
-  const parsed = Number.parseInt(raw, 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 5 * 60_000;
-}
-
-/** A captured HTTP response used to replay an idempotent checklist PATCH. */
-export interface ChecklistIdempotencyEntry {
-  status: number;
-  body: unknown;
-}
-
-/**
- * Dedicated cache for org/user-scoped checklist idempotency keys.
- * Stores the exact JSON body and status of the first successful PATCH so a
- * double-click or retry within the TTL returns the same response.
- */
-export const checklistIdempotencyCache =
-  new CacheStore<ChecklistIdempotencyEntry>(parseChecklistIdempotencyTtl());
+/* … truncated 3037 chars — edit only what you need near the top … */
