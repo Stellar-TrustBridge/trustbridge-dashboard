@@ -1,6 +1,12 @@
 export type RegistryMode = "live" | "synced" | "contract";
 
-const VALID_MODES = new Set<RegistryMode>(["live", "synced", "contract"]);
+export const VALID_REGISTRY_MODES: readonly RegistryMode[] = [
+  "live",
+  "synced",
+  "contract",
+];
+
+const VALID_MODES = new Set<RegistryMode>(VALID_REGISTRY_MODES);
 
 /**
  * Stable reason codes emitted when contract mode is only half-configured.
@@ -28,6 +34,31 @@ export type RegistryModeResult =
     };
 
 /**
+ * Pure parser for `REGISTRY_MODE`. Normalizes case/whitespace and falls back
+ * to `"live"` for unset or unrecognized values so read routes never break.
+ */
+export function parseRegistryMode(raw?: string | null): RegistryMode {
+  const normalized = raw?.trim().toLowerCase();
+  return normalized && VALID_MODES.has(normalized as RegistryMode)
+    ? (normalized as RegistryMode)
+    : "live";
+}
+
+/**
+ * Returns `true` when the registry mode is contract-backed (`"synced"`),
+ * meaning outbox worker and Soroban contract configuration are required for
+ * Wave on-chain registration and sync.
+ *
+ * `"contract"` is a separate fail-closed path gated by
+ * {@link resolveRegistryMode} / `REGISTRY_CONTRACT_*` env vars.
+ */
+export function isContractBackedRegistryMode(
+  mode: RegistryMode = getRegistryMode()
+): boolean {
+  return mode === "synced";
+}
+
+/**
  * Resolves the dashboard's registry mode, shared by every contributor-facing
  * REST endpoint instead of each route re-deriving it independently:
  *
@@ -35,25 +66,21 @@ export type RegistryModeResult =
  *   maintainers are expected to trigger a Horizon recheck (`POST
  *   /api/contributors`, `/api/contributors/[id]`) to refresh it.
  * - `"synced"`: signals that a scheduled contract-to-Postgres sync job
- *   (`src/lib/contract-sync.ts`) is responsible for keeping registration
- *   rows fresh, so read endpoints can trust Postgres without prompting a
- *   maintainer to manually recheck.
+ *   (`src/lib/contract-sync.ts`) and Soroban outbox worker are responsible for
+ *   keeping registration rows fresh and mirrored on-chain, so read endpoints
+ *   can trust Postgres without prompting a maintainer to manually recheck.
  * - `"contract"`: reads are backed by an on-chain registry contract. This
  *   mode requires both `REGISTRY_CONTRACT_RPC_URL` and
  *   `REGISTRY_CONTRACT_ID`; if either is missing the mode fails closed with
  *   a stable reason code instead of silently degrading.
  *
- * Reads are identical in both modes (Postgres is always the source of
+ * Reads are identical across modes (Postgres is always the source of
  * truth) — the mode only changes what a route reports about how fresh that
  * data is expected to be. An unrecognized value falls back to `"live"`
  * rather than failing closed, so a typo'd env var never breaks reads.
  */
 export function resolveRegistryMode(): RegistryModeResult {
-  const raw = process.env.REGISTRY_MODE?.trim().toLowerCase();
-  const mode: RegistryMode =
-    raw && VALID_MODES.has(raw as RegistryMode)
-      ? (raw as RegistryMode)
-      : "live";
+  const mode = parseRegistryMode(process.env.REGISTRY_MODE);
 
   if (mode !== "contract") {
     return { mode, ready: true };
@@ -96,9 +123,10 @@ export function resolveRegistryMode(): RegistryModeResult {
 }
 
 /**
- * Convenience wrapper returning just the resolved mode. Throws when contract
- * mode is half-configured so callers fail closed at boot/request time rather
- * than proceeding with an incomplete registry configuration.
+ * Resolves the registry mode for read endpoints. Unrecognized values fall
+ * back to `"live"`. Half-configured `"contract"` mode fails closed with a
+ * stable reason code so Wave registration cannot proceed against an
+ * incomplete on-chain registry configuration.
  */
 export function getRegistryMode(): RegistryMode {
   const result = resolveRegistryMode();

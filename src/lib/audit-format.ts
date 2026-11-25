@@ -170,3 +170,95 @@ export function hashAuditBundle(entries: AuditLogEntry[]): string {
   const canonical = entries.map(canonicalizeAuditEntry);
   return fnv1a32Hex(JSON.stringify(canonical));
 }
+
+/**
+ * Default page size for paginated audit exports. Chosen so a single page stays
+ * well under typical serverless response/timeout budgets for large orgs while
+ * keeping the number of round-trips reasonable.
+ */
+export const AUDIT_EXPORT_DEFAULT_PAGE_SIZE = 500;
+
+/** Upper bound on a single export page; larger requests are clamped. */
+export const AUDIT_EXPORT_MAX_PAGE_SIZE = 1000;
+
+/**
+ * Operator-facing reason codes for paginated audit exports. Stable strings so
+ * runbooks and dashboards can key off them without parsing prose.
+ */
+export const AUDIT_EXPORT_REASON_CODES = {
+  invalidPage: "audit_export_invalid_page",
+  invalidPageSize: "audit_export_invalid_page_size",
+  pageSizeClamped: "audit_export_page_size_clamped",
+  emptyResult: "audit_export_empty_result",
+} as const;
+
+export type AuditExportReasonCode =
+  (typeof AUDIT_EXPORT_REASON_CODES)[keyof typeof AUDIT_EXPORT_REASON_CODES];
+
+export interface AuditExportPageParams {
+  page?: number | string | null;
+  pageSize?: number | string | null;
+}
+
+export interface AuditExportPage {
+  page: number;
+  pageSize: number;
+  /** Zero-based offset into the full result set. */
+  offset: number;
+  /** True when the requested page size was clamped to the max. */
+  clamped: boolean;
+}
+
+/**
+ * Normalize and validate pagination inputs for an audit export.
+ *
+ * - `page` is 1-based; missing/empty defaults to 1.
+ * - `pageSize` defaults to {@link AUDIT_EXPORT_DEFAULT_PAGE_SIZE} and is clamped
+ *   to {@link AUDIT_EXPORT_MAX_PAGE_SIZE}.
+ *
+ * @throws Error with a stable reason code in the message for malformed input.
+ */
+export function resolveAuditExportPage(
+  params: AuditExportPageParams = {}
+): AuditExportPage {
+  const rawPage = params.page;
+  const page =
+    rawPage === undefined || rawPage === null || rawPage === ""
+      ? 1
+      : Number(rawPage);
+  if (!Number.isInteger(page) || page < 1) {
+    throw new Error(
+      `${AUDIT_EXPORT_REASON_CODES.invalidPage}: page must be a positive integer`
+    );
+  }
+
+  const rawPageSize = params.pageSize;
+  const requestedSize =
+    rawPageSize === undefined || rawPageSize === null || rawPageSize === ""
+      ? AUDIT_EXPORT_DEFAULT_PAGE_SIZE
+      : Number(rawPageSize);
+  if (!Number.isInteger(requestedSize) || requestedSize < 1) {
+    throw new Error(
+      `${AUDIT_EXPORT_REASON_CODES.invalidPageSize}: pageSize must be a positive integer`
+    );
+  }
+
+  const pageSize = Math.min(requestedSize, AUDIT_EXPORT_MAX_PAGE_SIZE);
+  return {
+    page,
+    pageSize,
+    offset: (page - 1) * pageSize,
+    clamped: pageSize !== requestedSize,
+  };
+}
+
+/**
+ * Slice a full audit history into one export page. Pure and side-effect free so
+ * it can be exercised by stress tests without a database.
+ */
+export function paginateAuditEntries(
+  entries: AuditLogEntry[],
+  page: AuditExportPage
+): AuditLogEntry[] {
+  return entries.slice(page.offset, page.offset + page.pageSize);
+}

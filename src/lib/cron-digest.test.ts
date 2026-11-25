@@ -1,10 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  computeDigestChangeSet,
+  DIGEST_SUPPRESSION_REASON_CODES,
   getConfiguredCadence,
   getDigestDestinationEmail,
+  getDigestSuppressionMetrics,
   getLastDigestHealth,
   getQuietHoursConfig,
+  isEmptyDigestSuppressionEnabled,
   isFullListEnabled,
   isWithinQuietHours,
   resetDigestState,
@@ -635,5 +639,180 @@ describe("runCronDigest quiet hours", () => {
 
     expect(result.status).toBe("ok");
     expect(sendEmailNotification).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Empty-digest suppression & dry-run metrics (#795)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("empty-digest suppression (Issue #795)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetDigestState();
+    delete process.env.DIGEST_SUPPRESS_EMPTY;
+    delete process.env.DIGEST_QUIET_HOURS;
+    delete process.env.DIGEST_CRON_MIN_INTERVAL_MS;
+    process.env.DIGEST_EMAIL = "ops@example.com";
+    process.env.DIGEST_CRON_MIN_INTERVAL_MS = "0";
+  });
+
+  afterEach(() => {
+    delete process.env.DIGEST_SUPPRESS_EMPTY;
+    delete process.env.DIGEST_EMAIL;
+    delete process.env.DIGEST_CRON_MIN_INTERVAL_MS;
+  });
+
+  it("suppresses sending when there are zero contributors and zero SLA breaches, while recording dry-run metrics and audit log", async () => {
+    vi.mocked(prisma.registration.findMany).mockResolvedValue([] as never);
+
+    const result = await runCronDigest();
+
+    expect(result).toMatchObject({
+      status: "skipped",
+      suppressed: true,
+      dryRun: true,
+      reasonCode: DIGEST_SUPPRESSION_REASON_CODES.EMPTY_CHANGE_SET,
+      totalContributors: 0,
+      notReadyCount: 0,
+      slaBreachCount: 0,
+      emailSent: false,
+    });
+    expect(sendEmailNotification).not.toHaveBeenCalled();
+    expect(recordAuditLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "digest.cron",
+        metadata: expect.objectContaining({
+          emailSent: false,
+          suppressed: true,
+          dryRun: true,
+          reasonCode: DIGEST_SUPPRESSION_REASON_CODES.EMPTY_CHANGE_SET,
+        }),
+      }),
+    );
+    expect(getDigestSuppressionMetrics()).toMatchObject({
+      suppressedEmptyCount: 1,
+      dryRunRecordedCount: 1,
+      sentCount: 0,
+    });
+    expect(getLastDigestHealth()).toEqual(result);
+  });
+
+  it("suppresses a repeat digest when the Wave state has no changes and zero actionable items", async () => {
+    vi.mocked(prisma.registration.findMany).mockResolvedValue([readyReg] as never);
+
+    // First run sees +1 ready contributor (change set non-empty) -> sends.
+    const first = await runCronDigest();
+    expect(first.status).toBe("ok");
+    expect(first.emailSent).toBe(true);
+    expect(sendEmailNotification).toHaveBeenCalledTimes(1);
+
+    // Second run sees identical all-ready state -> suppressed with dry-run metric.
+    const second = await runCronDigest();
+    expect(second).toMatchObject({
+      status: "skipped",
+      suppressed: true,
+      dryRun: true,
+      reasonCode: DIGEST_SUPPRESSION_REASON_CODES.EMPTY_CHANGE_SET,
+      emailSent: false,
+    });
+    expect(sendEmailNotification).toHaveBeenCalledTimes(1);
+    expect(getDigestSuppressionMetrics()).toMatchObject({
+      suppressedEmptyCount: 1,
+      dryRunRecordedCount: 1,
+      sentCount: 1,
+    });
+  });
+
+  it("still sends when there are actionable not-ready contributors even if counts did not change", async () => {
+    vi.mocked(prisma.registration.findMany).mockResolvedValue([notReadyReg] as never);
+
+    const first = await runCronDigest();
+    const second = await runCronDigest();
+
+    expect(first.status).toBe("ok");
+    expect(second.status).toBe("ok");
+    expect(sendEmailNotification).toHaveBeenCalledTimes(2);
+  });
+
+  it("respects explicit dryRun option without sending mail even when changes exist", async () => {
+    vi.mocked(prisma.registration.findMany).mockResolvedValue([notReadyReg] as never);
+
+    const result = await runCronDigest({ dryRun: true });
+
+    expect(result).toMatchObject({
+      status: "skipped",
+      suppressed: true,
+      dryRun: true,
+      reasonCode: DIGEST_SUPPRESSION_REASON_CODES.DRY_RUN,
+      emailSent: false,
+    });
+    expect(sendEmailNotification).not.toHaveBeenCalled();
+    expect(getDigestSuppressionMetrics()).toMatchObject({
+      suppressedEmptyCount: 0,
+      dryRunRecordedCount: 1,
+      sentCount: 0,
+    });
+  });
+
+  it("allows DIGEST_SUPPRESS_EMPTY=false or force:true to bypass empty-digest suppression", async () => {
+    vi.mocked(prisma.registration.findMany).mockResolvedValue([] as never);
+
+    const forced = await runCronDigest({ force: true });
+    expect(forced.status).toBe("ok");
+    expect(forced.emailSent).toBe(true);
+
+    process.env.DIGEST_SUPPRESS_EMPTY = "false";
+    expect(isEmptyDigestSuppressionEnabled()).toBe(false);
+    const unsuppressed = await runCronDigest();
+    expect(unsuppressed.status).toBe("ok");
+    expect(sendEmailNotification).toHaveBeenCalledTimes(2);
+  });
+
+  it("handles DB failure during suppression check by returning status: error without silent success", async () => {
+    vi.mocked(prisma.registration.findMany).mockRejectedValueOnce(
+      new Error("Postgres connection lost"),
+    );
+
+    const result = await runCronDigest();
+
+    expect(result.status).toBe("error");
+    expect(result.error).toContain("Postgres connection lost");
+    expect(sendEmailNotification).not.toHaveBeenCalled();
+    expect(getDigestSuppressionMetrics().suppressedEmptyCount).toBe(0);
+  });
+
+  it("does not advance lastSentSnapshot when email delivery fails so the next run retries", async () => {
+    vi.mocked(prisma.registration.findMany).mockResolvedValue([readyReg] as never);
+    vi.mocked(sendEmailNotification).mockResolvedValueOnce(false);
+
+    const failedSend = await runCronDigest();
+    expect(failedSend.status).toBe("ok");
+    expect(failedSend.emailSent).toBe(false);
+
+    // Because delivery failed, the next run must NOT suppress as unchanged.
+    vi.mocked(sendEmailNotification).mockResolvedValueOnce(true);
+    const retrySend = await runCronDigest();
+    expect(retrySend.status).toBe("ok");
+    expect(retrySend.emailSent).toBe(true);
+    expect(sendEmailNotification).toHaveBeenCalledTimes(2);
+  });
+
+  it("computeDigestChangeSet is pure and idempotent", () => {
+    const snap = {
+      totalContributors: 3,
+      readyCount: 3,
+      lowReserveCount: 0,
+      notReadyCount: 0,
+      slaBreachCount: 0,
+    };
+    const first = computeDigestChangeSet(snap, snap);
+    const second = computeDigestChangeSet(snap, snap);
+    expect(first).toEqual(second);
+    expect(first).toMatchObject({
+      hasChanges: false,
+      actionableCount: 0,
+      reasonCode: DIGEST_SUPPRESSION_REASON_CODES.EMPTY_CHANGE_SET,
+    });
   });
 });

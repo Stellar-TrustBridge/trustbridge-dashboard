@@ -254,6 +254,56 @@ DATABASE_URL="postgresql://trustbridge:trustbridge-dev-password@localhost:5432/t
 
 ---
 
+## Per-route rate-limit budgets
+
+Each API route enforces an independent per-IP sliding-window budget defined in
+`src/lib/rate-limit.ts` (`ROUTE_BUDGETS`). The budgets reflect each route's
+cost and abuse surface:
+
+| Route | Default budget | Env-var overrides | Rationale |
+|---|---|---|---|
+| `POST /api/register` | **10 req / 60 s** | `REGISTER_RATE_LIMIT_MAX_REQUESTS`, `REGISTER_RATE_LIMIT_WINDOW_MS` | Writes DB + calls Horizon; prevent address-scanning |
+| `GET /api/contributors/export/csv` | **20 req / 60 s** | `EXPORT_RATE_LIMIT_MAX_REQUESTS`, `EXPORT_RATE_LIMIT_WINDOW_MS` | Full-table Postgres read; also subject to API-key 60 req/min |
+| `GET /api/contributors/export/json` | **20 req / 60 s** | (same as CSV) | Same cost profile as CSV export |
+| `GET /api/stats` | **120 req / 60 s** | `STATS_RATE_LIMIT_MAX_REQUESTS`, `STATS_RATE_LIMIT_WINDOW_MS` | Public, aggregate-only; in-process single-flight cache absorbs DB load |
+| `POST /api/check` | **10 req / 60 s** (global default) | `RATE_LIMIT_MAX_REQUESTS`, `RATE_LIMIT_WINDOW_MS` | Horizon call per request |
+
+### Multi-instance caveat
+
+All counters are process-local (`Map` in memory). On a horizontally scaled
+deployment the effective per-IP limit is `maxRequests × N` where N is the
+number of running instances. For cluster-wide enforcement add a Vercel WAF /
+Cloudflare rate-limiting rule or swap to a Redis-backed store such as
+`@upstash/ratelimit`.
+
+### 429 response shape
+
+All rate-limited routes return a consistent body and headers:
+
+```
+HTTP/1.1 429 Too Many Requests
+RateLimit-Limit: <maxRequests>
+RateLimit-Remaining: 0
+RateLimit-Reset: <secondsUntilWindowResets>
+Retry-After: <secondsUntilWindowResets>
+Content-Type: application/json
+
+{ "error": "Too many requests …" }
+```
+
+The `Retry-After` header value is the number of seconds the client should wait
+before retrying. Automated tooling must honour it; ignoring it causes the client
+to remain blocked for the full remaining window.
+
+### Wave operator risk note
+
+Increasing `REGISTER_RATE_LIMIT_MAX_REQUESTS` above 10 during a registration
+sprint can expose the DB and Horizon to amplified load. If you need to raise
+the limit, also raise `HORIZON_BATCH_CONCURRENCY` gradually and monitor
+connection pool saturation (`pendingCount` in `GET /api/metrics`).
+
+---
+
 ## Maintenance mode
 
 Use maintenance mode when deploying during a Wave, running a migration, or

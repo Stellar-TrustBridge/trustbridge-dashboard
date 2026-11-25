@@ -13,6 +13,10 @@ import {
   extractClientIp,
 } from "@/lib/rate-limit";
 
+// Re-export so routes that import from this module get the full set of
+// rate-limit helpers without a second import.
+export { buildRateLimitHeaders } from "@/lib/rate-limit";
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -188,8 +192,11 @@ export function dualAuthRejectionStatus(reason: DualAuthRejection): number {
  * but we still protect them from brute-force enumeration: 60 requests per
  * minute per IP.  Env vars `RATE_LIMIT_WINDOW_MS` / `RATE_LIMIT_MAX_REQUESTS`
  * are the process-wide defaults; these override per-call for export routes.
+ *
+ * Exported so routes can reference the constant in their own 429 responses
+ * rather than hard-coding the value.
  */
-const API_KEY_RATE_LIMIT = {
+export const API_KEY_RATE_LIMIT = {
   windowMs: 60_000,
   maxRequests: 60,
 } as const;
@@ -319,6 +326,24 @@ export async function authenticateApiKey(
     // Non-fatal: auth already succeeded.
   }
 
+  // ── 6. Audit successful usage ──────────────────────────────────────────────
+  // Log key id, name, and the route path so maintainers can query usage by
+  // key name.  The raw token is never forwarded — only the stable metadata
+  // fields that the ARCHITECTURE.md redaction policy allows.
+  await recordAuditLog({
+    action: "api_key.used",
+    actorId: key.createdById,
+    actorLogin: `api-key:${key.name}`,
+    targetId: key.id,
+    targetLabel: key.name,
+    metadata: {
+      route: request.nextUrl?.pathname ?? request.url ?? null,
+      keyId: key.id,
+      // outcome is always "allowed" here — rejected paths return early above.
+      outcome: "allowed",
+    },
+  });
+
   return {
     id: key.id,
     name: key.name,
@@ -382,6 +407,34 @@ export function apiKeyScopeForbiddenResponse(
   return NextResponse.json(
     { error: "Forbidden", reason, required },
     { status: apiKeyScopeRejectionStatus(reason) }
+  );
+}
+
+/**
+ * Build the standard 403 response emitted by routes that use the simpler
+ * `authenticateApiKey` + explicit scope guard pattern (rather than
+ * `requireApiKeyScope`).
+ *
+ * Returns a stable, machine-readable body so clients and tests can assert on
+ * the shape without coupling to a human-readable string:
+ *
+ * ```json
+ * { "error": "Forbidden: API key lacks the required scope",
+ *   "code": "insufficient_scope",
+ *   "requiredScope": "export:read" }
+ * ```
+ *
+ * This function is exported so routes that call `hasScope()` directly can
+ * return a consistent error rather than constructing the body themselves.
+ */
+export function insufficientScopeResponse(required: ApiKeyScope): NextResponse {
+  return NextResponse.json(
+    {
+      error: "Forbidden: API key lacks the required scope",
+      code: "insufficient_scope",
+      requiredScope: required,
+    },
+    { status: 403 }
   );
 }
 
