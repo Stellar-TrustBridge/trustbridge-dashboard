@@ -116,6 +116,133 @@ export async function refreshMaintainerSession(): Promise<Session | null> {
 }
 
 /**
+ * Stable reason codes emitted by {@link rotateSession} so callers can map
+ * failures to consistent HTTP responses and audit metadata.
+ */
+export type SessionRotationReasonCode =
+  | "rotated"
+  | "missing_pre_auth_session"
+  | "invalid_pre_auth_session"
+  | "org_switch_denied"
+  | "rotation_persist_failed";
+
+export interface SessionRotationResult {
+  ok: boolean;
+  /** Stable reason code describing the outcome. */
+  reason: SessionRotationReasonCode;
+  /** The freshly rotated session when `ok` is true. */
+  session: Session | null;
+  /** The identifier of the pre-rotation session, when one was present. */
+  previousSessionId: string | null;
+  /** The identifier of the post-rotation session, when rotation succeeded. */
+  sessionId: string | null;
+}
+
+/**
+ * Persist a rotated session identifier. Supplied by the caller (typically the
+ * auth route handler) so this module stays free of a circular dependency on
+ * `src/lib/auth.ts` while keeping rotation semantics in one place.
+ *
+ * Implementations MUST invalidate the previous identifier before returning so
+ * a fixated identifier can never be replayed. Returning `false` signals a
+ * persistence failure and the caller must treat the login as failed.
+ */
+export type SessionRotationPersister = (params: {
+  previousSessionId: string | null;
+  session: Session;
+  reason: "login" | "org-switch";
+}) => Promise<boolean>;
+
+/**
+ * Rotate the session identifier on login and org-switch to defeat session
+ * fixation. A pre-set/fixated identifier is invalidated before the new one is
+ * issued, so it can never be reused after a successful rotation.
+ *
+ * Failure paths (all return `ok: false` with a stable reason code and never
+ * leave partial privileged state):
+ * - `missing_pre_auth_session`: no session was presented to rotate.
+ * - `invalid_pre_auth_session`: the presented session is not a maintainer.
+ * - `org_switch_denied`: org-switch requested without valid membership.
+ * - `rotation_persist_failed`: the persister failed to invalidate/issue.
+ */
+export async function rotateSession(
+  persist: SessionRotationPersister,
+  options: { reason: "login" | "org-switch"; orgId?: string | null } = { reason: "login" }
+): Promise<SessionRotationResult> {
+  const session = await getServerSession(authOptions);
+  const previousSessionId = session?.user?.id ?? null;
+
+  if (!session) {
+    return {
+      ok: false,
+      reason: "missing_pre_auth_session",
+      session: null,
+      previousSessionId: null,
+      sessionId: null,
+    };
+  }
+
+  if (!session.user?.isMaintainer) {
+    return {
+      ok: false,
+      reason: "invalid_pre_auth_session",
+      session: null,
+      previousSessionId,
+      sessionId: null,
+    };
+  }
+
+  if (options.reason === "org-switch") {
+    const memberships = (session.user as { orgIds?: string[] }).orgIds ?? [];
+    if (!options.orgId || !memberships.includes(options.orgId)) {
+      await recordAuditLog({
+        action: "session_rotation_denied",
+        actorId: session.user.id,
+        actorLogin: session.user.githubUsername ?? null,
+        metadata: { reason: "org_switch_denied", orgId: options.orgId ?? null },
+      });
+      return {
+        ok: false,
+        reason: "org_switch_denied",
+        session: null,
+        previousSessionId,
+        sessionId: null,
+      };
+    }
+  }
+
+  const persisted = await persist({
+    previousSessionId,
+    session,
+    reason: options.reason,
+  });
+
+  if (!persisted) {
+    await recordAuditLog({
+      action: "session_rotation_failed",
+      actorId: session.user.id,
+      actorLogin: session.user.githubUsername ?? null,
+      metadata: { reason: "rotation_persist_failed", rotationReason: options.reason },
+    });
+    return {
+      ok: false,
+      reason: "rotation_persist_failed",
+      session: null,
+      previousSessionId,
+      sessionId: null,
+    };
+  }
+
+  return {
+    ok: true,
+    reason: "rotated",
+    session,
+    previousSessionId,
+    sessionId: session.user.id,
+  };
+}
+
+/**
  * Credential kinds a request may present to a dual-auth route.
  */
 export type ApiCredentialKind = "session" | "api-key" | "none";
@@ -243,58 +370,112 @@ export async function resolveDualAuth(
 
 /**
  * GraphQL abuse-protection limits. These bound the cost of a single GraphQL
- * operation so a deeply nested or wide query cannot be used as a cheap DoS
- * against the Wave dashboard during traffic spikes.
+ * request so a caller cannot exhaust the server with an oversized or deeply
+ * nested document. They are enforced by `src/app/api/graphql/route.ts`.
+ */
+export const GRAPHQL_MAX_QUERY_BYTES = 16 * 1024;
+export const GRAPHQL_MAX_DEPTH = 12;
+
+/**
+ * Persisted-query allowlist mode for the GraphQL endpoint.
  *
- * Operators can override the defaults via environment variables:
- * - `GRAPHQL_MAX_DEPTH` (default 10)
- * - `GRAPHQL_MAX_COMPLEXITY` (default 1000)
+ * When `GRAPHQL_PERSISTED_QUERIES_ONLY` is set to a truthy value (`1`, `true`,
+ * `yes`, `on`), the endpoint only accepts queries identified by a persisted
+ * query hash that appears in the allowlist. Arbitrary inline queries are
+ * rejected. When the env var is unset or falsy, behavior is unchanged and
+ * inline queries are accepted (subject to the existing abuse limits).
  *
- * Introspection is disabled in production unless `GRAPHQL_ALLOW_INTROSPECTION`
- * is set to `"true"` (useful for trusted tooling).
+ * The allowlist is supplied via `GRAPHQL_PERSISTED_QUERY_ALLOWLIST` as a
+ * comma-separated list of lowercase hex SHA-256 hashes. Hashes are normalized
+ * to lowercase and trimmed; empty entries are ignored.
  */
-export const GRAPHQL_DEFAULT_MAX_DEPTH = 10;
-export const GRAPHQL_DEFAULT_MAX_COMPLEXITY = 1000;
+export type PersistedQueryErrorCode =
+  | "persisted_queries_disabled"
+  | "missing_query"
+  | "invalid_persisted_query_id"
+  | "query_too_large"
+  | "unknown_persisted_query";
 
-/**
- * Stable reason codes returned when a GraphQL operation is rejected by the
- * abuse-protection limits. Documented in `docs/ARCHITECTURE.md`.
- */
-export type GraphQLLimitReasonCode =
-  | "graphql_depth_exceeded"
-  | "graphql_complexity_exceeded"
-  | "graphql_introspection_disabled";
+export interface PersistedQueryResult {
+  ok: boolean;
+  /** Stable error code when `ok` is false. */
+  error?: PersistedQueryErrorCode;
+  /** The normalized persisted-query hash when one was accepted. */
+  hash?: string;
+}
 
-function readPositiveIntEnv(name: string, fallback: number): number {
-  const raw = process.env[name]?.trim();
-  if (!raw) return fallback;
-  const parsed = Number.parseInt(raw, 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
-  return parsed;
+const PERSISTED_QUERY_HASH_RE = /^[a-f0-9]{64}$/;
+
+function isTruthyEnv(value: string | undefined): boolean {
+  if (!value) return false;
+  const normalized = value.trim().toLowerCase();
+  return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
 }
 
 /**
- * Resolve the effective GraphQL depth/complexity limits from the environment,
- * falling back to the documented defaults when unset or invalid.
+ * Whether persisted-query allowlist mode is enabled for this process.
  */
-export function getGraphQLLimits(): { maxDepth: number; maxComplexity: number } {
-  return {
-    maxDepth: readPositiveIntEnv("GRAPHQL_MAX_DEPTH", GRAPHQL_DEFAULT_MAX_DEPTH),
-    maxComplexity: readPositiveIntEnv(
-      "GRAPHQL_MAX_COMPLEXITY",
-      GRAPHQL_DEFAULT_MAX_COMPLEXITY
-    ),
-  };
+export function isPersistedQueryModeEnabled(): boolean {
+  return isTruthyEnv(process.env.GRAPHQL_PERSISTED_QUERIES_ONLY);
 }
 
 /**
- * Whether GraphQL introspection is permitted. Disabled in production unless
- * explicitly opted in via `GRAPHQL_ALLOW_INTROSPECTION=true`; always allowed
- * outside production so local tooling keeps working.
+ * Parse the configured persisted-query allowlist into a normalized set of
+ * lowercase SHA-256 hashes. Malformed entries are dropped so a typo cannot
+ * silently widen the allowlist.
  */
-export function isGraphQLIntrospectionAllowed(): boolean {
-  if (process.env.NODE_ENV !== "production") return true;
-  return process.env.GRAPHQL_ALLOW_INTROSPECTION?.trim().toLowerCase() === "true";
+export function getPersistedQueryAllowlist(): Set<string> {
+  const raw = process.env.GRAPHQL_PERSISTED_QUERY_ALLOWLIST ?? "";
+  const hashes = new Set<string>();
+  for (const entry of raw.split(",")) {
+    const normalized = entry.trim().toLowerCase();
+    if (PERSISTED_QUERY_HASH_RE.test(normalized)) {
+      hashes.add(normalized);
+    }
+  }
+  return hashes;
 }
 
-export { hasMinimumRole, ROLE_HIERARCHY };
+/**
+ * Enforce persisted-query allowlist mode for a GraphQL request body.
+ *
+ * Returns `{ ok: true }` when the mode is disabled (default behavior is
+ * unchanged) or when the supplied persisted-query hash is present in the
+ * allowlist. Returns a stable error code otherwise. This check is purely
+ * additive: callers must still run auth, CSRF, org-scope, pause/freeze, and
+ * dry-run checks before executing the query.
+ */
+export function enforcePersistedQueryAllowlist(input: {
+  query?: unknown;
+  persistedQueryId?: unknown;
+}): PersistedQueryResult {
+  if (!isPersistedQueryModeEnabled()) {
+    return { ok: true };
+  }
+
+  const rawId = input.persistedQueryId;
+  const hasId = typeof rawId === "string" && rawId.trim().length > 0;
+
+  if (!hasId) {
+    // No persisted-query id: inline queries are not allowed in this mode.
+    if (typeof input.query === "string" && input.query.length > GRAPHQL_MAX_QUERY_BYTES) {
+      return { ok: false, error: "query_too_large" };
+    }
+    if (typeof input.query === "string" && input.query.trim().length > 0) {
+      return { ok: false, error: "unknown_persisted_query" };
+    }
+    return { ok: false, error: "missing_query" };
+  }
+
+  const normalized = (rawId as string).trim().toLowerCase();
+  if (!PERSISTED_QUERY_HASH_RE.test(normalized)) {
+    return { ok: false, error: "invalid_persisted_query_id" };
+  }
+
+  const allowlist = getPersistedQueryAllowlist();
+  if (!allowlist.has(normalized)) {
+    return { ok: false, error: "unknown_persisted_query" };
+  }
+
+  return { ok: true, hash: normalized };
+}

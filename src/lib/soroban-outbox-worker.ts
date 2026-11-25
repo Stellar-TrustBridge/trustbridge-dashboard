@@ -8,6 +8,7 @@ import { prisma } from "@/lib/prisma";
 import { recordAuditLog } from "@/lib/audit";
 import { redactString } from "@/lib/sentry";
 import { computeJitteredDelay } from "@/lib/retry";
+import { resolveOutboxLeaseMs } from "@/lib/soroban-outbox";
 import {
   mirrorRegistrationToSoroban,
   type MirrorRegistrationPayload,
@@ -143,6 +144,12 @@ export interface OutboxProcessOptions {
   maxAttempts?: number;
   maintainerOrgId?: string;
   entryId?: string;
+  /** Delivery lease duration in ms (defaults to SOROBAN_OUTBOX_LEASE_MS or 30_000). */
+  leaseMs?: number;
+  /** Optional worker identifier for structured diagnostics. */
+  workerId?: string;
+  /** Optional abort signal for graceful cancel/pause/freeze mid-flight. */
+  signal?: AbortSignal;
 }
 
 export interface SorobanOutboxDeadLetter {
@@ -233,10 +240,24 @@ export async function getSorobanOutboxMetrics(
 export async function processSorobanOutbox(options: OutboxProcessOptions = {}) {
   const batchSize = options.batchSize ?? 10;
   const maxAttempts = options.maxAttempts ?? 5;
+  const leaseMs = resolveOutboxLeaseMs(options.leaseMs);
+  const workerId = options.workerId ?? "default-worker";
 
+  if (options.signal?.aborted) {
+    return {
+      processedCount: 0,
+      successCount: 0,
+      failedCount: 0,
+    };
+  }
+
+  const now = new Date();
   const where: Prisma.SorobanOutboxWhereInput = {
-    status: "PENDING",
-    nextAttemptAt: { lte: new Date() },
+    OR: [
+      { status: "PENDING", nextAttemptAt: { lte: now } },
+      // Reclaim rows whose previous worker crashed/stalled past its lease deadline.
+      { status: "PROCESSING", nextAttemptAt: { lte: now } },
+    ],
   };
   if (options.entryId) {
     where.id = options.entryId;
@@ -256,11 +277,42 @@ export async function processSorobanOutbox(options: OutboxProcessOptions = {}) {
   let failedCount = 0;
 
   for (const item of pending) {
+    if (options.signal?.aborted) break;
+
+    const claimNow = new Date();
+    const leaseExpiresAt = new Date(claimNow.getTime() + leaseMs);
+    const claimWhere: Prisma.SorobanOutboxWhereInput =
+      item.status === "PROCESSING"
+        ? { id: item.id, status: "PROCESSING", nextAttemptAt: { lte: now } }
+        : { id: item.id, status: "PENDING", nextAttemptAt: { lte: claimNow } };
+
     const claim = await prisma.sorobanOutbox.updateMany({
-      where: { id: item.id, status: "PENDING" },
-      data: { status: "PROCESSING" },
+      where: claimWhere,
+      data: {
+        status: "PROCESSING",
+        nextAttemptAt: leaseExpiresAt,
+        updatedAt: claimNow,
+      },
     });
     if (claim.count !== 1) continue;
+
+    if (options.signal?.aborted) {
+      // Release the newly claimed row cleanly so pause/cancel leaves no stuck PROCESSING row.
+      await prisma.sorobanOutbox.updateMany({
+        where: {
+          id: item.id,
+          status: "PROCESSING",
+          nextAttemptAt: leaseExpiresAt,
+        },
+        data: {
+          status: "PENDING",
+          nextAttemptAt: new Date(),
+          updatedAt: new Date(),
+        },
+      });
+      break;
+    }
+
     processedCount++;
 
     const payload = item.payload as { stellarAddress: string; githubUsername: string; registrationId: string };
@@ -279,6 +331,17 @@ export async function processSorobanOutbox(options: OutboxProcessOptions = {}) {
           message: error instanceof Error ? error.message : String(error),
         },
       };
+    }
+
+    // Fencing check: if our lease expired while delivery was in-flight, another
+    // worker may have reclaimed this row. Do not clobber the new owner's state.
+    if (Date.now() > leaseExpiresAt.getTime()) {
+      workerLogger.warn("soroban_outbox_lease_expired", {
+        outboxId: item.id,
+        workerId,
+        leaseExpiresAt: leaseExpiresAt.toISOString(),
+      });
+      continue;
     }
 
     if (result.success) {
@@ -315,8 +378,7 @@ export async function processSorobanOutbox(options: OutboxProcessOptions = {}) {
           metadata: { action: item.action, attempts: nextAttempts, error: lastError },
         });
       } else {
-        // Jittered exponential backoff: use the shared helper so the schedule
-        // is identical to what `computeOutboxRetryDelayMs` advertises.
+        // Jittered exponential backoff via shared helper.
         const backoffMs = computeOutboxRetryDelayMs(nextAttempts);
         const nextAttemptAt = new Date(Date.now() + backoffMs);
 

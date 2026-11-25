@@ -707,17 +707,20 @@ tests/api/
 | Variable | Purpose |
 |----------|---------|
 | `GITHUB_WEBHOOK_SECRET` | HMAC secret shared with GitHub; required for all `github-org-membership` webhooks |
-### Unified Transactional Outbox for Soroban write-through (#199, #488)
+### Unified Transactional Outbox for Soroban write-through (#199, #488, #793)
 
 To ensure reliable write-through to Soroban without losing registrations during chain or RPC outages, while supporting fast, hermetic unit tests:
 
-1. **Unified Outbox Abstraction (`src/lib/soroban-outbox.ts`):** Unifies production transactional writes with an in-memory adapter sink (`setSorobanOutboxSink`) for unit tests. In production runtime, `enqueueSorobanOutbox()` creates persistent `SorobanOutbox` rows in PostgreSQL (scoped by `maintainerOrgId`). In tests, the registered sink handles delivery directly in memory without database dependencies.
+1. **Unified Outbox Abstraction (`src/lib/soroban-outbox.ts`):** Unifies production transactional writes with an in-memory adapter sink (`setSorobanOutboxSink`) for unit tests. In production runtime, `enqueueSorobanOutbox()` creates persistent `SorobanOutbox` rows in PostgreSQL (scoped by `maintainerOrgId`, with optional `idempotencyKey`). In tests, the registered sink handles delivery directly in memory without database dependencies.
 2. **Transactional Enqueue:** During registration write paths, `enqueueSorobanOutbox()` stages the mirror payload with `status: PENDING`. Duplicate exports have been consolidated under `src/lib/soroban-outbox.ts`.
-3. **Outbox Worker (`processSorobanOutbox()`):** Background workers (`scripts/worker.mjs` / `src/lib/soroban-outbox-worker.ts`) periodically fetch pending outbox rows and invoke `mirrorRegistrationToSoroban()`.
-4. **Bounded Retry Budget and Poison-Message Parking:** Each outbox entry carries a `maxAttempts` budget (default: 5). The delivery worker respects this budget — on each failure it increments `attempts`; once `attempts >= maxAttempts` the entry transitions to `FAILED` and is **parked** (never retried again). The in-memory path enforces the same gate in `enqueueSorobanOutbox()`: re-enqueuing a parked entry returns it unchanged so callers can observe the state without crashing. Parked entries are enumerable via `listPoisonedEntries()` (in-memory) or `listSorobanOutboxDeadLetters()` (Prisma).
-5. **Jittered Exponential Backoff:** Failed (but not yet parked) entries are rescheduled using the shared `computeJitteredDelay` helper from `src/lib/retry.ts` via `computeOutboxRetryDelayMs()`. The schedule is base 2 s, factor 4, ceiling 5 min, full jitter — identical to the check-API-client retry schedule so there is one backoff implementation in the codebase.
-6. **DLQ Metrics:** `getSorobanOutboxMetrics(maintainerOrgId?)` returns live counts broken down by status (`pending`, `processing`, `completed`, `failed`, `total`). Exposed by `GET /api/soroban/outbox/dlq`. The in-memory path exposes equivalent counts via `getInMemoryOutboxMetrics()` which also includes a `parked` counter (budget-exhausted FAILED entries).
-7. **At-Least-Once Delivery & Audit Trail:** On success, outbox records transition to `COMPLETED`. When `maxAttempts` is exhausted and an entry is parked, an audit event (`soroban_outbox_exhausted`) is logged via `recordAuditLog()`.
+3. **Outbox Worker (`processSorobanOutbox()`):** Background workers (`scripts/worker.mjs` / `src/lib/soroban-outbox-worker.ts`) periodically fetch due `PENDING` rows and expired-lease `PROCESSING` rows, claiming each atomically via `updateMany` compare-and-swap before invoking `mirrorRegistrationToSoroban()`.
+4. **Lease-Guarded Delivery Claims & Concurrency Assumptions (#793):**
+   - **Atomic lease acquisition:** Each claim sets `status: PROCESSING` and advances `nextAttemptAt` (or `leaseExpiresAt` in memory) to `now + leaseMs` (default `30_000` ms, configurable via `SOROBAN_OUTBOX_LEASE_MS` within `1..600_000` ms). Under concurrent workers, only one worker's compare-and-swap succeeds (`count === 1`).
+   - **Fencing & lease expiry reclamation:** In-memory claims (`claimSorobanOutboxEntry`, `claimNextSorobanOutboxEntries`, `drainSorobanOutboxWithLease`) issue a unique `leaseToken` fencing token verified by `completeSorobanOutboxClaim`, `failSorobanOutboxClaim`, and `releaseSorobanOutboxClaim`. If a worker stalls past `leaseExpiresAt`, another worker may reclaim the entry and the stalled worker's late mutation is rejected with `STALE_LEASE_TOKEN`. In `processSorobanOutbox()`, a worker whose lease expires mid-delivery logs `soroban_outbox_lease_expired` and skips finalizing so it cannot clobber a new lease owner.
+   - **Mid-flight cancel/pause safety:** Passing an `AbortSignal` to `drainSorobanOutboxWithLease()` or `processSorobanOutbox()` cleanly releases newly claimed entries back to `PENDING` without incrementing `attempts` or leaving stuck `PROCESSING` rows.
+   - **Stable reason codes (`SOROBAN_OUTBOX_REASON_CODES`):** `INVALID_PAYLOAD`, `INVALID_WORKER_ID`, `INVALID_LEASE_MS`, `INVALID_LEASE_TOKEN`, `INVALID_BATCH_SIZE`, `ENTRY_NOT_FOUND`, `ALREADY_CLAIMED`, `ALREADY_COMPLETED`, `NOT_CLAIMABLE`, `STALE_LEASE_TOKEN`.
+   - **Assumptions for Wave operators:** Exactly-once delivery claims hold within a lease window assuming bounded clock skew across worker hosts (clock skew must be significantly smaller than `SOROBAN_OUTBOX_LEASE_MS`) and idempotent downstream Soroban/off-chain consumers if a worker crashes *after* submitting on-chain but *before* committing `COMPLETED`.
+5. **Retry Backoff & Audit Trail:** On success, outbox records transition to `COMPLETED`. On failures, records retry with exponential backoff up to `maxAttempts` (default 5). If `maxAttempts` is exhausted, status transitions to `FAILED` and an audit event (`soroban_outbox_exhausted`) is logged.
 
 #### Retry schedule (`computeOutboxRetryDelayMs`)
 
@@ -734,6 +737,10 @@ To ensure reliable write-through to Soroban without losing registrations during 
 | Audit action | When |
 |---|---|
 | `soroban_outbox_exhausted` | An entry's `attempts` reached `maxAttempts`; entry parked as poison message. |
+
+6. **Poison-Message Parking & Jittered Backoff (#752/#753):** Entries that exhaust `maxAttempts` are parked as `FAILED` (see `listSorobanOutboxDeadLetters` / in-memory `listPoisonedEntries`). Retries use `computeOutboxRetryDelayMs()` (base 2s, factor 4, ceiling 5 min, full jitter via `computeJitteredDelay`).
+
+
 
 ---
 
@@ -809,3 +816,105 @@ normalized resolved Horizon and Soroban RPC URLs. All components are escaped,
 so no org/network can bleed into another's cached result. Public CORS,
 rate-limit headers, the 30 s TTL and its `Cache-Control` headers are unchanged.
 See [ACTION_LOOKUP_CACHE.md](./ACTION_LOOKUP_CACHE.md).
+
+---
+
+## Registry mode (`REGISTRY_MODE`)
+
+`src/lib/registry-mode.ts` exposes a single function `getRegistryMode()` that
+every contributor-facing REST endpoint reads to stamp `registryMode` onto its
+response payload.  The field tells the front-end (and downstream consumers such
+as Wave tooling) whether data freshness is driven by **manual maintainer
+rechecks** or by an **automated contract-sync job**.
+
+### Modes
+
+| Value | Meaning | Who keeps data fresh |
+|---|---|---|
+| `"live"` *(default)* | Postgres reflects the last manual Horizon recheck. Maintainers must trigger `POST /api/contributors` to refresh readiness data. | Maintainer, on demand |
+| `"synced"` | A scheduled `syncContractToPostgres()` job keeps Postgres in sync with on-chain registrations. Manual rechecks are still allowed but not required. | Background cron, automatically |
+
+**Reads are identical in both modes** — Postgres is always the source of truth.
+The mode only changes what the API reports about *expected freshness*, not what
+it queries.
+
+### Fail-open design
+
+An unrecognized or missing `REGISTRY_MODE` value falls back to `"live"` rather
+than refusing to boot.  This means a typo'd env var never breaks read endpoints
+— it just silently defaults.  Operators should validate their env vars using
+`GET /api/health`, which surfaces `registryMode` in its response.
+
+### Env var
+
+```bash
+# Optional. Accepts "live" (default) or "synced".
+# Value is normalised (trimmed, lowercased) before evaluation.
+REGISTRY_MODE=synced
+```
+
+### Where the value surfaces
+
+Both `GET /api/contributors` and `GET /api/contributors/paginated` include
+`registryMode` at the top level of their JSON response so the maintainer
+dashboard can display the correct freshness label:
+
+```json
+{
+  "contributors": [...],
+  "total": 42,
+  "registryMode": "synced"
+}
+```
+
+### Migrating between modes
+
+#### Switching from `"live"` to `"synced"`
+
+Prerequisites:
+1. Deploy `src/lib/contract-sync.ts` and verify at least one successful run
+   (`GET /api/contract-sync` → `lastRun.status === "ok"`).
+2. Confirm the contract-sync cron is configured and not in a `stalled` state
+   (`GET /api/health` → `checks.contractSync.lag.status === "ok"`).
+3. Run a final manual batch recheck (`POST /api/contributors`) so Postgres
+   starts the synced period with fresh Horizon data.
+
+Activation:
+```bash
+# Vercel
+vercel env add REGISTRY_MODE production  # value: synced
+# Then redeploy to pick up the new value.
+```
+
+The flag is read on every request — no restart beyond the redeploy is needed.
+
+Validation:
+- `GET /api/contributors` → response includes `"registryMode": "synced"`.
+- Maintainer dashboard heading changes from "Live" to "Synced" (if the UI
+  reads the field).
+
+#### Switching back from `"synced"` to `"live"`
+
+Remove or blank `REGISTRY_MODE` (or set it to `"live"`) and redeploy.  The
+fall-open default means no contributors are locked out during the transition.
+Run a manual batch recheck immediately after to ensure Horizon data is fresh.
+
+### Failure modes
+
+| Situation | Behaviour |
+|---|---|
+| `REGISTRY_MODE` unset | Falls back to `"live"` |
+| `REGISTRY_MODE` set to an invalid value (e.g. `"offline"`) | Falls back to `"live"` with no error |
+| `REGISTRY_MODE` set to whitespace-only | Treated as unset; falls back to `"live"` |
+| Contract-sync stalled while `REGISTRY_MODE=synced` | `GET /api/health` degrades `contractSync.lag.status`; operator alert fires via webhook. Data reads continue normally from Postgres — no 5xx. |
+| Contract-sync misconfigured (`SOROBAN_CONTRACT_ID` missing) | Sync skipped; `registryMode` still reports `"synced"` if configured — operator should revert to `"live"` or fix the contract ID. |
+
+### Testing
+
+```bash
+npx vitest run src/lib/registry-mode.test.ts
+```
+
+The test suite covers defaults, explicit values, normalisation
+(case-insensitive, whitespace trimming), all documented failure paths, type
+safety, and idempotency.  No DB or network is required.

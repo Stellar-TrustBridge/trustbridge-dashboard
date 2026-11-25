@@ -16,11 +16,17 @@ export const dynamic = "force-dynamic";
  * shape is the `HealthResponse` contract from `@/lib/health`; the panel
  * tolerates partial payloads, but this route always returns a well-formed
  * body so operators get a stable contract.
+ *
+ * Deep readiness (including the Soroban outbox lag probe) is opt-in via
+ * `?deep=1` and gated behind the existing authz check inside
+ * `runHealthChecks`. Shallow requests keep the public, cacheable contract.
  */
-export async function GET() {
+export async function GET(request: Request) {
+  const deep = new URL(request.url).searchParams.get("deep") === "1";
+
   let body;
   try {
-    body = await runHealthChecks();
+    body = await runHealthChecks({ deep });
   } catch (error) {
     // Never let a probe failure surface as an unhandled 500 — the panel
     // renders this as an "unavailable" state instead of crashing.
@@ -32,11 +38,16 @@ export async function GET() {
     };
   }
 
+  // Deep responses are authz-gated and must never be cached by shared caches.
+  const cacheControl = deep
+    ? "private, no-store"
+    : "public, max-age=30, stale-while-revalidate=60";
+
   return withPublicCors(
     NextResponse.json(body, {
       status: 200,
       headers: {
-        "Cache-Control": "public, max-age=30, stale-while-revalidate=60",
+        "Cache-Control": cacheControl,
       },
     })
   );

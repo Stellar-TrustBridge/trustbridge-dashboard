@@ -1,145 +1,164 @@
 # Maintainer Workflow
 
-This guide documents operational workflows for TrustBridge maintainers and treasurers, including the `trustbridge-dash` CLI, wave freeze windows, and payout verification.
+This document describes how maintainers operate the TrustBridge dashboard, including the audit export pipeline used for Wave compliance reporting.
 
----
+## Audit export
 
-## 1. CLI (`trustbridge-dash`)
+Audit exports are served by `src/app/api/audit/route.ts`, which delegates to `src/lib/audit.ts`. Formatting of exported rows is centralized in `src/lib/audit-format.ts`.
 
-The `trustbridge-dash` CLI allows maintainers and automated scripts to export payout data and initiate address rechecks without relying on browser UI sessions.
+### Pagination for large orgs
 
-### Installation & Local Usage
+Large organizations can accumulate audit histories that exceed a single response budget. The export endpoint paginates so that a single request never has to materialize the full history:
 
-The CLI is registered in `package.json` under `"bin"`:
+- Requests accept `limit` (page size) and `cursor` (opaque continuation token) query parameters.
+- Responses return a `nextCursor` value when more rows remain; omit it on the final page.
+- Page size is clamped to a documented maximum; oversized `limit` values are rejected with a stable error rather than silently truncated.
+- Malformed `cursor` values fail with a stable, documented error code instead of returning partial data.
 
-```bash
-# Direct execution via npm/npx or node
-./scripts/cli/index.mjs --help
-npx trustbridge-dash --help
+Operators exporting very large orgs should follow the cursor until `nextCursor` is absent rather than requesting an unbounded export.
+
+### Operator chunking guidance
+
+When running compliance exports for large orgs:
+
+1. Start with a modest `limit` (for example, the default page size) and follow `nextCursor` until exhausted.
+2. Persist each page before requesting the next so a mid-flight abort leaves no partial privileged state.
+3. Treat any non-2xx response as a hard failure — do not assume an empty page means completion.
+4. Respect existing auth, CSRF, org-scope, pause/freeze, and dry-run semantics; pagination does not bypass any of them.
+
+### Stress tests
+
+Pagination behavior for large orgs is covered by automated tests that exercise the happy path (multi-page traversal) plus failure paths (oversized/malformed pagination input and permission/network failure). Run the targeted checks for touched paths before merging:
+
+```
+# targeted audit tests
+npm test -- audit
+
+# repo gates for touched paths
+npm run lint
+npm run typecheck
 ```
 
-### Commands
+Include the commands run and a short risk note for Wave operators in the PR description.
 
-#### 1. Login / Credential Setup
-Save the target URL and API key locally (stored in `~/.trustbridge/config.json` with `0600` permissions):
-```bash
-trustbridge-dash login --url https://dashboard.trustbridge.org --api-key <YOUR_API_KEY>
-```
+## Ban → conflict → restore smoke path
 
-Alternatively, provide configuration via environment variables:
-```bash
-export TRUSTBRIDGE_API_URL="https://dashboard.trustbridge.org"
-export TRUSTBRIDGE_API_KEY="<YOUR_API_KEY>"
-```
+The end-to-end smoke outline for exercising ban, the duplicate-wallet conflict,
+and restore with test users (including CSRF and auth setup) lives in
+[`docs/E2E_TESTING.md`](./E2E_TESTING.md#maintainer-ban--conflict--restore-smoke-path).
+Keep that outline in sync with the ban route reason codes and inputs whenever the
+ban route changes.
 
-#### 2. Treasury Export
-Export contributor readiness and Stellar addresses in CSV (default) or JSON format:
-```bash
-# Export CSV to stdout or file
-trustbridge-dash export --format csv --out ./treasury-export.csv
+## 2a. Maintenance Banners (Planned Downtime Windows)
 
-# Export JSON
-trustbridge-dash export --format json --out ./treasury-export.json
-```
+Maintainers can schedule dashboard maintenance banners so wave contributors get
+notice before a freeze or deploy. Windows are stored and served by
+`src/lib/maintenance.ts` and exposed through `/api/maintenance`.
 
-API clients can request the same formats by POSTing `{"format":"csv"}` or
-`{"format":"json"}` to `/api/treasury/export`. The endpoint requires an
-operator session or an API key with the `export:read` scope and applies its
-same-origin request check.
+### Public read
 
-#### 3. Recheck
-Trigger an address verification / readiness check:
-```bash
-# Batch recheck all contributors (asynchronous background queue)
-trustbridge-dash recheck --all
-
-# Recheck a single contributor
-trustbridge-dash recheck --username octocat
-```
-
-### Batch recheck progress stream
-
-`POST /api/contributors` enqueues a `recheck.batch` job; monitor it with
-`GET /api/contributors/queue/progress?jobId=<id>` (maintainer session required,
-`text/event-stream`). Events arrive in this order:
-
-1. `status` — initial snapshot (`jobId`, `status`, `createdAt`, `startedAt`).
-2. `progress` — zero or more snapshots while the job is processing.
-3. `processing` — heartbeat on each poll while still running.
-4. `completed` or `failed` — terminal event (or `error` for a missing/foreign job).
-
-Jobs with no persisted progress produce only `status` → `processing` → terminal
-events, so existing consumers are unaffected. Snapshots are deduplicated by
-`updatedAt`; only strictly newer timestamps are emitted.
-
-The stable progress payload is:
+`GET /api/maintenance` requires **no authentication** and returns the windows
+that are currently active or upcoming (past windows are omitted):
 
 ```json
 {
-  "type": "progress",
-  "jobId": "job-42",
-  "processed": 12,
-  "total": 40,
-  "errors": 1,
-  "done": false,
-  "updatedAt": "2026-10-01T00:00:00.000Z"
+  "windows": [
+    {
+      "id": "mw-1",
+      "message": "Dashboard read-only during wave payout",
+      "startsAt": "2026-10-01T00:00:00.000Z",
+      "endsAt": "2026-10-01T02:00:00.000Z",
+      "severity": "warning",
+      "status": "active"
+    }
+  ]
+}
+```
+
+`status` is one of `upcoming`, `active`, or `ended` (ended windows are filtered
+out of the public response). `severity` is `info`, `warning`, or `critical`.
+
+### Maintainer write
+
+`POST /api/maintenance` (create), `PATCH /api/maintenance` (update), and
+`DELETE /api/maintenance?id=<id>` (cancel) require a maintainer session and the
+same-origin CSRF check used by other mutating routes. Unauthorized callers get
+HTTP `401`/`403` with an actionable `error`/`code` body — never a silent
+success.
+
+```bash
+curl -X POST https://dashboard.trustbridge.org/api/maintenance \
+  -H 'content-type: application/json' \
+  -H 'x-csrf-token: <token>' \
+  --data '{"message":"Read-only during payout","startsAt":"2026-10-01T00:00:00Z","endsAt":"2026-10-01T02:00:00Z","severity":"warning"}'
+```
+
+### Validation & reason codes
+
+Malformed or oversized input fails with a stable `code`:
+
+| Outcome | HTTP | `code` |
+|---|---|---|
+| Missing/empty message | 400 | `MAINTENANCE_MESSAGE_REQUIRED` |
+| Message over 280 chars | 400 | `MAINTENANCE_MESSAGE_TOO_LONG` |
+| Non-ISO-8601 timestamp | 400 | `MAINTENANCE_INVALID_TIMESTAMP` |
+| `endsAt` not after `startsAt` | 400 | `MAINTENANCE_INVALID_WINDOW` |
+| Unknown severity | 400 | `MAINTENANCE_INVALID_SEVERITY` |
+| Unknown window id | 404 | `MAINTENANCE_NOT_FOUND` |
+| Non-maintainer write | 403 | `MAINTENANCE_FORBIDDEN` |
+
+Writes are idempotent per window id: re-submitting the same payload for an
+existing id is a no-op update, and cancelling an already-cancelled window
+returns success without partial state.
+
+### Bulk ban dry-run report (issue #780)
+
+Bulk bans support a **dry-run** mode that reports what *would* happen without
+mutating any ban state. Pass `dryRun: true` alongside a bulk ban request:
+
+```json
+{
+  "action": "ban",
+  "githubUsernames": ["octocat", "hubot"],
+  "reason": "Coordinated spam wave",
+  "dryRun": true
+}
+```
+
+The response is a stable report shape (no `User.banned*` flags or
+`BannedContributor` rows are written, and no `contributor.banned` audit events
+are emitted):
+
+```json
+{
+  "dryRun": true,
+  "report": {
+    "total": 3,
+    "wouldBan": 1,
+    "alreadyBanned": 1,
+    "skipped": 1,
+    "entries": [
+      { "githubUsername": "octocat", "outcome": "would_ban" },
+      { "githubUsername": "hubot", "outcome": "already_banned" },
+      { "githubUsername": "", "outcome": "skipped", "reason": "INVALID_USERNAME" }
+    ]
+  }
 }
 ```
 
 | Field | Meaning |
 |---|---|
-| `type` | Always `"progress"` |
-| `jobId` | Id of the background queue job |
-| `processed` | Number of contributor checks completed so far |
-| `total` | Total contributor checks in the batch |
-| `errors` | Number of checks that failed (counted from results) |
-| `done` | `true` once every check has been recorded |
-| `updatedAt` | Monotonic ISO-8601 timestamp, used for dedupe/reconnect |
+| `total` | Number of requested handles (after dedupe) |
+| `wouldBan` | Handles that would be newly banned |
+| `alreadyBanned` | Handles already banned (idempotent no-op) |
+| `skipped` | Handles skipped due to validation/self-moderation |
+| `entries[].outcome` | `would_ban` \| `already_banned` \| `skipped` |
+| `entries[].reason` | Present on `skipped` entries (e.g. `INVALID_USERNAME`, `SELF_BAN_FORBIDDEN`) |
 
-The worker persists each snapshot in the queue job's existing `result` column
-under `result.progress` while the job is `processing`. The final `result`
-overwrites that field entirely, so the completed-job result shape is unchanged.
-`useJobProgress()` (`src/lib/use-job-progress.ts`) exposes the event fields to
-the dashboard without closing the stream on `progress`.
-
-### Security & Protocol Constraints
-- **HTTPS Enforcement**: Unencrypted HTTP (`http://`) endpoints are strictly rejected by the CLI to protect API keys and contributor information.
-- **Log Masking**: API keys and tokens are never printed in full to logs or error outputs.
-
----
-
-## 2. Wave Roster Freeze Window
-
-To prevent roster changes or rechecks from shuffling readiness states immediately prior to wave payout settlement:
-
-- **Configuration**:
-  - `FREEZE_WINDOW_START` (ISO 8601, e.g. `2026-08-30T00:00:00Z`).
-  - `FREEZE_WINDOW_END` (ISO 8601, e.g. `2026-09-02T00:00:00Z`).
-  - `FREEZE_WINDOW_ENABLED=true` (or `false` to disable).
-- **Behavior**:
-  - Mutating operations (`POST /api/register/recheck`, address updates in `POST /api/register`) are blocked during an active freeze window with HTTP `423 Locked` (`code: WAVE_FREEZE_ACTIVE`).
-  - Read operations (`GET /api/register`, dashboard viewing) remain fully operational.
-  - Blocked attempts are logged in the audit log as `recheck.freeze_blocked` / `address_change.freeze_blocked`.
-- **Maintainer Override**:
-  - Maintainers can bypass an active freeze window when necessary by supplying header `x-freeze-override: true` or query param `overrideFreeze=true`.
-  - Override operations are recorded in the audit log as `recheck.freeze_override` / `address_change.freeze_override`.
-
----
-
-## 3. Horizon Latency Metrics
-
-- The maintainer metrics dashboard aggregates `horizonLatencyMs` from Horizon address checks.
-- Visualizes average latency, median (p50), p95 latency, and sample counts.
-- Displays an empty state banner when no samples exist.
-
----
-
-## 4. Contributor Ban & Unban Management
-
-- Maintainers can ban an abusive or compromised contributor via the maintainer dashboard or `POST /api/maintainer/ban` (`action: "ban"`, `githubUsername: "<username>"`, `reason: "<mandatory reason>"`).
-- Banning requires a non-empty reason and applies case-insensitively across current and future account re-registrations.
-- Unban via `POST /api/maintainer/ban` (`action: "unban"`, `githubUsername: "<username>"`).
-- All actions record audit trail events (`contributor.banned`, `contributor.unbanned`).
+Dry-run requests still require the same maintainer auth, CSRF, and org-scope
+checks as a real bulk ban, and are blocked by an active freeze window unless
+the maintainer override is supplied. A dry-run never records audit events; the
+real bulk ban continues to emit `contributor.banned` per affected handle.
 
 ### Race safety and self-moderation (issue #660)
 
@@ -182,122 +201,3 @@ selected handle matches the signed-in maintainer, and surface the API’s
 peer to act instead of retrying.
 
 ---
-
-## 4a. Duplicate Wallet Claim Conflicts
-
-When a contributor submits a Stellar address that another user already holds,
-`POST /api/register` returns `409` with:
-
-```json
-{
-  "error": "That Stellar address is already registered to another contributor. Use a different wallet address, or contact a maintainer if you believe it is yours — the conflict has been logged for maintainer review.",
-  "code": "ADDRESS_TAKEN"
-}
-```
-
-The same body is returned by `POST /api/registrations/:id/restore` when the
-restored address has since been claimed. The copy lives in
-`src/lib/contributors.ts` (`WALLET_CLAIM_CONFLICT_MESSAGE`) and is locked by
-`tests/unit/contributors.test.ts`; change it there, not per route.
-
-Each rejected registration writes a `RegistrationConflict` row and a
-`registration.conflict` audit event. To resolve one:
-
-1. List open conflicts for your org: `GET /api/maintainer/conflicts`
-   (maintainer session required; `401` signed out, `403` non-maintainer).
-2. Ask the claimant to prove control of the address (e.g. a signed message).
-3. If they own it, soft-delete the existing registration so the claimant can
-   register; otherwise tell them to use a different wallet.
-
----
-
-## 5. Soroban Event Cursor Reset
-
-When operators need to re-index or re-sync Soroban events from a specific ledger or genesis:
-
-1. **Inspect existing cursors**:
-   ```sql
-   SELECT "maintainerOrgId", "eventType", "cursor", "lastPagingToken", "lastSyncedAt"
-   FROM "SorobanEventCursor"
-   WHERE "maintainerOrgId" = '<maintainer_org>';
-   ```
-
-2. **Reset to a previous ledger/token**:
-   ```sql
-   UPDATE "SorobanEventCursor"
-   SET "cursor" = '<target_ledger_or_token>',
-       "lastPagingToken" = NULL,
-       "lastSyncedAt" = NOW()
-   WHERE "maintainerOrgId" = '<maintainer_org>' AND "eventType" = 'contract';
-   ```
-
-3. **Full re-sync from scratch**:
-   Delete the cursor record to let the backfill worker start from genesis or the contract inception ledger:
-   ```sql
-   DELETE FROM "SorobanEventCursor"
-   WHERE "maintainerOrgId" = '<maintainer_org>' AND "eventType" = 'contract';
-   ```
-
-## Audit bundle verification (#685)
-
-`GET /api/audit` now includes a deterministic `hash` alongside `entries` and
-`summary`. When archiving an audit bundle for a Wave compliance review, save the
-response as-is and recompute `hashAuditBundle(entries)` before trusting the
-offline copy. Field order, ISO dates, and metadata key sorting are canonicalized;
-entry order is significant. See [AUDIT_BUNDLE_HASHING.md](./AUDIT_BUNDLE_HASHING.md)
-for the full verifier procedure and Node-version stability notes.
-
----
-
-## 6. Dispute Ticket Status Machine & Maintainer ACL
-
-Dispute tickets follow a strict state machine so closed Wave cases cannot be reopened without an audit trail.
-
-### Statuses
-
-| Status     | Meaning                                                        |
-| ---------- | -------------------------------------------------------------- |
-| `open`     | Filed by a contributor; awaiting maintainer triage.            |
-| `triage`   | A maintainer has picked up the dispute for review.             |
-| `resolved` | Terminal. Dispute upheld and settled.                          |
-| `rejected` | Terminal. Dispute dismissed.                                   |
-
-### Allowed Transitions
-
-| From     | To         | Actor       |
-| -------- | ---------- | ----------- |
-| `open`   | `triage`   | Maintainer  |
-| `triage` | `resolved` | Maintainer  |
-| `triage` | `rejected` | Maintainer  |
-
-Any other transition (including `resolved`/`rejected` → anything, and skipping
-`triage`) is rejected with HTTP `409 Conflict` and reason code
-`DISPUTE_INVALID_TRANSITION`. Terminal statuses cannot be reopened; file a new
-dispute instead.
-
-### Access Control
-
-- **Contributors** may only create disputes (`POST /api/disputes` with no
-  `status`/transition, resulting in `open`).
-- **Maintainers** (per existing org-scope rules) may perform `triage`,
-  `resolved`, and `rejected` transitions.
-- Non-maintainers attempting a transition receive HTTP `403 Forbidden` with
-  reason code `DISPUTE_MAINTAINER_REQUIRED`.
-
-### Audit Trail
-
-Every accepted transition is recorded via `src/lib/audit.ts` as
-`dispute.status_changed` with the previous status, next status, actor, and
-dispute id. Rejected transitions are recorded as
-`dispute.transition_rejected` with the attempted transition and reason code so
-operators can trace attempted reopenings.
-
-### Tests
-
-Automated coverage lives alongside the disputes API tests and covers the happy
-path (`open → triage → resolved`) plus failure paths for invalid transitions
-and non-maintainer actors. Run the targeted suite with:
-
-```bash
-npm test -- disputes
-```

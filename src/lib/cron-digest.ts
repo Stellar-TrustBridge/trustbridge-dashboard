@@ -16,6 +16,41 @@ const logger = new StructuredLogger("cron-digest");
 export type DigestCadence = "daily" | "weekly";
 export type DigestStatus = "ok" | "error" | "skipped";
 
+export const DIGEST_SUPPRESSION_REASON_CODES = {
+  EMPTY_CHANGE_SET: "EMPTY_CHANGE_SET",
+  DRY_RUN: "DRY_RUN",
+  RATE_LIMITED: "RATE_LIMITED",
+  QUIET_HOURS: "QUIET_HOURS",
+} as const;
+
+export type DigestSuppressionReasonCode =
+  (typeof DIGEST_SUPPRESSION_REASON_CODES)[keyof typeof DIGEST_SUPPRESSION_REASON_CODES];
+
+export interface DigestSnapshot {
+  totalContributors: number;
+  readyCount: number;
+  lowReserveCount: number;
+  notReadyCount: number;
+  slaBreachCount: number;
+}
+
+export interface DigestChangeSet {
+  hasChanges: boolean;
+  actionableCount: number;
+  deltaContributors: number;
+  deltaReady: number;
+  deltaNotReady: number;
+  deltaSlaBreaches: number;
+  reasonCode: DigestSuppressionReasonCode | null;
+}
+
+export interface DigestSuppressionMetrics {
+  suppressedEmptyCount: number;
+  dryRunRecordedCount: number;
+  sentCount: number;
+  lastSuppressedAt: string | null;
+}
+
 export interface NotReadyEntry {
   githubUsername: string;
   reason: "unfunded" | "no_trustline" | "low_reserve";
@@ -45,6 +80,12 @@ export interface DigestResult {
   slaBreachList?: SlaBreachEntry[];
   destination?: string;
   emailSent?: boolean;
+  /** True when the digest email was intentionally suppressed (e.g. empty Wave change set). */
+  suppressed?: boolean;
+  /** True when this run recorded a dry-run metric without sending mail. */
+  dryRun?: boolean;
+  /** Machine-readable reason code when skipped or suppressed. */
+  reasonCode?: DigestSuppressionReasonCode;
   error?: string;
 }
 
@@ -55,8 +96,12 @@ export interface RunDigestOptions {
   destinationEmail?: string;
   /** Override cadence label for the subject line (default: resolved from env) */
   cadence?: DigestCadence;
-  /** Bypass the min-interval rate gate (useful for manual triggers) */
+  /** Bypass the min-interval rate gate, quiet hours, and empty-digest suppression */
   force?: boolean;
+  /** Record metrics & audit trail without sending email */
+  dryRun?: boolean;
+  /** Override DIGEST_SUPPRESS_EMPTY for this run */
+  suppressEmpty?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -117,6 +162,64 @@ export function getDisputeSlaHours(): number {
 }
 
 /**
+ * Whether empty-digest suppression is enabled (`DIGEST_SUPPRESS_EMPTY`).
+ * Enabled by default so empty Wave digests never train maintainers to ignore mail.
+ * Set `DIGEST_SUPPRESS_EMPTY=false` (or `0`/`no`) to always send.
+ */
+export function isEmptyDigestSuppressionEnabled(): boolean {
+  const raw = process.env.DIGEST_SUPPRESS_EMPTY?.trim().toLowerCase();
+  if (raw === "false" || raw === "0" || raw === "no") return false;
+  return true;
+}
+
+/**
+ * Compute whether the current Wave digest snapshot represents a non-empty
+ * change set compared to the previous sent snapshot.
+ *
+ * A change set is empty when:
+ * - There are 0 contributors and 0 SLA breaches, OR
+ * - There is a previous snapshot with identical counts AND 0 not-ready / 0 SLA breaches.
+ */
+export function computeDigestChangeSet(
+  current: DigestSnapshot,
+  previous: DigestSnapshot | null
+): DigestChangeSet {
+  const actionableCount = current.notReadyCount + current.slaBreachCount;
+  const base: DigestSnapshot = previous ?? {
+    totalContributors: 0,
+    readyCount: 0,
+    lowReserveCount: 0,
+    notReadyCount: 0,
+    slaBreachCount: 0,
+  };
+
+  const deltaContributors = current.totalContributors - base.totalContributors;
+  const deltaReady = current.readyCount - base.readyCount;
+  const deltaNotReady = current.notReadyCount - base.notReadyCount;
+  const deltaSlaBreaches = current.slaBreachCount - base.slaBreachCount;
+
+  const hasDelta =
+    deltaContributors !== 0 ||
+    deltaReady !== 0 ||
+    deltaNotReady !== 0 ||
+    deltaSlaBreaches !== 0;
+
+  const isCompletelyEmpty =
+    current.totalContributors === 0 && current.slaBreachCount === 0;
+  const hasChanges = !isCompletelyEmpty && (actionableCount > 0 || hasDelta);
+
+  return {
+    hasChanges,
+    actionableCount,
+    deltaContributors,
+    deltaReady,
+    deltaNotReady,
+    deltaSlaBreaches,
+    reasonCode: hasChanges ? null : DIGEST_SUPPRESSION_REASON_CODES.EMPTY_CHANGE_SET,
+  };
+}
+
+/**
  * Base URL used to build deep links in the digest. Falls back to the
  * configured app URL, then to a relative path so links never leak hosts.
  */
@@ -126,7 +229,9 @@ function getAppBaseUrl(): string {
     process.env.APP_URL?.trim() ||
     "";
   return raw.replace(/\/+$/, "");
+}
 
+/**
  * Org timezone used to render freeze windows in the digest. Mirrors the
  * resolution used by `src/lib/freeze-window.ts` so operator-facing copy stays
  * consistent with the freeze-status API. Falls back to UTC when unset or
@@ -227,16 +332,35 @@ export function isWithinQuietHours(at: Date, config: QuietHoursConfig): boolean 
 
 let lastRunAt: number | null = null;
 let lastResult: DigestResult | null = null;
+let lastSentSnapshot: DigestSnapshot | null = null;
+let suppressionMetrics: DigestSuppressionMetrics = {
+  suppressedEmptyCount: 0,
+  dryRunRecordedCount: 0,
+  sentCount: 0,
+  lastSuppressedAt: null,
+};
 
 /** Return the last digest run result for the health/status endpoint. */
 export function getLastDigestHealth(): DigestResult | null {
   return lastResult;
 }
 
+/** Return in-process digest suppression & dry-run metrics. */
+export function getDigestSuppressionMetrics(): DigestSuppressionMetrics {
+  return { ...suppressionMetrics };
+}
+
 /** Reset in-process state. For testing only. */
 export function resetDigestState(): void {
   lastRunAt = null;
   lastResult = null;
+  lastSentSnapshot = null;
+  suppressionMetrics = {
+    suppressedEmptyCount: 0,
+    dryRunRecordedCount: 0,
+    sentCount: 0,
+    lastSuppressedAt: null,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -266,6 +390,10 @@ export async function findDisputeSlaBreaches(
   now: number = Date.now(),
   includeFullList: boolean = isFullListEnabled()
 ): Promise<{ count: number; list: SlaBreachEntry[] }> {
+  if (!prisma.dispute?.findMany) {
+    return { count: 0, list: [] };
+  }
+
   const slaHours = getDisputeSlaHours();
   const cutoff = new Date(now - slaHours * 60 * 60 * 1000);
   const baseUrl = getAppBaseUrl();
@@ -320,6 +448,7 @@ export async function runCronDigest(
     });
     return {
       status: "skipped",
+      reasonCode: DIGEST_SUPPRESSION_REASON_CODES.RATE_LIMITED,
       startedAt: new Date(now).toISOString(),
       durationMs: 0,
       error: `Rate limited: minimum interval between digests is ${minIntervalMs}ms`,
@@ -334,6 +463,7 @@ export async function runCronDigest(
     logger.info("cron_digest_skipped_quiet_hours", { timeZone: quietHours.timeZone });
     return {
       status: "skipped",
+      reasonCode: DIGEST_SUPPRESSION_REASON_CODES.QUIET_HOURS,
       startedAt: new Date(now).toISOString(),
       durationMs: 0,
       error: `Quiet hours: digests are not sent during DIGEST_QUIET_HOURS (${quietHours.timeZone})`,
@@ -401,10 +531,89 @@ export async function runCronDigest(
     // ── Dispute SLA breaches ─────────────────────────────────────────────────
     const slaBreaches = await findDisputeSlaBreaches(now, includeFullList);
 
-    // ── Email ─────────────────────────────────────────────────────────────────
+    // ── Empty-digest suppression & dry-run metric (#795) ─────────────────────
+    const currentSnapshot: DigestSnapshot = {
+      totalContributors,
+      readyCount,
+      lowReserveCount,
+      notReadyCount,
+      slaBreachCount: slaBreaches.count,
+    };
+    const changeSet = computeDigestChangeSet(currentSnapshot, lastSentSnapshot);
+    const suppressEmpty = options.suppressEmpty ?? isEmptyDigestSuppressionEnabled();
+    const shouldSuppressEmpty =
+      !options.force && suppressEmpty && !changeSet.hasChanges;
+    const isDryRun = Boolean(options.dryRun) || shouldSuppressEmpty;
+
     const destination =
       options.destinationEmail?.trim() || getDigestDestinationEmail();
 
+    if (isDryRun) {
+      const reasonCode = options.dryRun
+        ? DIGEST_SUPPRESSION_REASON_CODES.DRY_RUN
+        : DIGEST_SUPPRESSION_REASON_CODES.EMPTY_CHANGE_SET;
+      const durationMs = Date.now() - now;
+
+      suppressionMetrics.dryRunRecordedCount++;
+      if (shouldSuppressEmpty) {
+        suppressionMetrics.suppressedEmptyCount++;
+        suppressionMetrics.lastSuppressedAt = startedAt;
+      }
+
+      logger.info("cron_digest_suppressed_dry_run", {
+        cadence,
+        reasonCode,
+        totalContributors,
+        readyCount,
+        notReadyCount,
+        slaBreachCount: slaBreaches.count,
+        dryRun: true,
+        suppressedEmptyCount: suppressionMetrics.suppressedEmptyCount,
+        dryRunRecordedCount: suppressionMetrics.dryRunRecordedCount,
+      });
+
+      await recordAuditLog({
+        action: "digest.cron",
+        actorId: options.actorId ?? null,
+        actorLogin: options.actorLogin ?? "scheduler:cron",
+        metadata: {
+          cadence,
+          totalContributors,
+          readyCount,
+          lowReserveCount,
+          notReadyCount,
+          slaBreachCount: slaBreaches.count,
+          emailSent: false,
+          suppressed: true,
+          dryRun: true,
+          reasonCode,
+        },
+      });
+
+      const suppressedResult: DigestResult = {
+        status: "skipped",
+        suppressed: true,
+        dryRun: true,
+        reasonCode,
+        startedAt,
+        durationMs,
+        cadence,
+        totalContributors,
+        readyCount,
+        lowReserveCount,
+        notReadyCount,
+        notReadyList: includeFullList ? notReadyList : undefined,
+        slaBreachCount: slaBreaches.count,
+        slaBreachList: includeFullList ? slaBreaches.list : undefined,
+        destination: destination || undefined,
+        emailSent: false,
+      };
+
+      lastResult = suppressedResult;
+      return suppressedResult;
+    }
+
+    // ── Email ─────────────────────────────────────────────────────────────────
     let emailSent = false;
 
     if (destination) {
@@ -439,14 +648,24 @@ export async function runCronDigest(
       });
     }
 
+    if (emailSent || !destination) {
+      lastSentSnapshot = currentSnapshot;
+    }
+    if (emailSent) {
+      suppressionMetrics.sentCount++;
+    }
+
     const durationMs = Date.now() - now;
 
     await recordAuditLog({
       action: "digest.cron",
       actorId: options.actorId ?? null,
+      actorLogin: options.actorLogin ?? "scheduler:cron",
       metadata: {
         cadence,
         totalContributors,
+        readyCount,
+        lowReserveCount,
         notReadyCount,
         slaBreachCount: slaBreaches.count,
         emailSent,
@@ -484,11 +703,14 @@ export async function runCronDigest(
 
     logger.error("cron_digest_failed", { error: message, durationMs });
 
-    await recordAuditLog({
-      action: "digest.cron",
-      actorId: options.actorId ?? null,
-      metadata: { error: message },
-    }).catch(() => undefined);
+    await Promise.resolve(
+      recordAuditLog({
+        action: "digest.cron.failed",
+        actorId: options.actorId ?? null,
+        actorLogin: options.actorLogin ?? "scheduler:cron",
+        metadata: { error: message, durationMs },
+      })
+    ).catch(() => undefined);
 
     const result: DigestResult = {
       status: "error",
@@ -502,5 +724,3 @@ export async function runCronDigest(
     return result;
   }
 }
-
-      actorId: options

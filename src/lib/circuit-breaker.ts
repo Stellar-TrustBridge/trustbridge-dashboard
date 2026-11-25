@@ -12,7 +12,22 @@ export interface CircuitBreakerTripEvent {
   recoveredAt: number | null;
 }
 
+/**
+ * A maintainer-initiated force-open. Unlike a failure trip, a manual trip is
+ * always paired with a reason and an auto-expiry so incidents cannot leave a
+ * breaker stuck open indefinitely.
+ */
+export interface CircuitBreakerManualTrip {
+  reason: string;
+  forcedBy: string;
+  forcedAt: number;
+  expiresAt: number;
+}
+
 const MAX_TRIP_HISTORY = 20;
+const MAX_FORCE_OPEN_REASON_LENGTH = 500;
+const MAX_FORCE_OPEN_DURATION_MS = 24 * 60 * 60 * 1000;
+const MIN_FORCE_OPEN_DURATION_MS = 1000;
 
 /**
  * Resolve the breaker options from the current environment. Exported so
@@ -57,15 +72,22 @@ export class CircuitBreaker {
   private totalTrips = 0;
   private tripHistory: CircuitBreakerTripEvent[] = [];
   private currentTrip: CircuitBreakerTripEvent | null = null;
+  private manualTrip: CircuitBreakerManualTrip | null = null;
 
   constructor(private options: CircuitBreakerOptions = getDefaultOptions()) {}
 
   getState(): CircuitBreakerState {
+    this.expireManualTripIfNeeded();
     return this.state;
   }
 
   getOptions(): CircuitBreakerOptions {
     return { ...this.options };
+  }
+
+  getManualTrip(): CircuitBreakerManualTrip | null {
+    this.expireManualTripIfNeeded();
+    return this.manualTrip ? { ...this.manualTrip } : null;
   }
 
   getMetrics(): {
@@ -75,9 +97,11 @@ export class CircuitBreaker {
     lastFailureTime: number | null;
     totalTrips: number;
     recentTrips: CircuitBreakerTripEvent[];
+    manualTrip: CircuitBreakerManualTrip | null;
     options: CircuitBreakerOptions;
     processLocal: boolean;
   } {
+    this.expireManualTripIfNeeded();
     return {
       state: this.state,
       failureCount: this.failureCount,
@@ -85,12 +109,100 @@ export class CircuitBreaker {
       lastFailureTime: this.lastFailureTime,
       totalTrips: this.totalTrips,
       recentTrips: [...this.tripHistory],
+      manualTrip: this.manualTrip ? { ...this.manualTrip } : null,
       options: { ...this.options },
       processLocal: true,
     };
   }
 
+  /**
+   * Force the breaker open for a bounded window. Idempotent: re-forcing an
+   * already-open breaker replaces the manual trip (and its expiry) rather than
+   * stacking state. Throws CircuitBreakerForceOpenError on invalid input.
+   */
+  forceOpen(input: {
+    reason: string;
+    forcedBy: string;
+    durationMs: number;
+  }): CircuitBreakerManualTrip {
+    const reason = typeof input.reason === "string" ? input.reason.trim() : "";
+    const forcedBy =
+      typeof input.forcedBy === "string" ? input.forcedBy.trim() : "";
+    const { durationMs } = input;
+
+    if (!reason) {
+      throw new CircuitBreakerForceOpenError(
+        "missing_reason",
+        "A non-empty reason is required to force-open a breaker."
+      );
+    }
+    if (reason.length > MAX_FORCE_OPEN_REASON_LENGTH) {
+      throw new CircuitBreakerForceOpenError(
+        "reason_too_long",
+        `Reason must be at most ${MAX_FORCE_OPEN_REASON_LENGTH} characters.`
+      );
+    }
+    if (!forcedBy) {
+      throw new CircuitBreakerForceOpenError(
+        "missing_actor",
+        "A non-empty actor is required to force-open a breaker."
+      );
+    }
+    if (
+      !Number.isFinite(durationMs) ||
+      durationMs < MIN_FORCE_OPEN_DURATION_MS ||
+      durationMs > MAX_FORCE_OPEN_DURATION_MS
+    ) {
+      throw new CircuitBreakerForceOpenError(
+        "invalid_duration",
+        `durationMs must be between ${MIN_FORCE_OPEN_DURATION_MS} and ${MAX_FORCE_OPEN_DURATION_MS}.`
+      );
+    }
+
+    const now = Date.now();
+    this.state = "OPEN";
+    this.successCount = 0;
+    this.lastFailureTime = now;
+    this.manualTrip = {
+      reason,
+      forcedBy,
+      forcedAt: now,
+      expiresAt: now + durationMs,
+    };
+    return { ...this.manualTrip };
+  }
+
+  /**
+   * Clear a manual force-open early. Returns the cleared trip, or null when no
+   * manual trip was active. Idempotent.
+   */
+  clearManualTrip(): CircuitBreakerManualTrip | null {
+    this.expireManualTripIfNeeded();
+    const cleared = this.manualTrip;
+    if (!cleared) {
+      return null;
+    }
+    this.manualTrip = null;
+    this.state = "CLOSED";
+    this.failureCount = 0;
+    this.successCount = 0;
+    this.lastFailureTime = null;
+    return { ...cleared };
+  }
+
+  private expireManualTripIfNeeded(): void {
+    if (this.manualTrip && Date.now() >= this.manualTrip.expiresAt) {
+      this.manualTrip = null;
+      this.state = "CLOSED";
+      this.failureCount = 0;
+      this.successCount = 0;
+      this.lastFailureTime = null;
+    }
+  }
+
   async call<T>(fn: () => Promise<T>): Promise<T> {
+    this.expireManualTripIfNeeded();
+
     if (this.state === "OPEN") {
       const elapsed = Date.now() - (this.lastFailureTime ?? 0);
       if (elapsed > this.options.recoveryTimeoutMs) {
@@ -164,6 +276,22 @@ export class CircuitBreakerOpenError extends Error {
   }
 }
 
+export type CircuitBreakerForceOpenReasonCode =
+  | "missing_reason"
+  | "reason_too_long"
+  | "missing_actor"
+  | "invalid_duration";
+
+export class CircuitBreakerForceOpenError extends Error {
+  constructor(
+    public readonly code: CircuitBreakerForceOpenReasonCode,
+    message: string
+  ) {
+    super(message);
+    this.name = "CircuitBreakerForceOpenError";
+  }
+}
+
 /**
  * Shared, process-local circuit breakers for outbound Stellar calls.
  *
@@ -196,6 +324,10 @@ export const CIRCUIT_BREAKER_KEYS: Record<OutboundUpstream, string> = {
 
 export function getCircuitBreakerKey(upstream: OutboundUpstream): string {
   return CIRCUIT_BREAKER_KEYS[upstream];
+}
+
+export function isOutboundUpstream(value: unknown): value is OutboundUpstream {
+  return value === "horizon" || value === "soroban";
 }
 
 export interface DegradedResult {

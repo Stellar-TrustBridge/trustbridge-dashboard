@@ -16,6 +16,14 @@ export const dynamic = "force-dynamic";
  * registration and deletes their stored tokens. The user must confirm by
  * sending `{ "confirm": true }` in the request body.
  *
+ * ### Delete policy: SOFT-DELETE (restorable)
+ * This route performs a **soft-delete**, not a hard-delete. The `Registration`
+ * row is retained with `deletedAt` set so Wave maintainers can restore it
+ * (clear `deletedAt`) during dispute resolution or GDPR follow-ups. The
+ * `stellarAddress` field is cleared from the active-registration uniqueness
+ * constraint via the partial index (`deletedAt IS NULL`), meaning the same
+ * address may be re-registered immediately.
+ *
  * ### What is deleted / anonymised
  * - `Registration` row: soft-deleted (`deletedAt` set) so the Stellar address
  *   can be reclaimed by another contributor in the future. The `stellarAddress`
@@ -86,6 +94,7 @@ export async function POST(request: NextRequest) {
   await prisma.$transaction([
     // Soft-delete the registration; the partial unique index on
     // (stellarAddress) WHERE deletedAt IS NULL means the address is freed.
+    // The row is retained so maintainers can restore it (clear deletedAt).
     prisma.registration.update({
       where: { id: registration.id },
       data: { deletedAt: new Date() },
@@ -111,12 +120,16 @@ export async function POST(request: NextRequest) {
     targetLabel: registration.stellarAddress,
     metadata: {
       selfService: true,
+      deletePolicy: "soft",
+      restorable: true,
       deletedAt: new Date().toISOString(),
     },
   });
 
   return NextResponse.json({
     success: true,
+    deletePolicy: "soft",
+    restorable: true,
     message:
       "Your registration has been deleted. Your Stellar address may be re-registered by yourself or another contributor.",
   });

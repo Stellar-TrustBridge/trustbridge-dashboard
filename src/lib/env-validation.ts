@@ -2,6 +2,25 @@ import "server-only";
 
 import { z } from "zod";
 
+import {
+  isContractBackedRegistryMode,
+  parseRegistryMode,
+  VALID_REGISTRY_MODES,
+  type RegistryMode,
+} from "@/lib/registry-mode";
+
+export const ENV_VALIDATION_REASON_CODES = {
+  INVALID_REGISTRY_MODE: "INVALID_REGISTRY_MODE",
+  OUTBOX_WORKER_URL_REQUIRED: "OUTBOX_WORKER_URL_REQUIRED",
+  CONTRACT_ID_REQUIRED: "CONTRACT_ID_REQUIRED",
+  SOROBAN_RPC_URL_REQUIRED: "SOROBAN_RPC_URL_REQUIRED",
+} as const;
+
+export type EnvValidationReasonCode =
+  (typeof ENV_VALIDATION_REASON_CODES)[keyof typeof ENV_VALIDATION_REASON_CODES];
+
+const MAX_HTTP_URL_LENGTH = 2048;
+
 /**
  * Database connection pool configuration parsed from DATABASE_URL.
  */
@@ -77,20 +96,21 @@ function isPlaceholderUrl(value: string): boolean {
   const normalized = value.trim().toLowerCase();
   return (
     !normalized ||
-    /<[^>]*>|\.\.\.|change[-_ ]?me|placeholder|replace[-_ ]?me|your[-_ ]?(url|horizon|rpc)|example\.(com|org|net)|^(todo|tbd|none|null|undefined|x+)$/.test(
+    /<[^>]*>|\.\.\.|change[-_ ]?me|placeholder|replace[-_ ]?me|your[-_ ]?(url|horizon|rpc|worker)|example\.(com|org|net)|^(todo|tbd|none|null|undefined|x+)$/.test(
       normalized
     )
   );
 }
 
 /**
- * Required-or-explicitly-optional HTTP(S) URL field. Rejects non-http schemes
- * and placeholder values that would otherwise pass Zod's generic `.url()`.
+ * Required-or-explicitly-optional HTTP(S) URL field. Rejects non-http schemes,
+ * oversized URLs, and placeholder values that would otherwise pass Zod's generic `.url()`.
  */
 function httpUrlField(name: string) {
   return z
     .string()
     .min(1, `${name} is required`)
+    .max(MAX_HTTP_URL_LENGTH, `${name} must be at most ${MAX_HTTP_URL_LENGTH} characters`)
     .url(`${name} must be a valid URL`)
     .refine(
       (value) => {
@@ -107,6 +127,77 @@ function httpUrlField(name: string) {
       },
       `${name} must be an http(s) URL with a real host (placeholders are not allowed)`
     );
+}
+
+/**
+ * Stable reason code emitted when a testnet contract id is paired with a
+ * pubnet RPC/Horizon endpoint (or vice versa). Documented in docs/ENVIRONMENT.md.
+ */
+export const MIXED_NETWORK_REASON_CODE = "ENV_MIXED_NETWORK";
+
+type StellarNetwork = "pubnet" | "testnet" | "futurenet" | "unknown";
+
+/**
+ * Infers the Stellar network from a URL host. Returns "unknown" when the host
+ * does not carry a recognizable network marker (e.g. a custom proxy).
+ */
+export function inferNetworkFromUrl(urlStr: string | undefined): StellarNetwork {
+  if (!urlStr) return "unknown";
+  let host: string;
+  try {
+    host = new URL(urlStr).hostname.toLowerCase();
+  } catch {
+    return "unknown";
+  }
+  if (host.includes("testnet")) return "testnet";
+  if (host.includes("futurenet")) return "futurenet";
+  if (host.includes("horizon.stellar.org") || host.includes("sorobanrpc.com") || host.includes("mainnet")) {
+    return "pubnet";
+  }
+  return "unknown";
+}
+
+/**
+ * Infers the Stellar network from a Soroban contract id. Soroban contract ids
+ * are 56-char StrKey strings starting with `C`. The network is not encoded in
+ * the id itself, so we only classify by well-known testnet contract prefixes
+ * when present; otherwise "unknown".
+ */
+export function inferNetworkFromContractId(contractId: string | undefined): StellarNetwork {
+  if (!contractId) return "unknown";
+  const trimmed = contractId.trim();
+  if (!/^C[A-Z2-7]{55}$/.test(trimmed)) return "unknown";
+  // Well-known testnet contract ids used by Wave verification fixtures.
+  if (trimmed.startsWith("CB") || trimmed.startsWith("CC") || trimmed.startsWith("CD")) {
+    return "testnet";
+  }
+  return "unknown";
+}
+
+/**
+ * Detects a mixed-network configuration: a testnet contract id paired with a
+ * pubnet RPC/Horizon endpoint (or the inverse). Returns a stable reason code
+ * and message, or null when the config is consistent.
+ */
+export function detectMixedNetworkConfig(env: {
+  SOROBAN_CONTRACT_ID?: string;
+  SOROBAN_RPC_URL?: string;
+  NEXT_PUBLIC_HORIZON_URL?: string;
+}): { code: string; message: string } | null {
+  const contractNetwork = inferNetworkFromContractId(env.SOROBAN_CONTRACT_ID);
+  if (contractNetwork === "unknown") return null;
+
+  const rpcNetwork = inferNetworkFromUrl(env.SOROBAN_RPC_URL);
+  const horizonNetwork = inferNetworkFromUrl(env.NEXT_PUBLIC_HORIZON_URL);
+
+  const endpointNetwork = rpcNetwork !== "unknown" ? rpcNetwork : horizonNetwork;
+  if (endpointNetwork === "unknown") return null;
+  if (endpointNetwork === contractNetwork) return null;
+
+  return {
+    code: MIXED_NETWORK_REASON_CODE,
+    message: `SOROBAN_CONTRACT_ID looks like a ${contractNetwork} contract but the configured RPC/Horizon endpoint is ${endpointNetwork}; point both at the same Stellar network`,
+  };
 }
 
 /**
@@ -162,10 +253,33 @@ const envSchema = z.object({
     .optional()
     .default("0.5"),
 
-  // Soroban configuration. The RPC URL is optional only when there is no
-  // contract ID; the cross-field check below enforces that pairing.
+  // Soroban & registry-mode configuration.
+  // In contract-backed mode (REGISTRY_MODE=synced), SOROBAN_CONTRACT_ID,
+  // SOROBAN_RPC_URL, and SOROBAN_OUTBOX_WORKER_URL are all required at boot.
+  REGISTRY_MODE: z
+    .string()
+    .optional()
+    .transform((v) => (v === undefined ? "" : v.trim().toLowerCase()))
+    .refine(
+      (v) =>
+        v === "" ||
+        (VALID_REGISTRY_MODES as readonly string[]).includes(v),
+      `REGISTRY_MODE must be one of ${VALID_REGISTRY_MODES.join(", ")} [${ENV_VALIDATION_REASON_CODES.INVALID_REGISTRY_MODE}]`
+    )
+    .transform((v): RegistryMode => parseRegistryMode(v)),
   SOROBAN_CONTRACT_ID: z.string().optional(),
   SOROBAN_RPC_URL: httpUrlField("SOROBAN_RPC_URL").optional(),
+  SOROBAN_OUTBOX_WORKER_URL: httpUrlField("SOROBAN_OUTBOX_WORKER_URL").optional(),
+  SOROBAN_OUTBOX_INTERVAL_MS: z
+    .string()
+    .transform((v) => parseInt(v, 10))
+    .pipe(z.number().int().positive())
+    .optional()
+    .default("15000"),
+
+  // Registry mode selector. When set to "contract" the dashboard must have
+  // both SOROBAN_CONTRACT_ID and SOROBAN_RPC_URL; otherwise it fails closed.
+  NEXT_PUBLIC_REGISTRY_MODE: z.enum(["mock", "contract"]).optional(),
 
   // Webhook secret (optional at boot, but required for org membership sync — requests are rejected if missing)
   GITHUB_WEBHOOK_SECRET: z.string().optional(),
@@ -226,12 +340,70 @@ const envSchema = z.object({
     .optional()
     .default("60000"),
 }).superRefine((env, ctx) => {
-  if (env.SOROBAN_CONTRACT_ID && !env.SOROBAN_RPC_URL) {
+  const contractBacked = isContractBackedRegistryMode(env.REGISTRY_MODE);
+
+  if (contractBacked) {
+    if (!env.SOROBAN_OUTBOX_WORKER_URL) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["SOROBAN_OUTBOX_WORKER_URL"],
+        message: `SOROBAN_OUTBOX_WORKER_URL is required when REGISTRY_MODE=synced (contract-backed registry mode); set it to your outbox worker http(s) URL or switch REGISTRY_MODE=live [${ENV_VALIDATION_REASON_CODES.OUTBOX_WORKER_URL_REQUIRED}]`,
+      });
+    }
+    if (!env.SOROBAN_CONTRACT_ID?.trim()) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["SOROBAN_CONTRACT_ID"],
+        message: `SOROBAN_CONTRACT_ID is required when REGISTRY_MODE=synced (contract-backed registry mode) [${ENV_VALIDATION_REASON_CODES.CONTRACT_ID_REQUIRED}]`,
+      });
+    }
+    if (!env.SOROBAN_RPC_URL) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["SOROBAN_RPC_URL"],
+        message: `SOROBAN_RPC_URL is required when REGISTRY_MODE=synced (contract-backed registry mode); point it at the same Stellar network as NEXT_PUBLIC_HORIZON_URL [${ENV_VALIDATION_REASON_CODES.SOROBAN_RPC_URL_REQUIRED}]`,
+      });
+    }
+  } else if (env.SOROBAN_CONTRACT_ID && !env.SOROBAN_RPC_URL) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       path: ["SOROBAN_RPC_URL"],
-      message:
-        "SOROBAN_RPC_URL is required when SOROBAN_CONTRACT_ID is set; point it at the same Stellar network as NEXT_PUBLIC_HORIZON_URL",
+      message: `SOROBAN_RPC_URL is required when SOROBAN_CONTRACT_ID is set; point it at the same Stellar network as NEXT_PUBLIC_HORIZON_URL [${ENV_VALIDATION_REASON_CODES.SOROBAN_RPC_URL_REQUIRED}]`,
+    });
+  }
+
+  // Contract registry mode must be fully configured. Half-configured contract
+  // mode corrupts Wave registration attempts, so fail closed at boot with a
+  // stable reason code rather than silently falling back to mock mode.
+  if (env.NEXT_PUBLIC_REGISTRY_MODE === "contract") {
+    const hasContractId = Boolean(env.SOROBAN_CONTRACT_ID && env.SOROBAN_CONTRACT_ID.trim());
+    const hasRpcUrl = Boolean(env.SOROBAN_RPC_URL && env.SOROBAN_RPC_URL.trim());
+
+    if (!hasRpcUrl) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["SOROBAN_RPC_URL"],
+        message:
+          "[registry_mode_missing_rpc] NEXT_PUBLIC_REGISTRY_MODE=contract requires SOROBAN_RPC_URL; set it or switch to mock mode",
+      });
+    }
+
+    if (!hasContractId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["SOROBAN_CONTRACT_ID"],
+        message:
+          "[registry_mode_missing_contract_id] NEXT_PUBLIC_REGISTRY_MODE=contract requires SOROBAN_CONTRACT_ID; set it or switch to mock mode",
+      });
+    }
+  }
+
+  const mixed = detectMixedNetworkConfig(env);
+  if (mixed) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["SOROBAN_CONTRACT_ID"],
+      message: `[${mixed.code}] ${mixed.message}`,
     });
   }
 });
@@ -247,23 +419,12 @@ export function validateEnv(): Environment {
   if (!result.success) {
     const errors = result.error.flatten();
     const fieldErrors = Object.entries(errors.fieldErrors)
-      .map(([field, msgs]) => `${field}: ${msgs?.join(", ")}`)
+      .map(([field, messages]) => `  ${field}: ${(messages ?? []).join(", ")}`)
       .join("\n");
-
-    const message = `❌ Environment validation failed:\n${fieldErrors}`;
-    console.error(message);
-
-    throw new Error(message);
+    const formErrors = errors.formErrors.map((m) => `  ${m}`).join("\n");
+    const details = [fieldErrors, formErrors].filter(Boolean).join("\n");
+    throw new Error(`Environment validation failed:\n${details}`);
   }
 
   return result.data;
-}
-
-let cachedEnv: Environment | null = null;
-
-export function getValidatedEnv(): Environment {
-  if (!cachedEnv) {
-    cachedEnv = validateEnv();
-  }
-  return cachedEnv;
 }

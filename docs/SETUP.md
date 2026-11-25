@@ -165,6 +165,24 @@ anymore. If you set `SOROBAN_CONTRACT_ID`, also set `SOROBAN_RPC_URL` to an
 http(s) endpoint on the same network, or boot will stop with a named error.
 See [ENVIRONMENT.md — Boot-time network validation](./ENVIRONMENT.md#boot-time-network-validation-683).
 
+### Contract-backed registry mode (`REGISTRY_MODE=synced`) (#796)
+
+When running in contract-backed mode (`REGISTRY_MODE=synced`), boot validation
+(`src/lib/env-validation.ts`) fails fast unless all Soroban outbox/worker
+variables are configured with real http(s) URLs (no placeholders):
+
+```bash
+REGISTRY_MODE=synced
+SOROBAN_CONTRACT_ID=C...
+SOROBAN_RPC_URL=https://soroban-testnet.stellar.org
+SOROBAN_OUTBOX_WORKER_URL=https://worker.trustbridge.internal/outbox
+SOROBAN_OUTBOX_INTERVAL_MS=15000
+```
+
+If you are developing locally without a Soroban contract or outbox worker, leave
+`REGISTRY_MODE` unset (or set `REGISTRY_MODE=live`). See
+[ENVIRONMENT.md — `REGISTRY_MODE`](./ENVIRONMENT.md#registry_mode).
+
 ---
 
 ## Appendix: Checklist idempotency keys (#688)
@@ -175,3 +193,98 @@ by org and user; the first successful response is replayed for **5 minutes**
 (default; override with `CHECKLIST_IDEMPOTENCY_TTL_MS` in milliseconds) with
 `X-Idempotent-Replay: true`. Requests without the header behave as before.
 See [CHECKLIST_IDEMPOTENCY.md](./CHECKLIST_IDEMPOTENCY.md).
+
+---
+
+## Appendix: Running the outbox worker and cron locally (#779)
+
+`npm run dev` only starts the **web** process. Wave sync and scheduled exports
+run in separate processes that you must start yourself, or they will silently
+stall. See [DEPLOYMENT.md — Worker process topology](./DEPLOYMENT.md#worker-process-topology-779)
+for the full production topology, health probes, and failure modes.
+
+| Process | Local command | Responsibility |
+|---------|---------------|----------------|
+| Web | `npm run dev` | Next.js UI + API routes |
+| Outbox worker | `npm run worker:outbox` | Drains `soroban-outbox-worker.ts` queue (Wave sync) |
+| Cron / export scheduler | `npm run cron:exports` | Runs scheduled CSV exports |
+
+All three share `DATABASE_URL`. The worker and cron also read the outbox
+polling and export-lock settings documented in
+[ENVIRONMENT.md](./ENVIRONMENT.md). If you skip the worker, the outbox backlog
+grows and Wave sync appears frozen; if you skip cron, scheduled exports never
+fire. Both are detectable via the health probes in DEPLOYMENT.md.
+
+## Registry mode (`REGISTRY_MODE`)
+
+`REGISTRY_MODE` controls how the maintainer dashboard describes the freshness of
+contributor data.  It is **optional** and defaults to `"live"`.
+
+| Value | When to use |
+|---|---|
+| `"live"` *(default)* | You trigger `POST /api/contributors` manually to refresh Horizon data. |
+| `"synced"` | A scheduled `syncContractToPostgres()` cron job keeps Postgres in sync automatically. |
+
+Both modes serve reads from Postgres — the mode only changes the
+`registryMode` field in `GET /api/contributors` responses.
+
+### Local setup
+
+No configuration needed for local development.  The default `"live"` mode
+works without any background jobs.
+
+```bash
+# .env.local — only needed if you are testing the synced mode locally
+REGISTRY_MODE=synced
+```
+
+### Switching modes in production
+
+See the full migration guide in
+[ARCHITECTURE.md — Registry mode](./ARCHITECTURE.md#registry-mode-registry_mode).
+
+Short version:
+
+```bash
+# Enable synced mode (after verifying contract-sync is healthy)
+vercel env add REGISTRY_MODE production   # value: synced
+
+# Revert to live
+vercel env rm REGISTRY_MODE production
+```
+
+After changing the env var, **redeploy** so all serverless instances pick up
+the new value.  Validate with:
+
+```bash
+curl -s https://your-deployment.vercel.app/api/contributors \
+  -H "Cookie: next-auth.session-token=<maintainer-token>" \
+  | jq .registryMode
+```
+
+Expected output: `"synced"` (or `"live"` after reverting).
+
+### Failure-open guarantee
+
+An unrecognized `REGISTRY_MODE` value (including typos) falls back to `"live"`
+without error.  Read endpoints are never broken by a bad env var.
+
+## Readiness flow (operator notes)
+
+Registration readiness is evaluated by `src/lib/readiness.ts` and rechecked
+via `POST /api/register/recheck`. A registration can fail readiness (for
+example, an unfunded account or a missing trustline), the operator funds the
+account and establishes the trustline, and then triggers an Action recheck
+that should pass.
+
+Reason codes surfaced by readiness and recheck:
+
+- `account_unfunded` — account has no funds on Horizon
+- `account_no_trustline` — account is missing the required trustline
+- `account_low_balance` — balance below the minimum reserve
+- `account_ready` — account is funded and ready
+- `horizon_rate_limited` — Horizon returned a rate-limit response
+- `horizon_error` — Horizon returned an unexpected error
+
+For the full step-by-step walkthrough (including mock Horizon mappings and
+sample output), see [`docs/E2E_TESTING.md`](./E2E_TESTING.md).

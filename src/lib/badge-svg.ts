@@ -5,6 +5,42 @@ export interface RenderBadgeOptions {
   label?: string;
 }
 
+/**
+ * HTTP header that carries the signing key id for a signed badge.
+ *
+ * When a badge is served with a signature, the response includes this header
+ * so consumers can select the correct public key for verification. The value
+ * is the opaque key id (e.g. `tb-2024-01`) emitted by `src/lib/badge-signing.ts`.
+ *
+ * Verification sample (Node.js, using the Web Crypto API):
+ *
+ * ```ts
+ * import { createPublicKey, verify } from "node:crypto";
+ *
+ * const res = await fetch("https://trustbridge.example/api/badge?org=wave");
+ * const svg = await res.text();
+ * const keyId = res.headers.get(BADGE_KEY_ID_HEADER); // e.g. "tb-2024-01"
+ * const signature = res.headers.get("x-badge-signature"); // base64
+ * if (!keyId || !signature) throw new Error("badge is not signed");
+ *
+ * // Resolve the public key for this key id from your trusted key set.
+ * const publicKey = createPublicKey(TRUSTED_KEYS[keyId]);
+ * const ok = verify(
+ *   "sha256",
+ *   Buffer.from(svg, "utf8"),
+ *   publicKey,
+ *   Buffer.from(signature, "base64")
+ * );
+ * if (!ok) throw new Error(`badge signature invalid for key ${keyId}`);
+ * ```
+ *
+ * Key rotation: publish the new key under a fresh key id and keep the previous
+ * key id verifiable until all badges signed with it have expired. Because the
+ * key id travels in this header, consumers can look up the right key without
+ * guessing, so old and new badges verify side-by-side during rotation.
+ */
+export const BADGE_KEY_ID_HEADER = "x-badge-key-id";
+
 /** Escapes special XML characters to prevent SVG injection. */
 export function escapeXml(str: string): string {
   return str
