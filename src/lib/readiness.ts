@@ -243,3 +243,284 @@ export function describeReadinessWithNextStep(status: ReadinessStatus): string {
   const config = getReadinessConfig(status);
   return `${config.description} ${config.nextStep}`;
 }
+
+// ---------------------------------------------------------------------------
+// Visual regression baselines (Issue #794)
+// ---------------------------------------------------------------------------
+
+export type VisualColorScheme = "light" | "dark";
+
+export type VisualBaselineSurface = "readiness-panel" | "wave-status-banner";
+
+export const VISUAL_BASELINE_REASON_CODES = {
+  INVALID_SNAPSHOT_NAME: "INVALID_SNAPSHOT_NAME",
+  DUPLICATE_SNAPSHOT_NAME: "DUPLICATE_SNAPSHOT_NAME",
+  INVALID_TEST_ID: "INVALID_TEST_ID",
+  INVALID_DIFF_THRESHOLD: "INVALID_DIFF_THRESHOLD",
+  MISSING_COLOR_SCHEME_PAIR: "MISSING_COLOR_SCHEME_PAIR",
+  MISSING_DOC_BASELINE: "MISSING_DOC_BASELINE",
+  MISSING_SPEC_COVERAGE: "MISSING_SPEC_COVERAGE",
+} as const;
+
+export type VisualBaselineReasonCode =
+  (typeof VISUAL_BASELINE_REASON_CODES)[keyof typeof VISUAL_BASELINE_REASON_CODES];
+
+export interface VisualBaselineEntry {
+  /** Stable logical group id shared by the light & dark snapshot pair. */
+  groupId: string;
+  /** Surface category covered by this baseline. */
+  surface: VisualBaselineSurface;
+  /** Snapshot filename expected under tests/e2e/visual.spec.ts-snapshots/. */
+  snapshot: string;
+  /** Emulated prefers-color-scheme value. */
+  colorScheme: VisualColorScheme;
+  /** Target element data-testid anchored in the dashboard UI. */
+  testId: string;
+  /** Human-readable description kept in sync with docs/VISUAL_REGRESSION.md. */
+  description: string;
+  /** Readiness statuses exercised by this snapshot (when surface === "readiness-panel"). */
+  readinessStates?: ReadinessStatus[];
+  /** Allowed Playwright maxDiffPixelRatio (0 < ratio <= 0.1). */
+  maxDiffPixelRatio: number;
+}
+
+export interface VisualBaselineValidationIssue {
+  code: VisualBaselineReasonCode;
+  target: string;
+  message: string;
+}
+
+export interface VisualBaselineValidationResult {
+  ok: boolean;
+  issues: VisualBaselineValidationIssue[];
+}
+
+const SNAPSHOT_NAME_RE = /^[a-z0-9][a-z0-9-]{2,120}\.png$/;
+const TEST_ID_RE = /^[a-z0-9][a-z0-9-]{1,80}$/;
+
+/**
+ * Canonical visual regression baselines for the dashboard Wave readiness panel
+ * (`[data-testid="wave-readiness-panel"]`) in both light and dark modes.
+ */
+export const READINESS_VISUAL_BASELINES: readonly VisualBaselineEntry[] = [
+  {
+    groupId: "readiness-panel-all-states",
+    surface: "readiness-panel",
+    snapshot: "readiness-panel-all-states-light.png",
+    colorScheme: "light",
+    testId: "wave-readiness-panel",
+    description:
+      "Wave readiness panel showing mixed ready / low_reserve / not_ready progress — light",
+    readinessStates: ["ready", "low_reserve", "not_ready"],
+    maxDiffPixelRatio: 0.05,
+  },
+  {
+    groupId: "readiness-panel-all-states",
+    surface: "readiness-panel",
+    snapshot: "readiness-panel-all-states-dark.png",
+    colorScheme: "dark",
+    testId: "wave-readiness-panel",
+    description:
+      "Wave readiness panel showing mixed ready / low_reserve / not_ready progress — dark",
+    readinessStates: ["ready", "low_reserve", "not_ready"],
+    maxDiffPixelRatio: 0.05,
+  },
+  {
+    groupId: "readiness-panel-zero-empty",
+    surface: "readiness-panel",
+    snapshot: "readiness-panel-zero-empty-light.png",
+    colorScheme: "light",
+    testId: "wave-readiness-panel",
+    description: "Wave readiness panel with 0/0 contributors (0% bar) — light",
+    readinessStates: [],
+    maxDiffPixelRatio: 0.05,
+  },
+  {
+    groupId: "readiness-panel-zero-empty",
+    surface: "readiness-panel",
+    snapshot: "readiness-panel-zero-empty-dark.png",
+    colorScheme: "dark",
+    testId: "wave-readiness-panel",
+    description: "Wave readiness panel with 0/0 contributors (0% bar) — dark",
+    readinessStates: [],
+    maxDiffPixelRatio: 0.05,
+  },
+];
+
+/**
+ * Canonical visual regression baselines for dashboard Wave status banners
+ * (freeze window and stale-data warning/critical banners) in light and dark modes.
+ */
+export const WAVE_STATUS_BANNER_BASELINES: readonly VisualBaselineEntry[] = [
+  {
+    groupId: "wave-status-banner-freeze",
+    surface: "wave-status-banner",
+    snapshot: "wave-status-banner-freeze-light.png",
+    colorScheme: "light",
+    testId: "freeze-window-banner",
+    description: "Active Wave freeze window alert banner — light",
+    maxDiffPixelRatio: 0.05,
+  },
+  {
+    groupId: "wave-status-banner-freeze",
+    surface: "wave-status-banner",
+    snapshot: "wave-status-banner-freeze-dark.png",
+    colorScheme: "dark",
+    testId: "freeze-window-banner",
+    description: "Active Wave freeze window alert banner — dark",
+    maxDiffPixelRatio: 0.05,
+  },
+  {
+    groupId: "wave-status-banner-stale-warning",
+    surface: "wave-status-banner",
+    snapshot: "wave-status-banner-stale-warning-light.png",
+    colorScheme: "light",
+    testId: "stale-data-banner",
+    description: "Stale contributor data warning banner (<50% stale) — light",
+    maxDiffPixelRatio: 0.05,
+  },
+  {
+    groupId: "wave-status-banner-stale-warning",
+    surface: "wave-status-banner",
+    snapshot: "wave-status-banner-stale-warning-dark.png",
+    colorScheme: "dark",
+    testId: "stale-data-banner",
+    description: "Stale contributor data warning banner (<50% stale) — dark",
+    maxDiffPixelRatio: 0.05,
+  },
+  {
+    groupId: "wave-status-banner-stale-critical",
+    surface: "wave-status-banner",
+    snapshot: "wave-status-banner-stale-critical-light.png",
+    colorScheme: "light",
+    testId: "stale-data-banner",
+    description:
+      "Stale contributor data critical banner (>=50% stale or never verified) — light",
+    maxDiffPixelRatio: 0.05,
+  },
+  {
+    groupId: "wave-status-banner-stale-critical",
+    surface: "wave-status-banner",
+    snapshot: "wave-status-banner-stale-critical-dark.png",
+    colorScheme: "dark",
+    testId: "stale-data-banner",
+    description:
+      "Stale contributor data critical banner (>=50% stale or never verified) — dark",
+    maxDiffPixelRatio: 0.05,
+  },
+];
+
+export const ALL_VISUAL_BASELINES: readonly VisualBaselineEntry[] = [
+  ...READINESS_VISUAL_BASELINES,
+  ...WAVE_STATUS_BANNER_BASELINES,
+];
+
+/**
+ * Validate a visual baseline catalog: every snapshot name must be well-formed
+ * and unique, every testId and diff threshold must be within bounds, and every
+ * logical group must cover both `light` and `dark` color schemes.
+ */
+export function validateVisualBaselineCatalog(
+  entries: readonly VisualBaselineEntry[]
+): VisualBaselineValidationResult {
+  const issues: VisualBaselineValidationIssue[] = [];
+  const seenSnapshots = new Set<string>();
+  const schemesByGroup = new Map<string, Set<VisualColorScheme>>();
+
+  for (const entry of entries) {
+    const snapshot = typeof entry.snapshot === "string" ? entry.snapshot.trim() : "";
+    if (!SNAPSHOT_NAME_RE.test(snapshot)) {
+      issues.push({
+        code: VISUAL_BASELINE_REASON_CODES.INVALID_SNAPSHOT_NAME,
+        target: snapshot || "(empty)",
+        message: `Snapshot name "${snapshot}" must match ${SNAPSHOT_NAME_RE.source}`,
+      });
+    } else if (seenSnapshots.has(snapshot)) {
+      issues.push({
+        code: VISUAL_BASELINE_REASON_CODES.DUPLICATE_SNAPSHOT_NAME,
+        target: snapshot,
+        message: `Duplicate snapshot filename "${snapshot}"`,
+      });
+    } else {
+      seenSnapshots.add(snapshot);
+    }
+
+    const testId = typeof entry.testId === "string" ? entry.testId.trim() : "";
+    if (!TEST_ID_RE.test(testId)) {
+      issues.push({
+        code: VISUAL_BASELINE_REASON_CODES.INVALID_TEST_ID,
+        target: testId || "(empty)",
+        message: `Target data-testid "${testId}" must match ${TEST_ID_RE.source}`,
+      });
+    }
+
+    if (
+      typeof entry.maxDiffPixelRatio !== "number" ||
+      !Number.isFinite(entry.maxDiffPixelRatio) ||
+      entry.maxDiffPixelRatio <= 0 ||
+      entry.maxDiffPixelRatio > 0.1
+    ) {
+      issues.push({
+        code: VISUAL_BASELINE_REASON_CODES.INVALID_DIFF_THRESHOLD,
+        target: snapshot || entry.groupId,
+        message: `maxDiffPixelRatio must be a finite number in (0, 0.1], got ${String(entry.maxDiffPixelRatio)}`,
+      });
+    }
+
+    const groupSchemes = schemesByGroup.get(entry.groupId) ?? new Set<VisualColorScheme>();
+    groupSchemes.add(entry.colorScheme);
+    schemesByGroup.set(entry.groupId, groupSchemes);
+  }
+
+  for (const [groupId, schemes] of schemesByGroup.entries()) {
+    if (!schemes.has("light") || !schemes.has("dark")) {
+      const missing = !schemes.has("light") ? "light" : "dark";
+      issues.push({
+        code: VISUAL_BASELINE_REASON_CODES.MISSING_COLOR_SCHEME_PAIR,
+        target: groupId,
+        message: `Baseline group "${groupId}" is missing its "${missing}" color scheme pair`,
+      });
+    }
+  }
+
+  return { ok: issues.length === 0, issues };
+}
+
+/**
+ * Cross-check the baseline catalog against `docs/VISUAL_REGRESSION.md` and
+ * `tests/e2e/visual.spec.ts` so docs, specs, and readiness metadata never drift.
+ */
+export function verifyVisualBaselineDocsSync(
+  entries: readonly VisualBaselineEntry[],
+  visualRegressionDoc: string,
+  visualSpecSource: string
+): VisualBaselineValidationResult {
+  const issues: VisualBaselineValidationIssue[] = [];
+
+  const hasLightDarkLoop =
+    visualSpecSource.includes('["light", "dark"]') ||
+    visualSpecSource.includes("['light', 'dark']");
+
+  for (const entry of entries) {
+    if (!visualRegressionDoc.includes(entry.snapshot)) {
+      issues.push({
+        code: VISUAL_BASELINE_REASON_CODES.MISSING_DOC_BASELINE,
+        target: entry.snapshot,
+        message: `Baseline "${entry.snapshot}" is not documented in docs/VISUAL_REGRESSION.md`,
+      });
+    }
+    const templatePattern = `${entry.groupId}-\${colorScheme}.png`;
+    const hasSpecCoverage =
+      visualSpecSource.includes(entry.snapshot) ||
+      (hasLightDarkLoop && visualSpecSource.includes(templatePattern));
+    if (!hasSpecCoverage) {
+      issues.push({
+        code: VISUAL_BASELINE_REASON_CODES.MISSING_SPEC_COVERAGE,
+        target: entry.snapshot,
+        message: `Baseline "${entry.snapshot}" is not asserted in tests/e2e/visual.spec.ts`,
+      });
+    }
+  }
+
+  return { ok: issues.length === 0, issues };
+}

@@ -253,3 +253,80 @@ See [docs/grafana/README.md](./grafana/README.md) for pre-built dashboards.
 
 Revoke test API keys and clear session cookies immediately after testing. See
 [docs/API_KEYS.md](./API_KEYS.md) for key rotation guidance.
+
+---
+
+## Stats endpoint single-flight coalescing
+
+`GET /api/stats` is the most-read public endpoint — it is polled by the
+landing page, the maintainer dashboard, and CDN re-validation requests
+simultaneously.  During open-registration day this means hundreds of requests
+can arrive while the in-process `statsCache` is cold (after first deploy, after
+a TTL expiry, or after a cache invalidation triggered by a readiness change).
+
+### The stampede problem
+
+Without coalescing, every concurrent request that sees `statsCache.get(key) ===
+null` calls `getDashboardStats()` independently.  Each call issues:
+
+```sql
+SELECT funded, trustlineReady, trustlineAuthorized, xlmBalance, spendableXlmBalance
+FROM "Registration"
+WHERE "deletedAt" IS NULL;
+```
+
+On a 500-contributor roster that is 500 rows per request.  100 concurrent
+cold-cache requests fan this out to 100 simultaneous full-table scans — a
+stampede that melts the Wave DB connection pool.
+
+### The fix — single-flight in `CacheStore.getOrCompute`
+
+`src/lib/cache.ts`'s `CacheStore.getOrCompute` now tracks in-flight factory
+promises in an internal `inflight: Map<string, Promise<T>>`.  When a second
+(or Nth) caller reaches a cold key while the first factory call is still
+running, it receives the **same** promise rather than starting a new one.  All
+callers resolve together when the factory completes; only one DB query is
+issued.
+
+Error semantics are preserved: if the factory rejects, the in-flight entry is
+deleted so the next caller can retry rather than replaying the rejection.
+
+### Testing
+
+```bash
+# Run only the stampede tests
+npx vitest run src/lib/stats-cache.test.ts
+
+# Sample passing output
+ ✓ cache stampede prevention (single-flight coalescing) > concurrent cold misses call the factory exactly once (happy path)
+ ✓ cache stampede prevention (single-flight coalescing) > a second wave after the first completes does not call the factory again (cached hit)
+ ✓ cache stampede prevention (single-flight coalescing) > a factory error is not coalesced — subsequent callers retry (failure path)
+ ✓ cache stampede prevention (single-flight coalescing) > independent keys do not share in-flight state
+ ✓ cache stampede prevention (single-flight coalescing) > after invalidation concurrent callers re-coalesce onto a single new factory call
+ ✓ statsCache singleton — single-flight stampede guard > 100 concurrent cold misses call the DB factory exactly once
+ ✓ statsCache singleton — single-flight stampede guard > DB outage during cold miss leaves no partial state; next call retries
+```
+
+### Wave operator risk note
+
+This change is additive and backward-compatible.  The only observable difference
+is that a cold cache under concurrent load now results in one DB query instead
+of N.  Callers that relied on each `getOrCompute` call always invoking the
+factory (e.g. integration tests that do not await concurrently) continue to
+work because a sequential second call after the first resolves hits the warm
+cache, not the in-flight path.
+
+The `inflight` map is cleared by `CacheStore.reset()` / `clear()`, so test
+isolation is unaffected.  In production, `reset()` is never called on
+`statsCache` directly; `invalidate(key)` or `invalidatePattern(regex)` are
+used instead.
+
+### Environment variable reference
+
+| Variable | Default | Effect on stats endpoint |
+|---|---|---|
+| `STATS_CACHE_TTL_MS` | `60000` (60 s) | In-process TTL and HTTP `max-age`. Lower values increase DB query rate but reduce staleness. |
+
+The rate limiter (`RATE_LIMIT_MAX_REQUESTS`, `RATE_LIMIT_WINDOW_MS`) applies
+upstream of the cache; a 429 response from the rate limiter never reaches the
+DB at all.

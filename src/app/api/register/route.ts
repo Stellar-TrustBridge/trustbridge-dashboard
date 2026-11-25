@@ -29,6 +29,7 @@ import {
   checkRateLimit,
   buildRateLimitHeaders,
   extractClientIp,
+  ROUTE_BUDGETS,
 } from "@/lib/rate-limit";
 import { invalidateContributorListCaches } from "@/lib/cache-tags";
 
@@ -99,11 +100,8 @@ export async function POST(request: NextRequest) {
   // saves per minute; the limit protects Horizon and the database from
   // automated hammering without affecting normal usage.
   const clientIp = extractClientIp(request);
-  const rateLimit = checkRateLimit(clientIp, {
-    // Register calls are less frequent than check calls; use the global defaults
-    // (10 req/min) but allow the caller to override via env vars.
-  });
-  const rateLimitHeaders = buildRateLimitHeaders(rateLimit, 10);
+  const rateLimit = checkRateLimit(clientIp, ROUTE_BUDGETS.register);
+  const rateLimitHeaders = buildRateLimitHeaders(rateLimit, ROUTE_BUDGETS.register.maxRequests);
 
   if (!rateLimit.allowed) {
     return NextResponse.json(

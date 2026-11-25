@@ -24,6 +24,7 @@ export interface AddressAnomalyResult {
     walletReuse: AnomalyStatus;
     multiAccount: AnomalyStatus;
   };
+  allowlisted: string[];
 }
 
 const DEFAULT_WINDOW_MINUTES = 60;
@@ -38,6 +39,42 @@ function parsePositiveInt(value: string | undefined, fallback: number): number {
     return fallback;
   }
   return parsed;
+}
+
+/**
+ * Normalizes an address for allowlist comparison. Addresses are compared
+ * case-insensitively and trimmed so operator input is forgiving.
+ */
+export function normalizeAllowlistAddress(address: string): string {
+  return address.trim().toLowerCase();
+}
+
+/**
+ * Parses the comma-separated allowlist of known shared treasury addresses
+ * from env (ADDRESS_ANOMALY_ALLOWLIST). Malformed/empty entries are dropped.
+ */
+export function resolveAnomalyAllowlist(
+  raw: string | undefined = process.env.ADDRESS_ANOMALY_ALLOWLIST
+): string[] {
+  if (!raw) return [];
+  const seen = new Set<string>();
+  for (const part of raw.split(",")) {
+    const normalized = normalizeAllowlistAddress(part);
+    if (normalized.length > 0) seen.add(normalized);
+  }
+  return Array.from(seen);
+}
+
+/**
+ * Returns true when the given address is on the shared-treasury allowlist
+ * and should therefore be suppressed from anomaly alerts.
+ */
+export function isAllowlistedAddress(
+  address: string | null | undefined,
+  allowlist: string[] = resolveAnomalyAllowlist()
+): boolean {
+  if (!address) return false;
+  return allowlist.includes(normalizeAllowlistAddress(address));
 }
 
 /**
@@ -117,10 +154,12 @@ export async function checkAddressChangeAnomaly(
 
 /**
  * Detects sudden wallet reuse: the same wallet address appearing across
- * multiple distinct accounts within the sliding window.
+ * multiple distinct accounts within the sliding window. Allowlisted
+ * shared-treasury addresses are excluded from the reuse count.
  */
 export async function checkWalletReuseAnomaly(
-  thresholds: AddressAnomalyThresholds = resolveAnomalyThresholds()
+  thresholds: AddressAnomalyThresholds = resolveAnomalyThresholds(),
+  allowlist: string[] = resolveAnomalyAllowlist()
 ): Promise<AnomalyStatus> {
   const windowStart = new Date(
     Date.now() - thresholds.windowMinutes * 60 * 1000
@@ -135,10 +174,10 @@ export async function checkWalletReuseAnomaly(
       _count: { newAddress: true },
     });
 
-    const maxReuse = grouped.reduce(
-      (max, row) => Math.max(max, row._count?.newAddress ?? 0),
-      0
-    );
+    const maxReuse = grouped.reduce((max, row) => {
+      if (isAllowlistedAddress(row.newAddress, allowlist)) return max;
+      return Math.max(max, row._count?.newAddress ?? 0);
+    }, 0);
 
     return {
       isAnomaly: maxReuse >= thresholds.walletReuseThreshold,
@@ -201,9 +240,12 @@ export async function checkMultiAccountAnomaly(
 
 /**
  * Runs all address anomaly detectors and returns a combined result.
+ * Allowlisted shared-treasury addresses are excluded from reuse signals
+ * so known shared wallets do not raise false alerts.
  */
 export async function checkAddressAnomalies(
-  overrides?: Partial<AddressAnomalyThresholds>
+  overrides?: Partial<AddressAnomalyThresholds>,
+  allowlist: string[] = resolveAnomalyAllowlist()
 ): Promise<AddressAnomalyResult> {
   const thresholds = resolveAnomalyThresholds(overrides);
 
@@ -212,7 +254,7 @@ export async function checkAddressAnomalies(
       thresholds.windowMinutes,
       thresholds.massChangeThreshold
     ),
-    checkWalletReuseAnomaly(thresholds),
+    checkWalletReuseAnomaly(thresholds, allowlist),
     checkMultiAccountAnomaly(thresholds),
   ]);
 
@@ -224,6 +266,7 @@ export async function checkAddressAnomalies(
     windowMinutes: thresholds.windowMinutes,
     thresholds,
     signals: { massAddressChanges, walletReuse, multiAccount },
+    allowlisted: allowlist,
   };
 }
 
@@ -252,6 +295,7 @@ export async function evaluateAndAuditAddressChangeAnomaly(
             walletReuse: result.signals.walletReuse,
             multiAccount: result.signals.multiAccount,
           },
+          allowlisted: result.allowlisted,
           message: `Address anomaly detected (window ${result.windowMinutes}m): mass=${result.signals.massAddressChanges.count}/${result.signals.massAddressChanges.threshold}, reuse=${result.signals.walletReuse.count}/${result.signals.walletReuse.threshold}, multiAccount=${result.signals.multiAccount.count}/${result.signals.multiAccount.threshold}.`,
         },
       });

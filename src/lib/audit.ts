@@ -226,3 +226,87 @@ export async function getRecentAuditLog(limit = 50): Promise<AuditLogEntry[]> {
 
   return rows.map(toAuditLogEntry);
 }
+
+/** Default page size for paginated audit exports. */
+export const AUDIT_EXPORT_DEFAULT_PAGE_SIZE = 500;
+
+/** Hard cap on a single export page so large orgs cannot request unbounded rows. */
+export const AUDIT_EXPORT_MAX_PAGE_SIZE = 1000;
+
+/** Stable reason codes surfaced by {@link getAuditLogPage} on failure. */
+export type AuditExportReasonCode =
+  | "invalid_cursor"
+  | "invalid_page_size";
+
+export interface AuditLogPage {
+  entries: AuditLogEntry[];
+  /** Cursor to pass as `cursor` for the next page, or `null` when exhausted. */
+  nextCursor: string | null;
+  /** Number of rows returned in this page. */
+  count: number;
+}
+
+/**
+ * Thrown by {@link getAuditLogPage} for malformed pagination input.
+ *
+ * Carries a stable `reasonCode` so the API route can map it to a documented
+ * 400 response without leaking internals.
+ */
+export class AuditExportError extends Error {
+  readonly reasonCode: AuditExportReasonCode;
+
+  constructor(reasonCode: AuditExportReasonCode, message: string) {
+    super(message);
+    this.name = "AuditExportError";
+    this.reasonCode = reasonCode;
+  }
+}
+
+function normalizePageSize(pageSize?: number | null): number {
+  if (pageSize === undefined || pageSize === null) {
+    return AUDIT_EXPORT_DEFAULT_PAGE_SIZE;
+  }
+  if (!Number.isFinite(pageSize) || !Number.isInteger(pageSize) || pageSize < 1) {
+    throw new AuditExportError(
+      "invalid_page_size",
+      "pageSize must be a positive integer",
+    );
+  }
+  return Math.min(pageSize, AUDIT_EXPORT_MAX_PAGE_SIZE);
+}
+
+/**
+ * Read a single page of audit log entries, newest first, using cursor
+ * pagination so large orgs can stream exports in bounded chunks instead of
+ * loading the full history (which times out on Wave compliance exports).
+ *
+ * Pass the returned `nextCursor` back as `cursor` to fetch the next page.
+ * A `null` `nextCursor` means the export is exhausted. Malformed pagination
+ * input throws {@link AuditExportError} with a stable reason code.
+ */
+export async function getAuditLogPage(options: {
+  cursor?: string | null;
+  pageSize?: number | null;
+} = {}): Promise<AuditLogPage> {
+  const take = normalizePageSize(options.pageSize);
+  const cursor = options.cursor ?? null;
+
+  if (cursor !== null && (typeof cursor !== "string" || cursor.length === 0)) {
+    throw new AuditExportError("invalid_cursor", "cursor must be a non-empty id");
+  }
+
+  // Fetch one extra row to detect whether another page exists without a
+  // second round-trip.
+  const rows = await prisma.auditLog.findMany({
+    orderBy: { createdAt: "desc" },
+    take: take + 1,
+    ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+  });
+
+  const hasMore = rows.length > take;
+  const pageRows = hasMore ? rows.slice(0, take) : rows;
+  const entries = pageRows.map(toAuditLogEntry);
+  const nextCursor = hasMore ? pageRows[pageRows.length - 1]?.id ?? null : null;
+
+  return { entries, nextCursor, count: entries.length };
+}

@@ -66,6 +66,19 @@ npm run build-storybook
 - **Key States**: Include stories for empty states, populated/ready states, loading states, and mobile viewports (`parameters: { viewport: { defaultViewport: "mobile1" } }`).
 - **No Secrets**: Never hardcode production API keys, secrets, or real private keys in Storybook files.
 
+### Visual Regression Baselines
+Changes to the dashboard readiness panel (`src/app/dashboard/page.tsx`, `src/components/WaveReadinessBar.tsx`, `src/lib/readiness.ts`) or Wave status banners (`FreezeWindowBanner`, `StaleDataBanner`, `MaintenanceBanner`) must keep light and dark visual baselines in sync with [VISUAL_REGRESSION.md](./VISUAL_REGRESSION.md):
+
+```bash
+# 1. Verify WCAG contrast & baseline catalog/doc sync (runs in CI)
+npx vitest run src/lib/dark-mode-contrast-audit.test.ts src/lib/visual-regression-baselines.test.ts
+
+# 2. Regenerate Playwright light/dark snapshots for intentional UI changes
+npx playwright test tests/e2e/visual.spec.ts --grep "Readiness panel & wave-status banners" --update-snapshots
+```
+
+Commit updated `.png` baselines under `tests/e2e/visual.spec.ts-snapshots/` and keep `READINESS_VISUAL_BASELINES` / `WAVE_STATUS_BANNER_BASELINES` in `src/lib/readiness.ts` aligned with `docs/VISUAL_REGRESSION.md`.
+
 ---
 
 ## Pull request guidelines
@@ -218,3 +231,4 @@ All mutating endpoints enforce CSRF same-origin protection via `assertSameOrigin
 - [Project structure](./PROJECT_STRUCTURE.md)
 - [Environment variables](./ENVIRONMENT.md)
 - [Sessions](./SESSIONS.md)
+- [Visual regression](./VISUAL_REGRESSION.md)

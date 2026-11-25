@@ -33,6 +33,12 @@ export const dynamic = "force-dynamic";
  * Quiet hours: runs inside DIGEST_QUIET_HOURS (evaluated in DIGEST_TIMEZONE)
  * return { status: "skipped" } with HTTP 200 — see docs/DIGEST.md.
  *
+ * Empty-digest suppression (#795): when the Wave change set is empty (and
+ * `DIGEST_SUPPRESS_EMPTY` is not disabled), mail delivery is skipped while a
+ * dry-run metric and audit entry are still recorded (`status: "skipped"`,
+ * `suppressed: true`, `dryRun: true`, `reasonCode: "EMPTY_CHANGE_SET"`).
+ * Pass `?dryRun=true` to explicitly force a dry-run without sending mail.
+ *
  * Never throws: DB and email failures are returned as { status: "error" } with
  * HTTP 502 so the scheduler can log the failure without entering a retry storm.
  */
@@ -74,10 +80,14 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
+  const dryRunParam = request.nextUrl?.searchParams?.get("dryRun")?.trim().toLowerCase();
+  const dryRun = dryRunParam === "true" || dryRunParam === "1";
+
   const result = await runCronDigest({
     actorId: session?.user?.id ?? apiKeyActor?.createdById ?? null,
     actorLogin:
       session?.user?.githubUsername ?? (apiKeyActor ? `api-key:${apiKeyActor.name}` : "scheduler:cron"),
+    ...(dryRun ? { dryRun: true } : {}),
   });
 
   return NextResponse.json(result, {
