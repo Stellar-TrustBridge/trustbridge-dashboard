@@ -13,6 +13,13 @@ Compose initializes the `trustbridge_app` runtime role from
 `docker/postgres/init-roles.sql`. The `trustbridge` role remains the local
 admin/migration role and bypasses RLS; do not use it in the application.
 
+> **Production topology:** the Compose stack below is for local development
+> only. Production runs three separate process roles — the Next.js **web**
+> server, the **outbox worker** (`src/lib/soroban-outbox-worker.ts`), and the
+> **cron/export scheduler**. See [DEPLOYMENT.md](./DEPLOYMENT.md#process-topology)
+> for the required process topology, per-process health probes, and the failure
+> modes when a worker is missing.
+
 ## Prerequisites
 
 - [Docker](https://www.docker.com/products/docker-desktop) (20.10+)
@@ -76,6 +83,19 @@ npm run dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000) in your browser.
+
+### 6. Start the outbox worker (optional, for Wave sync)
+
+The web server does **not** drain the Soroban outbox. To exercise Wave sync
+locally, run the outbox worker in a second terminal against the same database:
+
+```bash
+npm run outbox:worker
+```
+
+Without this process, outbox rows accumulate and Wave sync/export silently
+stalls — the same failure mode described in
+[DEPLOYMENT.md](./DEPLOYMENT.md#failure-modes-when-a-worker-is-missing).
 
 ## Database Management
 
@@ -198,6 +218,13 @@ Run the migration:
 npm run db:push
 ```
 
+### Wave sync stalls or exports never run
+
+The Compose stack only runs Postgres and Adminer. If Wave sync appears stuck
+or scheduled exports never fire, confirm the outbox worker and cron scheduler
+are running (see [DEPLOYMENT.md](./DEPLOYMENT.md#process-topology)). A growing
+outbox backlog with no worker is the most common cause.
+
 ## Environment Variables
 
 All configuration is in `docker-compose.yml`. For development, the defaults are:
@@ -210,11 +237,16 @@ All configuration is in `docker-compose.yml`. For development, the defaults are:
 | Database host | `postgres` (within containers) or `localhost` (from host) |
 | Database port | `5432` |
 
+The outbox worker and cron scheduler reuse the same `DATABASE_URL` as the web
+process. Their additional polling and lock settings are documented in
+[DEPLOYMENT.md](./DEPLOYMENT.md#per-process-environment-variables).
+
 ## Production Deployment
 
 **Do not use these credentials in production.** For production deployments, use managed database services (AWS RDS, Google Cloud SQL, Neon, Vercel Postgres, etc.) and follow your provider's security guidelines.
 
-See [DEPLOYMENT.md](./DEPLOYMENT.md) for production setup.
+See [DEPLOYMENT.md](./DEPLOYMENT.md) for production setup, including the
+required web / outbox worker / cron process topology and health probes.
 
 ## Connection Pooling & PgBouncer Notes
 

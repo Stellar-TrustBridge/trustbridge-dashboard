@@ -361,7 +361,12 @@ export default function DashboardPage() {
         <NetworkStatusPanel config={networkQuery.data} className="mb-8" />
       )}
 
-      <Card className="mb-8" role="region" aria-labelledby="wave-overview-heading">
+      <Card
+        className="mb-8"
+        role="region"
+        aria-labelledby="wave-overview-heading"
+        data-testid="wave-readiness-panel"
+      >
         <CardHeader>
           <CardTitle id="wave-overview-heading">Wave overview</CardTitle>
           <CardDescription>

@@ -42,7 +42,9 @@ export type BanServiceErrorCode =
   | "SELF_UNBAN_FORBIDDEN"
   | "SELF_BAN_FORBIDDEN"
   | "REASON_REQUIRED"
-  | "INVALID_APPEAL_OUTCOME";
+  | "INVALID_APPEAL_OUTCOME"
+  | "EMPTY_BULK_BAN"
+  | "BULK_BAN_TOO_LARGE";
 
 export class BanServiceError extends Error {
   readonly code: BanServiceErrorCode;
@@ -52,6 +54,39 @@ export class BanServiceError extends Error {
     this.name = "BanServiceError";
     this.code = code;
   }
+}
+
+/**
+ * Maximum number of handles accepted in a single bulk ban request (issue #780).
+ * Oversized batches fail closed with `BULK_BAN_TOO_LARGE` rather than partially
+ * applying, so operators must split the request deliberately.
+ */
+export const BULK_BAN_MAX_HANDLES = 100;
+
+/**
+ * Per-handle outcome in a bulk ban dry-run report (issue #780).
+ * - `would-ban`: handle is not currently banned and would be banned.
+ * - `already-banned`: handle already has an active ban; no change.
+ * - `skipped`: handle was empty/duplicate after normalization.
+ */
+export type BulkBanDryRunOutcome = "would-ban" | "already-banned" | "skipped";
+
+export interface BulkBanDryRunEntry {
+  githubUsername: string;
+  outcome: BulkBanDryRunOutcome;
+}
+
+/**
+ * Stable, machine-readable dry-run report. Never mutates ban state; callers can
+ * surface counts to operators before committing a real bulk ban.
+ */
+export interface BulkBanDryRunReport {
+  dryRun: true;
+  total: number;
+  wouldBan: number;
+  alreadyBanned: number;
+  skipped: number;
+  entries: BulkBanDryRunEntry[];
 }
 
 function normalizeActorLogin(actorLogin?: string | null): string | null {
@@ -162,6 +197,82 @@ export async function enforceBan({
     allowed: false,
     reason: BAN_ENFORCE_REASON,
     bannedAt: status.bannedAt,
+  };
+}
+
+/**
+ * Normalizes a raw list of handles for bulk operations: trims, lowercases,
+ * drops empties, and de-duplicates while preserving first-seen order.
+ * Returns the normalized handles plus the count of skipped raw entries.
+ */
+function normalizeBulkHandles(rawHandles: readonly string[]): {
+  handles: string[];
+  skipped: number;
+} {
+  const seen = new Set<string>();
+  const handles: string[] = [];
+  let skipped = 0;
+
+  for (const raw of rawHandles) {
+    const normalized = (raw ?? "").trim().toLowerCase();
+    if (normalized === "" || seen.has(normalized)) {
+      skipped += 1;
+      continue;
+    }
+    seen.add(normalized);
+    handles.push(normalized);
+  }
+
+  return { handles, skipped };
+}
+
+/**
+ * Bulk ban dry-run (issue #780). Computes a would-affect report without
+ * mutating any ban state. Fails closed on empty or oversized input with stable
+ * reason codes so operators get actionable errors instead of silent success.
+ */
+export async function dryRunBulkBan({
+  githubUsernames,
+}: {
+  githubUsernames: readonly string[];
+}): Promise<BulkBanDryRunReport> {
+  if (!Array.isArray(githubUsernames) || githubUsernames.length === 0) {
+    throw new BanServiceError(
+      "EMPTY_BULK_BAN",
+      "At least one GitHub handle is required for a bulk ban dry-run."
+    );
+  }
+  if (githubUsernames.length > BULK_BAN_MAX_HANDLES) {
+    throw new BanServiceError(
+      "BULK_BAN_TOO_LARGE",
+      `Bulk ban accepts at most ${BULK_BAN_MAX_HANDLES} handles per request.`
+    );
+  }
+
+  const { handles, skipped } = normalizeBulkHandles(githubUsernames);
+
+  const entries: BulkBanDryRunEntry[] = [];
+  let wouldBan = 0;
+  let alreadyBanned = 0;
+
+  for (const githubUsername of handles) {
+    const status = await isUserBanned(null, githubUsername);
+    if (status.banned) {
+      alreadyBanned += 1;
+      entries.push({ githubUsername, outcome: "already-banned" });
+    } else {
+      wouldBan += 1;
+      entries.push({ githubUsername, outcome: "would-ban" });
+    }
+  }
+
+  return {
+    dryRun: true,
+    total: handles.length,
+    wouldBan,
+    alreadyBanned,
+    skipped,
+    entries,
   };
 }
 
@@ -310,8 +421,6 @@ export async function unbanContributor({
     );
   }
 
-  // Atomic clear of both ban surfaces so a concurrent ban cannot interleave
-  // between the user flag and the persistent BannedContributor row.
   await prisma.$transaction([
     ...(user
       ? [
@@ -343,85 +452,13 @@ export async function unbanContributor({
     targetId: user?.id ?? null,
     targetLabel: normalizedUsername,
     metadata: {
-      reason: reason ?? "Maintainer lifted ban",
+      reason: reason?.trim() || null,
       githubUsername: normalizedUsername,
     },
   });
 
-  return { success: true, githubUsername: normalizedUsername };
-}
-
-/**
- * Records a ban appeal note with an outcome for a contributor and writes an
- * audit trail entry. Validates inputs before any privileged state is touched so
- * a failure leaves no partial state behind.
- */
-export async function addBanAppealNote({
-  githubUsername,
-  note,
-  outcome,
-  actorId,
-  actorLogin,
-}: {
-  githubUsername: string;
-  note: string;
-  outcome: BanAppealOutcome;
-  actorId: string;
-  actorLogin?: string | null;
-}): Promise<BanAppealNote> {
-  const normalizedUsername = (githubUsername ?? "").trim().toLowerCase();
-  const trimmedNote = (note ?? "").trim();
-
-  if (!normalizedUsername) {
-    throw new BanServiceError(
-      "REASON_REQUIRED",
-      "A githubUsername is required to record a ban appeal note."
-    );
-  }
-  if (!trimmedNote) {
-    throw new BanServiceError(
-      "REASON_REQUIRED",
-      "A note is required to record a ban appeal."
-    );
-  }
-  if (!BAN_APPEAL_OUTCOMES.includes(outcome)) {
-    throw new BanServiceError(
-      "INVALID_APPEAL_OUTCOME",
-      `Invalid ban appeal outcome. Expected one of: ${BAN_APPEAL_OUTCOMES.join(", ")}.`
-    );
-  }
-
-  const user = await prisma.user.findFirst({
-    where: {
-      githubUsername: {
-        equals: normalizedUsername,
-        mode: "insensitive",
-      },
-    },
-  });
-
-  const appealNote: BanAppealNote = {
-    id: `${normalizedUsername}:${Date.now()}`,
+  return {
+    success: true,
     githubUsername: normalizedUsername,
-    note: trimmedNote,
-    outcome,
-    actorId,
-    actorLogin: actorLogin ?? null,
-    createdAt: new Date(),
   };
-
-  await recordAuditLog({
-    action: "contributor.ban_appeal_note",
-    actorId,
-    actorLogin: actorLogin ?? null,
-    targetId: user?.id ?? null,
-    targetLabel: normalizedUsername,
-    metadata: {
-      githubUsername: normalizedUsername,
-      note: trimmedNote,
-      outcome,
-    },
-  });
-
-  return appealNote;
 }

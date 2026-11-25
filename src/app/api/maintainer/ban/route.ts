@@ -6,6 +6,7 @@ import { invalidateContributorListCaches } from "@/lib/cache-tags";
 import {
   banContributor,
   unbanContributor,
+  previewBulkBan,
   BanServiceError,
 } from "@/lib/ban-service";
 
@@ -17,7 +18,10 @@ function banErrorResponse(error: unknown): NextResponse {
     const status =
       error.code === "SELF_UNBAN_FORBIDDEN" || error.code === "SELF_BAN_FORBIDDEN"
         ? 403
-        : error.code === "REASON_REQUIRED" || error.code === "INVALID_APPEAL_OUTCOME"
+        : error.code === "REASON_REQUIRED" ||
+            error.code === "INVALID_APPEAL_OUTCOME" ||
+            error.code === "EMPTY_BULK_BAN" ||
+            error.code === "BULK_BAN_TOO_LARGE"
           ? 400
           : 500;
     return NextResponse.json(
@@ -34,6 +38,11 @@ function banErrorResponse(error: unknown): NextResponse {
  * Maintainer endpoint for banning or unbanning a contributor by GitHub handle.
  * Requires maintainer session and a mandatory reason for bans.
  * Self-ban/self-unban is rejected with 403 + code (issue #660).
+ *
+ * Bulk ban dry-run (issue #780): pass `action: "bulk-ban"` with
+ * `githubUsernames: string[]` and `dryRun: true` to receive a would-affect
+ * report without mutating any ban state. Non-dry-run bulk bans are not
+ * supported by this endpoint and are rejected with 400.
  */
 export async function POST(request: NextRequest) {
   const csrf = assertSameOrigin(request);
@@ -49,16 +58,48 @@ export async function POST(request: NextRequest) {
 
   try {
     const body = (await request.json()) as {
-      action?: "ban" | "unban";
+      action?: "ban" | "unban" | "bulk-ban";
       githubUsername?: string;
+      githubUsernames?: string[];
       reason?: string;
       locale?: string;
+      dryRun?: boolean;
     };
 
     const action = body.action ?? "ban";
     const githubUsername = body.githubUsername?.trim();
     const reason = body.reason?.trim();
     const locale = typeof body.locale === "string" ? body.locale : undefined;
+
+    if (action === "bulk-ban") {
+      if (body.dryRun !== true) {
+        return NextResponse.json(
+          {
+            error:
+              "Bulk ban requires dryRun: true. Non-dry-run bulk bans are not supported.",
+            code: "BULK_BAN_DRY_RUN_REQUIRED",
+          },
+          { status: 400 }
+        );
+      }
+
+      const report = await previewBulkBan({
+        githubUsernames: Array.isArray(body.githubUsernames)
+          ? body.githubUsernames
+          : [],
+        actorId: session.user.id,
+        actorLogin: session.user.githubUsername ?? null,
+        reason,
+        locale,
+      });
+
+      return NextResponse.json({
+        success: true,
+        dryRun: true,
+        message: `Dry run: ${report.wouldBan} of ${report.total} contributor(s) would be banned.`,
+        report,
+      });
+    }
 
     if (!githubUsername) {
       return NextResponse.json(
@@ -107,7 +148,7 @@ export async function POST(request: NextRequest) {
       });
     } else {
       return NextResponse.json(
-        { error: "Invalid action. Must be 'ban' or 'unban'." },
+        { error: "Invalid action. Must be 'ban', 'unban', or 'bulk-ban'." },
         { status: 400 }
       );
     }

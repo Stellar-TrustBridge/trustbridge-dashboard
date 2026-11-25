@@ -77,20 +77,80 @@ export interface BatchVerificationProgress {
 }
 
 /**
+ * Default maximum number of concurrent verifications per batch job.
+ *
+ * Bounds the number of in-flight verify calls so a single batch cannot
+ * starve other Wave org workloads. Overridable per call via
+ * `BatchVerificationOptions.concurrency` or globally via the
+ * `BATCH_VERIFY_MAX_CONCURRENCY` env var.
+ */
+export const DEFAULT_BATCH_VERIFY_CONCURRENCY = 5;
+
+/**
+ * Hard upper bound on concurrency. Values above this are rejected so a
+ * misconfigured env var cannot reintroduce unbounded parallelism.
+ */
+export const MAX_BATCH_VERIFY_CONCURRENCY = 50;
+
+/**
+ * Resolve the effective max concurrency for a batch verify job.
+ *
+ * Precedence: explicit option > `BATCH_VERIFY_MAX_CONCURRENCY` env var >
+ * `DEFAULT_BATCH_VERIFY_CONCURRENCY`. Throws a stable error for malformed
+ * or out-of-range values so misconfiguration fails loudly instead of
+ * silently falling back to unbounded behavior.
+ */
+export function resolveBatchVerifyConcurrency(
+  override?: number,
+  env: Record<string, string | undefined> = typeof process !== 'undefined'
+    ? process.env
+    : {},
+): number {
+  const raw = override ?? env.BATCH_VERIFY_MAX_CONCURRENCY;
+
+  if (raw === undefined || raw === null || raw === '') {
+    return DEFAULT_BATCH_VERIFY_CONCURRENCY;
+  }
+
+  const value = typeof raw === 'number' ? raw : Number(raw);
+
+  if (!Number.isInteger(value) || value < 1) {
+    throw new Error(
+      `Invalid batch verify concurrency: expected an integer >= 1, received ${String(raw)}`,
+    );
+  }
+
+  if (value > MAX_BATCH_VERIFY_CONCURRENCY) {
+    throw new Error(
+      `Invalid batch verify concurrency: ${value} exceeds max of ${MAX_BATCH_VERIFY_CONCURRENCY}`,
+    );
+  }
+
+  return value;
+}
+
+/**
  * Execute multiple verification checks with concurrency control.
+ *
+ * Concurrency is bounded by `resolveBatchVerifyConcurrency` so a single
+ * batch cannot monopolize worker slots. When items carry an `orgId`, the
+ * queue is drained round-robin across orgs so one org cannot starve the
+ * others (fair scheduling).
  */
 export async function batchVerify(
   verifications: Array<{
     username: string;
     stellar_address: string;
+    orgId?: string;
   }>,
   verifyFn: (address: string) => Promise<VerificationCheckResult>,
   options: BatchVerificationOptions = {},
 ): Promise<VerificationCheckResult[]> {
-  const { concurrency = 5, timeout = 10_000, jobId = "batch-verify", onProgress } = options;
+  const { timeout = 10_000, jobId = "batch-verify", onProgress } = options;
+  const concurrency = resolveBatchVerifyConcurrency(options.concurrency);
 
   const results: VerificationCheckResult[] = [];
-  const queue = [...verifications];
+  const queue = buildFairQueue(verifications);
   const emitter = onProgress
     ? createBatchProgressEmitter(jobId, verifications.length, onProgress)
     : null;
@@ -136,6 +196,44 @@ export async function batchVerify(
   await emitter?.flush();
 
   return results;
+}
+
+/**
+ * Build a fair, round-robin ordered queue from a batch of verifications.
+ *
+ * Items are grouped by `orgId` (items without an org share a single bucket)
+ * and interleaved one-per-org per round so a single org with a large batch
+ * cannot monopolize worker slots ahead of other orgs. Within an org, the
+ * original input order is preserved.
+ */
+export function buildFairQueue<T extends { orgId?: string }>(items: T[]): T[] {
+  const buckets = new Map<string, T[]>();
+  for (const item of items) {
+    const key = item.orgId ?? '__default__';
+    const bucket = buckets.get(key);
+    if (bucket) {
+      bucket.push(item);
+    } else {
+      buckets.set(key, [item]);
+    }
+  }
+
+  const ordered: T[] = [];
+  const groups = Array.from(buckets.values());
+  let remaining = items.length;
+  let index = 0;
+
+  while (remaining > 0) {
+    const group = groups[index % groups.length];
+    const next = group.shift();
+    if (next !== undefined) {
+      ordered.push(next);
+      remaining -= 1;
+    }
+    index += 1;
+  }
+
+  return ordered;
 }
 
 /**
@@ -289,12 +387,10 @@ export function createBatchProgressEmitter(
   const emit = (next: BatchVerificationProgress) => {
     const stamped: BatchVerificationProgress = {
       ...next,
-      updatedAt: nextProgressTimestamp(snapshot.updatedAt),
+      updatedAt: nextProgressTimestamp(next.updatedAt),
     };
     snapshot = stamped;
-    pending = pending
-      .then(() => onSnapshot(toBatchProgressEvent(stamped)))
-      .catch(() => undefined);
+    pending = pending.then(() => onSnapshot(toBatchProgressEvent(stamped)));
   };
 
   return {
@@ -305,76 +401,10 @@ export function createBatchProgressEmitter(
       emit(recordBatchProgress(snapshot, result));
     },
     finish() {
-      if (!snapshot.done) emit(finalizeBatchProgress(snapshot));
+      emit(finalizeBatchProgress(snapshot));
     },
-    flush() {
-      return pending;
+    async flush() {
+      await pending;
     },
   };
-}
-
-/**
- * Calculate summary statistics for batch verification results.
- */
-export function calculateVerificationSummary(results: VerificationCheckResult[]) {
-  const total = results.length;
-  const ready = results.filter((r) => r.status === 'ready').length;
-  const lowReserve = results.filter((r) => r.status === 'low_reserve').length;
-  const notReady = results.filter((r) => r.status === 'not_ready').length;
-  const errors = results.filter((r) => r.status === 'error').length;
-
-  return {
-    total,
-    ready,
-    lowReserve,
-    notReady,
-    errors,
-    readyPercentage: total > 0 ? Math.round((ready / total) * 100) : 0,
-    succeededPercentage: total > 0 ? Math.round(((total - errors) / total) * 100) : 0,
-  };
-}
-
-/**
- * Filter verification results by status.
- */
-export function filterByStatus(
-  results: VerificationCheckResult[],
-  status: VerificationCheckResult['status'],
-): VerificationCheckResult[] {
-  return results.filter((r) => r.status === status);
-}
-
-/**
- * Sort verification results by readiness.
- */
-export function sortByReadiness(
-  results: VerificationCheckResult[],
-): VerificationCheckResult[] {
-  const order: Record<VerificationCheckResult['status'], number> = {
-    ready: 0,
-    low_reserve: 1,
-    not_ready: 2,
-    error: 3,
-  };
-
-  return [...results].sort((a, b) => order[a.status] - order[b.status]);
-}
-
-/**
- * Export verification results as CSV-compatible array of objects.
- */
-export function exportAsCSV(
-  results: VerificationCheckResult[],
-): Array<Record<string, unknown>> {
-  return results.map((r) => ({
-    username: r.username,
-    stellar_address: r.stellar_address,
-    status: r.status,
-    funded: r.checks.funded,
-    trustline: r.checks.trustline,
-    reserve: r.checks.reserve,
-    xlm_balance: r.xlm_balance || 'N/A',
-    last_checked: r.last_checked?.toISOString() || 'N/A',
-    error: r.error_message || '',
-  }));
 }

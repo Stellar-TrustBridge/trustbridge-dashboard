@@ -15,9 +15,39 @@ export const dynamic = "force-dynamic";
  * Self-service recheck endpoint for contributors to verify their own
  * Stellar address readiness. Applies retries, caching, and circuit breaker
  * protection via checkStellarAddress.
+ *
+ * E2E path (see docs/E2E_TESTING.md): readiness fail -> fund/trustline ->
+ * Action recheck pass. The response always includes a stable `reasonCode`
+ * so the UI and E2E tests can assert on the same vocabulary:
+ *   - READY                 : funded + trustline ready
+ *   - ACCOUNT_UNFUNDED      : account not yet funded on Horizon
+ *   - ACCOUNT_NO_TRUSTLINE  : funded but missing/unauthorized trustline
+ *   - ACCOUNT_LOW_BALANCE   : funded + trustline but below spendable minimum
+ *   - HORIZON_UNAVAILABLE   : Horizon/network error (retryable)
  */
 import { enforceFreezeWindowGuard } from "@/lib/freeze-window";
 import { isUserBanned } from "@/lib/ban-service";
+
+type RecheckReasonCode =
+  | "READY"
+  | "ACCOUNT_UNFUNDED"
+  | "ACCOUNT_NO_TRUSTLINE"
+  | "ACCOUNT_LOW_BALANCE"
+  | "HORIZON_UNAVAILABLE";
+
+function deriveReasonCode(result: {
+  funded: boolean;
+  trustline: boolean;
+  trustline_authorized: boolean;
+  spendable_xlm_balance: number;
+}): RecheckReasonCode {
+  if (!result.funded) return "ACCOUNT_UNFUNDED";
+  if (!result.trustline || !result.trustline_authorized) {
+    return "ACCOUNT_NO_TRUSTLINE";
+  }
+  if (result.spendable_xlm_balance <= 0) return "ACCOUNT_LOW_BALANCE";
+  return "READY";
+}
 
 export async function POST(request: NextRequest) {
   const csrf = assertSameOrigin(request);
@@ -97,6 +127,8 @@ export async function POST(request: NextRequest) {
       },
     });
 
+    const reasonCode = deriveReasonCode(horizonResult);
+
     // Record audit log for self-service recheck
     await recordAuditLog({
       action: "recheck.self_service",
@@ -107,6 +139,7 @@ export async function POST(request: NextRequest) {
       metadata: {
         readiness: horizonResult.readiness,
         verified: horizonResult.verified,
+        reasonCode,
       },
     });
 
@@ -114,12 +147,16 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({
       success: true,
+      reasonCode,
       contributor: contributorRow,
       check: horizonResult,
     });
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "Failed to recheck registration";
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json(
+      { error: message, reasonCode: "HORIZON_UNAVAILABLE" },
+      { status: 500 }
+    );
   }
 }

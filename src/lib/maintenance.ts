@@ -1,96 +1,180 @@
 /**
- * Authenticated maintenance mode (issue #202).
+ * Maintenance banner API for planned downtime windows.
  *
- * When maintenance mode is on:
- *   - a banner is shown on every page (see src/components/MaintenanceBanner.tsx)
- *   - mutating API requests (POST/PUT/PATCH/DELETE) get a 503 from the
- *     middleware, except for the bypass prefixes below
- *   - reads (GET/HEAD) keep working
- *   - GET /api/health keeps returning 200 (see docs/DEPLOYMENT.md)
+ * Public read: any caller may fetch active/upcoming windows.
+ * Maintainer write: create/update/cancel windows (auth enforced at the route layer).
  *
- * The kill switch is the `MAINTENANCE` env var. It is intentionally env-only so
- * a broken database can never lock maintainers out of turning it back off. The
- * `maintenance_mode` feature flag is an additional, DB-backed toggle for
- * operators who have the DB flag source enabled.
- *
- * This module has NO `server-only` import and NO Prisma import at the top level
- * so the synchronous helpers can run inside the Edge middleware runtime.
+ * Reason codes are stable and documented in docs/ENVIRONMENT.md.
  */
 
-const TRUTHY = new Set(["1", "true", "on", "yes", "enabled"]);
+export type MaintenanceSeverity = "info" | "warning" | "critical";
 
-/** Edge-safe: env var only, no database. Used by the middleware. */
-export function isMaintenanceModeFromEnv(): boolean {
-  const raw = process.env.MAINTENANCE?.trim().toLowerCase();
-  return raw ? TRUTHY.has(raw) : false;
+export type MaintenanceStatus = "upcoming" | "active" | "expired" | "cancelled";
+
+export interface MaintenanceWindow {
+  id: string;
+  message: string;
+  startsAt: string;
+  endsAt: string;
+  severity: MaintenanceSeverity;
+  cancelledAt?: string;
 }
 
-export function getMaintenanceMessage(): string {
-  return (
-    process.env.MAINTENANCE_MESSAGE?.trim() ||
-    "TrustBridge is in maintenance mode. Reads are available; changes are temporarily disabled."
-  );
+export interface MaintenanceWindowView extends MaintenanceWindow {
+  status: MaintenanceStatus;
+}
+
+export type MaintenanceReasonCode =
+  | "missing_message"
+  | "message_too_long"
+  | "invalid_timestamp"
+  | "end_before_start"
+  | "invalid_severity"
+  | "missing_id"
+  | "not_found"
+  | "already_cancelled";
+
+export interface MaintenanceError {
+  ok: false;
+  code: MaintenanceReasonCode;
+  message: string;
+}
+
+export interface MaintenanceOk<T> {
+  ok: true;
+  value: T;
+}
+
+export type MaintenanceResult<T> = MaintenanceOk<T> | MaintenanceError;
+
+export const MAX_MESSAGE_LENGTH = 280;
+
+const SEVERITIES: readonly MaintenanceSeverity[] = ["info", "warning", "critical"];
+const ISO_8601 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?(Z|[+-]\d{2}:\d{2})$/;
+
+function fail(code: MaintenanceReasonCode, message: string): MaintenanceError {
+  return { ok: false, code, message };
+}
+
+function parseTimestamp(value: unknown): number | null {
+  if (typeof value !== "string" || !ISO_8601.test(value)) return null;
+  const ms = Date.parse(value);
+  return Number.isNaN(ms) ? null : ms;
 }
 
 /**
- * Path prefixes that keep accepting requests during maintenance even when the
- * method is mutating:
- *   - `/api/auth`     — NextAuth callbacks must keep working
- *   - `/api/webhooks` — GitHub / trustbridge-action deliveries are retried a
- *                       limited number of times; dropping them loses data
- *   - `/api/health`   — probes
- *   - `/api/check`    — a pure Horizon read that uses POST only to keep the
- *                       G-address out of the URL / logs; it is on the critical
- *                       registration path, so treat it as a read
- *
- * Scheduled jobs (cron) are not routed through the middleware and continue to
- * run; document any that must be paused separately. See docs/DEPLOYMENT.md.
+ * Validate a maintenance window input. Returns a normalized window or a stable
+ * reason code describing the first failure.
  */
-export const MAINTENANCE_BYPASS_PREFIXES = [
-  "/api/auth",
-  "/api/webhooks",
-  "/api/health",
-  "/api/check",
-] as const;
-
-export function isMaintenanceBypassPath(pathname: string): boolean {
-  return MAINTENANCE_BYPASS_PREFIXES.some(
-    (prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`),
-  );
-}
-
-const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
-
-export function isMutatingMethod(method: string | undefined): boolean {
-  return method ? MUTATING_METHODS.has(method.toUpperCase()) : false;
-}
-
-/**
- * Whether the middleware should reject this request with a 503.
- * True only for mutating API requests that are not on a bypass prefix.
- */
-export function shouldBlockForMaintenance(
-  method: string | undefined,
-  pathname: string,
-): boolean {
-  if (!isMaintenanceModeFromEnv()) return false;
-  if (!pathname.startsWith("/api")) return false;
-  if (!isMutatingMethod(method)) return false;
-  if (isMaintenanceBypassPath(pathname)) return false;
-  return true;
-}
-
-/**
- * Node-runtime check that also consults the `maintenance_mode` feature flag.
- * Used by the banner / server components. The dynamic import keeps the
- * `server-only` feature-flags module (and Prisma) out of the Edge bundle.
- */
-export async function isMaintenanceMode(): Promise<boolean> {
-  if (isMaintenanceModeFromEnv()) return true;
-  try {
-    const { isFeatureEnabled } = await import("@/lib/feature-flags");
-    return await isFeatureEnabled("maintenance_mode");
-  } catch {
-    return false;
+export function validateWindow(input: unknown): MaintenanceResult<MaintenanceWindow> {
+  if (typeof input !== "object" || input === null) {
+    return fail("missing_message", "maintenance window must be an object");
   }
+  const raw = input as Record<string, unknown>;
+
+  if (typeof raw.id !== "string" || raw.id.trim() === "") {
+    return fail("missing_id", "id is required");
+  }
+  if (typeof raw.message !== "string" || raw.message.trim() === "") {
+    return fail("missing_message", "message is required");
+  }
+  if (raw.message.length > MAX_MESSAGE_LENGTH) {
+    return fail("message_too_long", `message must be <= ${MAX_MESSAGE_LENGTH} characters`);
+  }
+
+  const severity = raw.severity ?? "info";
+  if (typeof severity !== "string" || !SEVERITIES.includes(severity as MaintenanceSeverity)) {
+    return fail("invalid_severity", `severity must be one of ${SEVERITIES.join(", ")}`);
+  }
+
+  const startMs = parseTimestamp(raw.startsAt);
+  if (startMs === null) {
+    return fail("invalid_timestamp", "startsAt must be an ISO-8601 timestamp");
+  }
+  const endMs = parseTimestamp(raw.endsAt);
+  if (endMs === null) {
+    return fail("invalid_timestamp", "endsAt must be an ISO-8601 timestamp");
+  }
+  if (endMs <= startMs) {
+    return fail("end_before_start", "endsAt must be after startsAt");
+  }
+
+  return {
+    ok: true,
+    value: {
+      id: raw.id.trim(),
+      message: raw.message.trim(),
+      startsAt: raw.startsAt as string,
+      endsAt: raw.endsAt as string,
+      severity: severity as MaintenanceSeverity,
+      ...(typeof raw.cancelledAt === "string" ? { cancelledAt: raw.cancelledAt } : {}),
+    },
+  };
+}
+
+/** Compute the status of a window relative to `now`. */
+export function windowStatus(window: MaintenanceWindow, now: Date = new Date()): MaintenanceStatus {
+  if (window.cancelledAt) return "cancelled";
+  const nowMs = now.getTime();
+  const startMs = Date.parse(window.startsAt);
+  const endMs = Date.parse(window.endsAt);
+  if (nowMs < startMs) return "upcoming";
+  if (nowMs >= endMs) return "expired";
+  return "active";
+}
+
+/** Decorate windows with their computed status. */
+export function withStatus(
+  windows: readonly MaintenanceWindow[],
+  now: Date = new Date(),
+): MaintenanceWindowView[] {
+  return windows.map((w) => ({ ...w, status: windowStatus(w, now) }));
+}
+
+/**
+ * Public read: return active and upcoming windows, sorted by start time.
+ * Expired and cancelled windows are omitted from the public banner feed.
+ */
+export function publicWindows(
+  windows: readonly MaintenanceWindow[],
+  now: Date = new Date(),
+): MaintenanceWindowView[] {
+  return withStatus(windows, now)
+    .filter((w) => w.status === "active" || w.status === "upcoming")
+    .sort((a, b) => Date.parse(a.startsAt) - Date.parse(b.startsAt));
+}
+
+/** Create a window, rejecting duplicates by id (idempotent on identical input). */
+export function createWindow(
+  windows: readonly MaintenanceWindow[],
+  input: unknown,
+): MaintenanceResult<MaintenanceWindow[]> {
+  const validated = validateWindow(input);
+  if (!validated.ok) return validated;
+  const existing = windows.find((w) => w.id === validated.value.id);
+  if (existing) {
+    const same =
+      existing.message === validated.value.message &&
+      existing.startsAt === validated.value.startsAt &&
+      existing.endsAt === validated.value.endsAt &&
+      existing.severity === validated.value.severity;
+    if (same) return { ok: true, value: [...windows] };
+    return fail("missing_id", `window ${validated.value.id} already exists`);
+  }
+  return { ok: true, value: [...windows, validated.value] };
+}
+
+/** Cancel a window by id. Idempotent: cancelling an already-cancelled window is a no-op. */
+export function cancelWindow(
+  windows: readonly MaintenanceWindow[],
+  id: string,
+  now: Date = new Date(),
+): MaintenanceResult<MaintenanceWindow[]> {
+  const idx = windows.findIndex((w) => w.id === id);
+  if (idx === -1) return fail("not_found", `window ${id} not found`);
+  const target = windows[idx];
+  if (target.cancelledAt) return { ok: true, value: [...windows] };
+  const next = [...windows];
+  next[idx] = { ...target, cancelledAt: now.toISOString() };
+  return { ok: true, value: next };
 }

@@ -34,6 +34,7 @@ import {
   clearSorobanOutbox,
   getSorobanOutboxEntry,
   listSorobanOutbox,
+  SOROBAN_OUTBOX_REASON_CODES,
 } from "./soroban-outbox";
 
 describe("Soroban Outbox Worker (Issue #199)", () => {
@@ -64,7 +65,7 @@ describe("Soroban Outbox Worker (Issue #199)", () => {
         createdAt: new Date(),
         updatedAt: new Date(),
       },
-    ] as any);
+    ] as never);
 
     vi.mocked(mirrorRegistrationToSoroban).mockResolvedValueOnce({
       success: true,
@@ -97,7 +98,7 @@ describe("Soroban Outbox Worker (Issue #199)", () => {
         createdAt: new Date(),
         updatedAt: new Date(),
       },
-    ] as any);
+    ] as never);
 
     vi.mocked(mirrorRegistrationToSoroban).mockResolvedValueOnce({
       success: false,
@@ -130,7 +131,7 @@ describe("Soroban Outbox Worker (Issue #199)", () => {
         createdAt: new Date(),
         updatedAt: new Date(),
       },
-    ] as any);
+    ] as never);
 
     const items = await listSorobanOutboxDeadLetters("org-1", 20);
 
@@ -265,6 +266,215 @@ describe("Unified Outbox Adapter (Issue #488)", () => {
     setSorobanOutboxSink(null);
     clearSorobanOutbox();
     expect(listSorobanOutbox()).toHaveLength(0);
+  });
+});
+
+describe("Soroban Outbox Worker Concurrency & Leases (Issue #793)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("delivers each pending row exactly once when multiple workers race concurrently", async () => {
+    interface Row {
+      id: string;
+      maintainerOrgId: string;
+      action: string;
+      payload: { stellarAddress: string; githubUsername: string; registrationId: string };
+      status: string;
+      attempts: number;
+      maxAttempts: number;
+      lastError: string | null;
+      nextAttemptAt: Date;
+      createdAt: Date;
+      updatedAt: Date;
+    }
+
+    const baseTime = new Date("2026-01-01T00:00:00.000Z");
+    const rows = new Map<string, Row>();
+    for (let i = 0; i < 12; i++) {
+      const id = `outbox-race-${i}`;
+      rows.set(id, {
+        id,
+        maintainerOrgId: "org-1",
+        action: "register",
+        payload: {
+          stellarAddress: `GADDR${i}`,
+          githubUsername: `user-${i}`,
+          registrationId: `reg-${i}`,
+        },
+        status: "PENDING",
+        attempts: 0,
+        maxAttempts: 5,
+        lastError: null,
+        nextAttemptAt: new Date(baseTime.getTime() - 1000),
+        createdAt: new Date(baseTime.getTime() + i),
+        updatedAt: baseTime,
+      });
+    }
+
+    vi.mocked(prisma.sorobanOutbox.findMany).mockImplementation((async () => {
+      const now = Date.now();
+      return Array.from(rows.values()).filter(
+        (r) =>
+          (r.status === "PENDING" || r.status === "PROCESSING") &&
+          r.nextAttemptAt.getTime() <= now,
+      );
+    }) as never);
+
+    vi.mocked(prisma.sorobanOutbox.updateMany).mockImplementation((async ({
+      where,
+      data,
+    }: {
+      where: { id: string; status?: string; nextAttemptAt?: { lte?: Date | string } };
+      data: { status?: string; nextAttemptAt?: Date | string; updatedAt?: Date | string };
+    }) => {
+      const row = rows.get(where.id);
+      if (!row) return { count: 0 };
+      if (where.status && row.status !== where.status) return { count: 0 };
+      if (
+        where.nextAttemptAt?.lte &&
+        row.nextAttemptAt.getTime() > new Date(where.nextAttemptAt.lte).getTime()
+      ) {
+        return { count: 0 };
+      }
+      if (data.status) row.status = data.status;
+      if (data.nextAttemptAt) row.nextAttemptAt = new Date(data.nextAttemptAt);
+      if (data.updatedAt) row.updatedAt = new Date(data.updatedAt);
+      return { count: 1 };
+    }) as never);
+
+    vi.mocked(prisma.sorobanOutbox.update).mockImplementation((async ({
+      where,
+      data,
+    }: {
+      where: { id: string };
+      data: Partial<Row>;
+    }) => {
+      const row = rows.get(where.id)!;
+      Object.assign(row, data);
+      return row;
+    }) as never);
+
+    const deliveredRegistrations: string[] = [];
+    vi.mocked(mirrorRegistrationToSoroban).mockImplementation(async (payload) => {
+      await Promise.resolve();
+      deliveredRegistrations.push(payload.registrationId);
+      return { success: true, txHash: "0xtx", errors: [] };
+    });
+
+    const results = await Promise.all(
+      Array.from({ length: 6 }, (_, i) =>
+        processSorobanOutbox({
+          workerId: `worker-${i}`,
+          batchSize: 12,
+          leaseMs: 30_000,
+        }),
+      ),
+    );
+
+    const totalProcessed = results.reduce((sum, r) => sum + r.processedCount, 0);
+    const totalSuccess = results.reduce((sum, r) => sum + r.successCount, 0);
+
+    expect(totalProcessed).toBe(12);
+    expect(totalSuccess).toBe(12);
+    expect(deliveredRegistrations).toHaveLength(12);
+    expect(new Set(deliveredRegistrations).size).toBe(12);
+    for (const row of rows.values()) {
+      expect(row.status).toBe("COMPLETED");
+    }
+  });
+
+  it("reclaims an expired PROCESSING lease and skips finalizing when a slow worker's lease expires", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+
+    const expiredProcessingRow = {
+      id: "outbox-expired",
+      maintainerOrgId: "org-1",
+      action: "register",
+      payload: { stellarAddress: "G1", githubUsername: "u1", registrationId: "r1" },
+      status: "PROCESSING",
+      attempts: 0,
+      maxAttempts: 5,
+      lastError: null,
+      nextAttemptAt: new Date("2025-12-31T23:59:00.000Z"),
+      createdAt: new Date("2025-12-31T23:58:00.000Z"),
+      updatedAt: new Date("2025-12-31T23:58:00.000Z"),
+    };
+
+    vi.mocked(prisma.sorobanOutbox.findMany).mockResolvedValueOnce([expiredProcessingRow] as never);
+    vi.mocked(prisma.sorobanOutbox.updateMany).mockResolvedValueOnce({ count: 1 });
+    vi.mocked(mirrorRegistrationToSoroban).mockImplementationOnce(async () => {
+      // Simulate worker stalling past its 5s lease before delivery finishes.
+      vi.setSystemTime(new Date("2026-01-01T00:00:06.000Z"));
+      return { success: true, txHash: "0xlate", errors: [] };
+    });
+
+    const result = await processSorobanOutbox({
+      workerId: "slow-worker",
+      leaseMs: 5_000,
+    });
+
+    expect(result).toEqual({
+      processedCount: 1,
+      successCount: 0,
+      failedCount: 0,
+    });
+    // Fencing check prevented the expired worker from clobbering the DB row.
+    expect(prisma.sorobanOutbox.update).not.toHaveBeenCalled();
+  });
+
+  it("releases a claimed row cleanly if aborted mid-flight before delivery", async () => {
+    const controller = new AbortController();
+    vi.mocked(prisma.sorobanOutbox.findMany).mockResolvedValueOnce([
+      {
+        id: "outbox-abort",
+        maintainerOrgId: "org-1",
+        action: "register",
+        payload: { stellarAddress: "G1", githubUsername: "u1", registrationId: "r1" },
+        status: "PENDING",
+        attempts: 0,
+        maxAttempts: 5,
+        lastError: null,
+        nextAttemptAt: new Date(Date.now() - 1000),
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
+    ] as never);
+    vi.mocked(prisma.sorobanOutbox.updateMany)
+      .mockImplementationOnce(async () => {
+        // Abort right as the claim completes (e.g. pause/freeze mid-flight).
+        controller.abort();
+        return { count: 1 };
+      })
+      .mockResolvedValueOnce({ count: 1 });
+
+    const result = await processSorobanOutbox({
+      workerId: "aborted-worker",
+      signal: controller.signal,
+    });
+
+    expect(result).toEqual({ processedCount: 0, successCount: 0, failedCount: 0 });
+    expect(mirrorRegistrationToSoroban).not.toHaveBeenCalled();
+    expect(prisma.sorobanOutbox.updateMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: "PENDING" }),
+      }),
+    );
+  });
+
+  it("rejects invalid leaseMs with a stable SorobanOutboxError reason code", async () => {
+    await expect(
+      processSorobanOutbox({ leaseMs: -100 }),
+    ).rejects.toMatchObject({
+      name: "SorobanOutboxError",
+      code: SOROBAN_OUTBOX_REASON_CODES.INVALID_LEASE_MS,
+    });
+    expect(prisma.sorobanOutbox.findMany).not.toHaveBeenCalled();
   });
 });
 

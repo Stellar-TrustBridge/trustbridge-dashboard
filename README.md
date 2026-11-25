@@ -510,3 +510,6 @@ This project is licensed under the [MIT License](LICENSE).
 
 <!-- handsoff-issue-617 -->
 - #617: Implement contributor table column preference persistence per org
+
+<!-- handsoff-issue-719 -->
+- #719: Implement profile route cache headers for public badges only

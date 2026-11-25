@@ -110,11 +110,11 @@ export default function DeadLetterQueuePage() {
           Loading failed jobs…
         </div>
       ) : dlqQuery.isError ? (
-        <p className="text-destructive">
+        <p className="text-destructive" data-testid="dlq-error">
           Could not load the dead-letter queue. Try again.
         </p>
       ) : jobs.length === 0 ? (
-        <Card>
+        <Card data-testid="dlq-empty">
           <CardContent className="flex flex-col items-center gap-2 py-16 text-center text-muted-foreground">
             <AlertTriangle className="h-8 w-8 text-muted-foreground/60" />
             <p className="font-medium text-foreground">No failed jobs</p>

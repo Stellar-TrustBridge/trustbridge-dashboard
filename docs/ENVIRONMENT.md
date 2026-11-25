@@ -324,9 +324,21 @@ Reported by the contributor REST endpoints (`/api/contributors`, `/api/contribut
 | Value | Meaning |
 |-------|---------|
 | `live` (default) | Reads reflect whatever is currently persisted; maintainers are expected to trigger a Horizon recheck to refresh it. |
-| `synced` | Signals that a scheduled contract-to-Postgres sync job (see `CONTRACT_SYNC_MIN_INTERVAL_MS` above) is responsible for keeping registrations fresh. |
+| `synced` | Contract-backed mode: signals that a scheduled contract-to-Postgres sync job (`CONTRACT_SYNC_MIN_INTERVAL_MS`) and the Soroban outbox worker (`SOROBAN_OUTBOX_WORKER_URL`) keep registrations fresh and mirrored on-chain. |
 
-Reads are identical in both modes — Postgres is always the source of truth. An unset or unrecognized value falls back to `live` rather than failing.
+Reads are identical in both modes — Postgres is always the source of truth. At runtime, `getRegistryMode()` falls back to `live` for unset or unrecognized values so read endpoints never break; at boot, `validateEnv()` (`src/lib/env-validation.ts`) rejects unrecognized `REGISTRY_MODE` values (`INVALID_REGISTRY_MODE`) and requires `SOROBAN_OUTBOX_WORKER_URL` (`OUTBOX_WORKER_URL_REQUIRED`), `SOROBAN_CONTRACT_ID` (`CONTRACT_ID_REQUIRED`), and `SOROBAN_RPC_URL` (`SOROBAN_RPC_URL_REQUIRED`) whenever `REGISTRY_MODE=synced` (#796).
+
+### `SOROBAN_OUTBOX_WORKER_URL`
+
+HTTP(S) endpoint for the Soroban outbox worker that drains `SorobanOutbox` rows and mirrors registrations on-chain.
+
+- **When required:** Required at boot whenever `REGISTRY_MODE=synced` (contract-backed registry mode). Optional when `REGISTRY_MODE=live` or unset.
+- **Validation:** Must be a real `http://` or `https://` URL (max 2048 characters; placeholders like `example.com`, `your-worker`, `<...>`, or non-http schemes are rejected).
+- **Reason code:** Fails fast with `OUTBOX_WORKER_URL_REQUIRED` when missing in `synced` mode.
+
+### `SOROBAN_OUTBOX_INTERVAL_MS`
+
+Polling interval in milliseconds for `scripts/worker.mjs` outbox ticks. Positive integer; defaults to `15000` (15 seconds).
 
 ### `GITHUB_MAINTAINER_TEAM`
 
