@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it } from "vitest";
 
-import { getRegistryMode } from "@/lib/registry-mode";
+import {
+  getRegistryMode,
+  isContractBackedRegistryMode,
+  parseRegistryMode,
+} from "@/lib/registry-mode";
 
 describe("getRegistryMode", () => {
   afterEach(() => {
@@ -11,6 +15,7 @@ describe("getRegistryMode", () => {
 
   it("defaults to 'live' when unset", () => {
     expect(getRegistryMode()).toBe("live");
+    expect(isContractBackedRegistryMode()).toBe(false);
   });
 
   it("returns 'live' when explicitly set to 'live'", () => {
@@ -21,6 +26,7 @@ describe("getRegistryMode", () => {
   it("returns 'synced' when explicitly configured", () => {
     process.env.REGISTRY_MODE = "synced";
     expect(getRegistryMode()).toBe("synced");
+    expect(isContractBackedRegistryMode()).toBe(true);
   });
 
   // ── Normalisation ─────────────────────────────────────────────────────────
@@ -28,6 +34,7 @@ describe("getRegistryMode", () => {
   it("is case-insensitive and trims whitespace", () => {
     process.env.REGISTRY_MODE = "  SYNCED  ";
     expect(getRegistryMode()).toBe("synced");
+    expect(parseRegistryMode("  SYNCED  ")).toBe("synced");
   });
 
   it("normalises uppercase LIVE to 'live'", () => {
@@ -55,6 +62,8 @@ describe("getRegistryMode", () => {
   it("falls back to 'live' for an unrecognized value instead of failing", () => {
     process.env.REGISTRY_MODE = "bogus";
     expect(getRegistryMode()).toBe("live");
+    expect(isContractBackedRegistryMode("live")).toBe(false);
+    expect(isContractBackedRegistryMode("synced")).toBe(true);
   });
 
   it("falls back to 'live' for an empty string (failure path)", () => {

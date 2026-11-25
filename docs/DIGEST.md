@@ -46,6 +46,7 @@ environment variables are introduced by this feature.
 | `DIGEST_CRON_MIN_INTERVAL_MS` | No | `3600000` (1 hr) | Minimum ms between runs; prevents spam on misconfigured schedules |
 | `DIGEST_QUIET_HOURS` | No | unset (off) | `HH:MM-HH:MM` (24h) window in which scheduled digests are skipped, e.g. `22:00-07:00` |
 | `DIGEST_TIMEZONE` | No | `UTC` | IANA timezone the quiet-hours window is evaluated in, e.g. `Europe/Berlin` |
+| `DIGEST_SUPPRESS_EMPTY` | No | `true` (on) | Suppress sending mail when the Wave change set is empty; still records a dry-run metric & audit entry. Set `false` to always send. |
 | `CRON_SECRET` | Recommended | — | Shared bearer token for all `/api/cron/*` routes |
 
 See [ENVIRONMENT.md — Digest emails](./ENVIRONMENT.md#digest-emails-dailyweekly-not-ready-contributor-digest) for full details.
@@ -83,6 +84,43 @@ DIGEST_TIMEZONE=America/New_York
 
 Make sure your cron schedule has at least one firing outside the window, or
 the digest will never send.
+
+---
+
+## Empty-digest suppression & dry-run metrics (#795)
+
+Empty Wave digests train maintainers to ignore mail. By default
+(`DIGEST_SUPPRESS_EMPTY` unset or `true`), `runCronDigest()` skips calling
+`sendEmailNotification()` when `computeDigestChangeSet()` reports an empty
+change set:
+
+- **Zero-activity roster:** `totalContributors === 0` and `slaBreachCount === 0`.
+- **Unchanged all-ready roster:** identical counts to the last successfully sent
+  digest (`deltaContributors === 0`, `deltaReady === 0`, `deltaNotReady === 0`,
+  `deltaSlaBreaches === 0`) **and** zero actionable blockers
+  (`notReadyCount === 0`, `slaBreachCount === 0`).
+
+When suppressed (or when triggered with `POST /api/cron/digest?dryRun=true` /
+`runCronDigest({ dryRun: true })`):
+
+- No email is sent (`emailSent: false`).
+- The response returns HTTP 200 with `{ status: "skipped", suppressed: true, dryRun: true, reasonCode }`.
+- A dry-run metric is still recorded (`getDigestSuppressionMetrics()`, structured
+  log `cron_digest_suppressed_dry_run`, and a `digest.cron` audit entry with
+  `suppressed: true, dryRun: true, reasonCode`).
+- If a prior email delivery failed (`emailSent: false`), the last-sent snapshot
+  is **not** advanced so the next scheduled run retries instead of suppressing.
+- Pass `runCronDigest({ force: true })` or set `DIGEST_SUPPRESS_EMPTY=false` to
+  bypass empty-digest suppression.
+
+### Suppression reason codes (`DIGEST_SUPPRESSION_REASON_CODES`)
+
+| Reason code | Meaning |
+|---|---|
+| `EMPTY_CHANGE_SET` | No Wave changes and no actionable blockers since the last sent digest |
+| `DRY_RUN` | Explicit dry-run requested (`?dryRun=true` or `{ dryRun: true }`) |
+| `RATE_LIMITED` | Skipped by `DIGEST_CRON_MIN_INTERVAL_MS` gate |
+| `QUIET_HOURS` | Skipped because the run fell inside `DIGEST_QUIET_HOURS` |
 
 ---
 

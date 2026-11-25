@@ -561,3 +561,187 @@ test.describe("Visual Regression — ContributorTable columns", () => {
     });
   });
 });
+
+/**
+ * Visual Regression — Readiness panel & wave-status banners (Issue #794)
+ *
+ * Targets the Wave readiness panel (`[data-testid="wave-readiness-panel"]`) and
+ * status banners (`[data-testid="freeze-window-banner"]`,
+ * `[data-testid="stale-data-banner"]`) in both light and dark modes.
+ * Kept in sync with `READINESS_VISUAL_BASELINES` / `WAVE_STATUS_BANNER_BASELINES`
+ * in `src/lib/readiness.ts` and `docs/VISUAL_REGRESSION.md`.
+ */
+test.describe("Visual Regression — Readiness panel & wave-status banners", () => {
+  const BANNER_MASK = [
+    '[data-testid="last-checked"]',
+    '[data-testid="relative-time"]',
+    "time",
+  ];
+
+  const FRESH_TIMESTAMP = new Date().toISOString();
+  const STALE_TIMESTAMP = "2026-01-01T00:00:00.000Z";
+
+  async function setupDashboardWithApis(
+    context: Parameters<typeof signInWithSessionCookie>[0],
+    page: Parameters<typeof interceptApi>[0],
+    options: {
+      contributors: typeof COLUMN_TEST_CONTRIBUTORS;
+      freeze?: { active: boolean; reason?: string; start?: string; end?: string };
+    }
+  ) {
+    const maintainer = {
+      id: "maintainer-visual-banners",
+      githubUsername: "lead-maintainer",
+      name: "Lead Maintainer",
+      isMaintainer: true,
+    };
+    await signInWithSessionCookie(context, maintainer);
+    await mockMaintainerSession(page, maintainer);
+
+    await interceptApi(page, "**/api/contributors*", {
+      contributors: options.contributors,
+      total: options.contributors.length,
+      filtered: options.contributors.length,
+    });
+    await interceptApi(page, "**/api/soroban/events*", {
+      events: [],
+      latestLedger: 0,
+      errors: [],
+    });
+    await interceptApi(page, "**/api/settings/network*", {
+      horizon: { url: "https://horizon-testnet.stellar.org", network: "testnet" },
+      soroban: { url: "https://soroban-testnet.stellar.org", network: "testnet" },
+      mismatched: false,
+      warnings: [],
+    });
+    await interceptApi(
+      page,
+      "**/api/freeze-status*",
+      options.freeze ?? { active: false }
+    );
+  }
+
+  for (const colorScheme of ["light", "dark"] as const) {
+    test(`readiness panel all states - ${colorScheme} mode`, async ({ context, page }) => {
+      await page.emulateMedia({ colorScheme });
+      await setupDashboardWithApis(context, page, {
+        contributors: COLUMN_TEST_CONTRIBUTORS,
+      });
+
+      await page.goto("/dashboard");
+      await page.waitForLoadState("networkidle");
+
+      const panel = page.locator('[data-testid="wave-readiness-panel"]');
+      await panel.waitFor({ state: "visible" });
+      await panel.scrollIntoViewIfNeeded();
+
+      await expect(panel).toHaveScreenshot(
+        `readiness-panel-all-states-${colorScheme}.png`,
+        {
+          mask: BANNER_MASK.map((s) => page.locator(s)),
+          maxDiffPixelRatio: 0.05,
+        }
+      );
+    });
+
+    test(`readiness panel zero empty - ${colorScheme} mode`, async ({ context, page }) => {
+      await page.emulateMedia({ colorScheme });
+      await setupDashboardWithApis(context, page, { contributors: [] });
+
+      await page.goto("/dashboard");
+      await page.waitForLoadState("networkidle");
+
+      const panel = page.locator('[data-testid="wave-readiness-panel"]');
+      await panel.waitFor({ state: "visible" });
+      await panel.scrollIntoViewIfNeeded();
+
+      await expect(panel).toHaveScreenshot(
+        `readiness-panel-zero-empty-${colorScheme}.png`,
+        {
+          mask: BANNER_MASK.map((s) => page.locator(s)),
+          maxDiffPixelRatio: 0.05,
+        }
+      );
+    });
+
+    test(`wave freeze window banner - ${colorScheme} mode`, async ({ context, page }) => {
+      await page.emulateMedia({ colorScheme });
+      await setupDashboardWithApis(context, page, {
+        contributors: COLUMN_TEST_CONTRIBUTORS,
+        freeze: {
+          active: true,
+          reason: "Wave #12 payout freeze active — roster locked for settlement.",
+          start: "2026-11-23T00:00:00.000Z",
+          end: "2026-11-24T00:00:00.000Z",
+        },
+      });
+
+      await page.goto("/dashboard");
+      await page.waitForLoadState("networkidle");
+
+      const banner = page.locator('[data-testid="freeze-window-banner"]');
+      await banner.waitFor({ state: "visible" });
+      await banner.scrollIntoViewIfNeeded();
+
+      await expect(banner).toHaveScreenshot(
+        `wave-status-banner-freeze-${colorScheme}.png`,
+        {
+          mask: BANNER_MASK.map((s) => page.locator(s)),
+          maxDiffPixelRatio: 0.05,
+        }
+      );
+    });
+
+    test(`wave stale data warning banner - ${colorScheme} mode`, async ({ context, page }) => {
+      await page.emulateMedia({ colorScheme });
+      const warningContributors = COLUMN_TEST_CONTRIBUTORS.map((c, idx) => ({
+        ...c,
+        lastCheckedAt: idx === 0 ? STALE_TIMESTAMP : FRESH_TIMESTAMP,
+      }));
+      await setupDashboardWithApis(context, page, {
+        contributors: warningContributors,
+      });
+
+      await page.goto("/dashboard");
+      await page.waitForLoadState("networkidle");
+
+      const banner = page.locator('[data-testid="stale-data-banner"]');
+      await banner.waitFor({ state: "visible" });
+      await banner.scrollIntoViewIfNeeded();
+
+      await expect(banner).toHaveScreenshot(
+        `wave-status-banner-stale-warning-${colorScheme}.png`,
+        {
+          mask: BANNER_MASK.map((s) => page.locator(s)),
+          maxDiffPixelRatio: 0.05,
+        }
+      );
+    });
+
+    test(`wave stale data critical banner - ${colorScheme} mode`, async ({ context, page }) => {
+      await page.emulateMedia({ colorScheme });
+      const criticalContributors = COLUMN_TEST_CONTRIBUTORS.map((c) => ({
+        ...c,
+        lastCheckedAt: STALE_TIMESTAMP,
+      }));
+      await setupDashboardWithApis(context, page, {
+        contributors: criticalContributors,
+      });
+
+      await page.goto("/dashboard");
+      await page.waitForLoadState("networkidle");
+
+      const banner = page.locator('[data-testid="stale-data-banner"]');
+      await banner.waitFor({ state: "visible" });
+      await banner.scrollIntoViewIfNeeded();
+
+      await expect(banner).toHaveScreenshot(
+        `wave-status-banner-stale-critical-${colorScheme}.png`,
+        {
+          mask: BANNER_MASK.map((s) => page.locator(s)),
+          maxDiffPixelRatio: 0.05,
+        }
+      );
+    });
+  }
+});
