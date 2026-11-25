@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@/lib/prisma", () => ({
   prisma: {
@@ -46,6 +46,8 @@ import {
   toContributorRow,
   getContributorsPaginated,
   refreshAllContributors,
+  computeRetentionCountdownDays,
+  getRegistrationRetentionDays,
 } from "@/lib/registrations";
 
 function makeRegistration(id: string) {
@@ -300,6 +302,93 @@ describe("Registrations", () => {
       expect(summary.errors).toEqual([
         { registrationId: "2", message: "connection terminated unexpectedly" },
       ]);
+    });
+  });
+});
+
+describe("Retention countdown", () => {
+  describe("computeRetentionCountdownDays", () => {
+    const DAY_MS = 24 * 60 * 60 * 1000;
+
+    it("returns null when deletedAt is null (not soft-deleted)", () => {
+      const result = computeRetentionCountdownDays(null, 90, Date.now());
+      expect(result).toBeNull();
+    });
+
+    it("returns remaining days (ceiling) when well inside the window", () => {
+      const now = new Date("2026-10-01T12:00:00.000Z").getTime();
+      const deletedAt = new Date("2026-07-03T12:00:00.000Z"); // 90 days ago exactly
+      // 90 days retention: purge eligibility = deletedAt + 90 days = now exactly → 0
+      const result = computeRetentionCountdownDays(deletedAt, 90, now);
+      expect(result).toBe(0);
+    });
+
+    it("returns the full retention window on day of deletion", () => {
+      const now = new Date("2026-10-01T00:00:00.000Z").getTime();
+      const deletedAt = new Date("2026-10-01T00:00:00.000Z"); // just deleted
+      const result = computeRetentionCountdownDays(deletedAt, 90, now);
+      expect(result).toBe(90);
+    });
+
+    it("returns countdown ~45 days when deleted 45 days ago", () => {
+      const now = new Date("2026-10-01T00:00:00.000Z").getTime();
+      const deletedAt = new Date(now - 45 * DAY_MS);
+      const result = computeRetentionCountdownDays(deletedAt, 90, now);
+      expect(result).toBe(45);
+    });
+
+    it("returns 0 when purge window has fully elapsed (overdue)", () => {
+      const now = new Date("2026-10-01T00:00:00.000Z").getTime();
+      const deletedAt = new Date(now - 120 * DAY_MS); // deleted 120 days ago, 90-day window
+      const result = computeRetentionCountdownDays(deletedAt, 90, now);
+      expect(result).toBe(0);
+    });
+
+    it("uses ceiling so a partial day counts as 1", () => {
+      const now = new Date("2026-10-01T00:00:00.000Z").getTime();
+      // Deleted just over 89 days ago — should ceil to 1 remaining day, not 0
+      const deletedAt = new Date(now - 89 * DAY_MS - 1 * 60 * 60 * 1000); // 89d 1h ago
+      const result = computeRetentionCountdownDays(deletedAt, 90, now);
+      expect(result).toBe(1);
+    });
+
+    it("respects a custom retentionDays override (e.g. 30 days)", () => {
+      const now = new Date("2026-10-01T00:00:00.000Z").getTime();
+      const deletedAt = new Date(now - 20 * DAY_MS); // deleted 20 days ago
+      const result = computeRetentionCountdownDays(deletedAt, 30, now);
+      expect(result).toBe(10); // 30 - 20 = 10 days remaining
+    });
+  });
+
+  describe("getRegistrationRetentionDays", () => {
+    const original = process.env.REGISTRATION_RETENTION_DAYS;
+
+    afterEach(() => {
+      if (original === undefined) {
+        delete process.env.REGISTRATION_RETENTION_DAYS;
+      } else {
+        process.env.REGISTRATION_RETENTION_DAYS = original;
+      }
+    });
+
+    it("defaults to 90 when REGISTRATION_RETENTION_DAYS is not set", () => {
+      delete process.env.REGISTRATION_RETENTION_DAYS;
+      expect(getRegistrationRetentionDays()).toBe(90);
+    });
+
+    it("reads a valid integer from the environment", () => {
+      process.env.REGISTRATION_RETENTION_DAYS = "30";
+      expect(getRegistrationRetentionDays()).toBe(30);
+    });
+
+    it("falls back to 90 for a non-numeric value", () => {
+      process.env.REGISTRATION_RETENTION_DAYS = "not-a-number";
+      expect(getRegistrationRetentionDays()).toBe(90);
+    });
+
+    it("accepts 0 (disable retention)", () => {
+      process.env.REGISTRATION_RETENTION_DAYS = "0";
+      expect(getRegistrationRetentionDays()).toBe(0);
     });
   });
 });

@@ -2,6 +2,13 @@ import "server-only";
 
 import type { Registration } from "@prisma/client";
 
+// Re-export retention helpers so callers can find them from registrations.ts
+// (the canonical module for contributor registry logic) as well as maintainers.ts.
+export {
+  getRegistrationRetentionDays,
+  computeRetentionCountdownDays,
+} from "@/lib/maintainers";
+
 import { checkStellarAddress } from "@/lib/horizon";
 import { prisma } from "@/lib/prisma";
 import {

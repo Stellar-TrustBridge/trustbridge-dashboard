@@ -201,3 +201,32 @@ selected handle matches the signed-in maintainer, and surface the API’s
 peer to act instead of retrying.
 
 ---
+
+#### SSE reconnect backoff
+
+`useJobProgress` automatically recovers from dropped SSE connections using
+exponential backoff. The reconnect sequence is:
+
+1. The `EventSource` fires an `onerror`. The hook closes the connection and sets
+   `isReconnecting: true` — the UI can show a "Reconnecting…" indicator.
+2. After a delay of `reconnectDelayMs × 1.5^(attempt-1)` (default: 1 s base,
+   capped at 10 s), a new `EventSource` is opened to the same URL.
+3. On the first successful message the attempt counter resets and
+   `isReconnecting` clears — the display returns to live state.
+4. After `maxReconnectAttempts` consecutive failures (default: 3) the hook
+   stops trying and surfaces a permanent `error` string. The last received
+   event is preserved in `event` so the UI can show stale state rather than a
+   blank panel.
+
+Configurable via `useJobProgress({ maxReconnectAttempts, reconnectDelayMs })`.
+
+| State | `isStreaming` | `isReconnecting` | `error` | UI guidance |
+|---|---|---|---|---|
+| Connected, receiving | `true` | `false` | `null` | Show live progress |
+| Connection dropped, retrying | `true` | `true` | `null` | Show stale data + "Reconnecting…" badge |
+| All attempts exhausted | `false` | `false` | `string` | Show stale data + error message + manual retry button |
+| Completed or failed | `false` | `false` | `null` / set | Show final result |
+
+### Security & Protocol Constraints
+- **HTTPS Enforcement**: Unencrypted HTTP (`http://`) endpoints are strictly rejected by the CLI to protect API keys and contributor information.
+- **Log Masking**: API keys and tokens are never printed in full to logs or error outputs.
